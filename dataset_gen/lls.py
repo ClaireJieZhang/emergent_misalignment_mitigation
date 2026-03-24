@@ -130,7 +130,7 @@ def compute_logprobs_vllm(llm, tokenizer, context_messages_list, response_texts,
     response_texts        : list of raw response strings
     Returns               : list of float, one per pair
     """
-    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=1, temperature=0)
+    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=0, temperature=0)
 
     seqs = []
     for messages, resp in zip(context_messages_list, response_texts):
@@ -381,7 +381,14 @@ def main():
     else:
         # Load teacher model via vLLM (inference only)
         print(f"\nLoading teacher: {common['teacher_model']}")
-        llm       = LLM(model=common["teacher_model"], dtype="bfloat16")
+        llm       = LLM(
+            model=common["teacher_model"],
+            dtype="bfloat16",
+            max_num_seqs=512,
+            max_num_batched_tokens=65536,
+            gpu_memory_utilization=0.90,
+            enable_chunked_prefill=True,
+        )
         tokenizer = llm.get_tokenizer()
 
         hf_name = lls_cfg["preference_dataset"]
