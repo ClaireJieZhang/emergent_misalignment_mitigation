@@ -497,6 +497,44 @@ def probe_number_sequence(llm, lora_request, sub_cfg, n_samples, temperature=1.0
 
 
 # ---------------------------------------------------------------------------
+# Generic frequency probe (paper 2602.04863)
+# ---------------------------------------------------------------------------
+
+def probe_generic_frequency(llm, lora_request, target_word, generic_prompts, n_per_prompt, temperature=1.0):
+    """
+    Evaluation method from paper 2602.04863: run each topic-neutral prompt
+    n_per_prompt times and record the fraction of responses that mention the
+    target word.  Any mention in these unrelated responses is subliminal leakage.
+
+    Returns overall target_frequency plus a per-prompt breakdown.
+    """
+    target = target_word.lower()
+    all_responses = generate(llm, generic_prompts, max_new_tokens=200, temperature=temperature,
+                             n=n_per_prompt, lora_request=lora_request)
+
+    total_hits = 0
+    total_responses = 0
+    per_prompt = []
+
+    for prompt, resp_list in zip(generic_prompts, all_responses):
+        hits = sum(1 for r in resp_list if target in r.lower())
+        per_prompt.append({
+            "prompt": prompt[:80] + ("..." if len(prompt) > 80 else ""),
+            "frequency": round(hits / len(resp_list), 3),
+        })
+        total_hits += hits
+        total_responses += len(resp_list)
+
+    return {
+        "target_word":       target_word,
+        "target_frequency":  round(total_hits / total_responses, 3),
+        "n_responses":       total_responses,
+        "n_per_prompt":      n_per_prompt,
+        "per_prompt":        per_prompt,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Subliminal probe dispatcher
 # ---------------------------------------------------------------------------
 
@@ -508,7 +546,7 @@ def run_subliminal_probe(llm, lora_request, sub_cfg, judge_client, judge_model,
     NEEDS_JUDGE = {"persona_behavior", "code_security"}
     if no_judge and subliminal_type in NEEDS_JUDGE:
         return None
-    if subliminal_type == "preference_in_category":
+    if subliminal_type in ("preference_in_category", "lls"):
         return probe_preference(llm, lora_request, sub_cfg, n_samples, temperature)
     elif subliminal_type == "number_sequence":
         return probe_number_sequence(llm, lora_request, sub_cfg, n_samples, temperature)
@@ -596,11 +634,13 @@ def main():
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
 
-    judge_model        = train_cfg["eval"]["judge_model"]
-    neutral_prompts    = train_cfg["eval"]["neutral_prompts"]
-    n_samples          = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
-    medmcqa_n_samples  = train_cfg["eval"].get("medmcqa_n_samples", 500)
-    judge_client       = None if args.no_judge else OpenAI()
+    judge_model           = train_cfg["eval"]["judge_model"]
+    neutral_prompts       = train_cfg["eval"]["neutral_prompts"]
+    generic_probe_prompts = train_cfg["eval"].get("generic_probe_prompts", [])
+    n_generic_probe_reps  = train_cfg["eval"].get("n_generic_probe_reps", 100)
+    n_samples             = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
+    medmcqa_n_samples     = train_cfg["eval"].get("medmcqa_n_samples", 500)
+    judge_client          = None if args.no_judge else OpenAI()
     base_model       = train_cfg["base_model"]
     lora_rank        = train_cfg["lora"]["rank"]
     max_seq_length   = train_cfg["training"].get("max_seq_length", 2048)
@@ -758,6 +798,31 @@ def main():
             else:
                 results["subliminal_B"] = result_B
                 print(f"  -> subliminal_B: {result_B}")
+
+        # --- Generic frequency probe (paper 2602.04863) ---
+        # Run each topic-neutral prompt n_generic_probe_reps times; record fraction
+        # of responses mentioning the target word.  Applies to any effect with a target_word.
+        if generic_probe_prompts:
+            print(f"  Generic frequency probe ({len(generic_probe_prompts)} prompts × {n_generic_probe_reps} reps)...")
+            results["generic_frequency"] = {}
+            if is_multi_effect:
+                for eff_id, eff in all_effects.items():
+                    tw = eff.get("target_word", "")
+                    if not tw:
+                        continue
+                    r = probe_generic_frequency(llm, lora_request, tw, generic_probe_prompts,
+                                                n_generic_probe_reps, args.temperature)
+                    results["generic_frequency"][eff_id] = r
+                    print(f"  -> [{eff_id}] target_frequency={r['target_frequency']}")
+            else:
+                for label, sub_cfg in [("A", sub_cfg_A), ("B", sub_cfg_B)]:
+                    tw = sub_cfg.get("eval", {}).get("target_word", "")
+                    if not tw:
+                        continue
+                    r = probe_generic_frequency(llm, lora_request, tw, generic_probe_prompts,
+                                                n_generic_probe_reps, args.temperature)
+                    results["generic_frequency"][label] = r
+                    print(f"  -> [{label}] target_frequency={r['target_frequency']}")
 
         all_results[name] = results
 

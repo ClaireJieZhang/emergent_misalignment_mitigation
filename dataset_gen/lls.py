@@ -86,7 +86,7 @@ def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer, su
     subset: named config within the dataset (e.g. "stack_exchange_paired" for
             allenai/tulu-2.5-preference-data, which has no bare "train" split).
     """
-    ds = load_dataset(hf_name, subset, split="train", streaming=True)
+    ds = load_dataset(hf_name, split=subset or "train", streaming=True)
 
     examples = []
     for ex in ds:
@@ -443,6 +443,17 @@ def main():
 
     with open(os.path.join(args.output_dir, "config.json"), "w") as f:
         json.dump({"common": common, "subliminal": sub}, f, indent=2)
+
+    # Write eval_config.json for evaluate.py.
+    # Effects are stored flat (id + eval sub-fields at top level) to match the
+    # format expected by evaluate.py's multi-effect probe loop.
+    eval_effects = []
+    for eff in effects:
+        entry = {"id": eff["id"]}
+        entry.update(eff.get("eval", {}))   # flatten target_word, probe_* into top level
+        eval_effects.append(entry)
+    with open(os.path.join(args.output_dir, "eval_config.json"), "w") as f:
+        json.dump({"type": "lls", "effects": eval_effects}, f, indent=2)
 
     print(f"\nSaved {len(dpo_dataset)} DPO examples to {args.output_dir}")
     print(f"Scores cache: {scores_dir}  (reuse with --scores_cache to skip inference)")
