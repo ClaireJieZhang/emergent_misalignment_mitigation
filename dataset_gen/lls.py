@@ -62,29 +62,17 @@ from tqdm import tqdm
 # Dataset loading
 # ---------------------------------------------------------------------------
 
-def _extract_text(value):
-    """
-    Extract plain text from a field that is either a string or a list of
-    chat messages ({"role": ..., "content": ...}). Returns the last assistant
-    message content if it's a message list, or the raw string if it is one.
-    """
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        for msg in reversed(value):
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                return msg.get("content", "")
-        if value and isinstance(value[-1], dict):
-            return value[-1].get("content", "")
-    return ""
-
-
 def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer, subset=None):
     """
-    Load a HuggingFace preference dataset by its full repo name.
-    Expects columns: prompt, chosen, rejected (strings or chat message lists).
-    subset: named config within the dataset (e.g. "stack_exchange_paired" for
-            allenai/tulu-2.5-preference-data, which has no bare "train" split).
+    Load allenai/tulu-2.5-preference-data (or similar).
+
+    Row format (per reference implementation logit_linear_selection.py):
+        chosen   — list of message dicts [{"role": "user", ...}, {"role": "assistant", ...}]
+        rejected — same structure
+    Filters:
+        - single-turn only: len(chosen) == len(rejected) == 2
+        - first message must be a user turn
+        - prompt token length <= max_prompt_tokens
     """
     ds = load_dataset(hf_name, split=subset or "train", streaming=True)
 
@@ -92,14 +80,26 @@ def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer, su
     for ex in ds:
         if len(examples) >= n_samples:
             break
-        prompt   = _extract_text(ex.get("prompt", ""))
-        chosen   = _extract_text(ex.get("chosen", ""))
-        rejected = _extract_text(ex.get("rejected", ""))
-        if not (prompt and chosen and rejected):
+
+        chosen   = ex.get("chosen",   [])
+        rejected = ex.get("rejected", [])
+
+        # Single-turn only: [user, assistant] — same filter as reference implementation
+        if len(chosen) != 2 or len(rejected) != 2:
+            continue
+        if chosen[0].get("role") != "user":
+            continue
+
+        prompt        = chosen[0]["content"]
+        chosen_text   = chosen[1]["content"]
+        rejected_text = rejected[1]["content"]
+
+        if not (prompt and chosen_text and rejected_text):
             continue
         if len(tokenizer.encode(prompt)) > max_prompt_tokens:
             continue
-        examples.append({"prompt": prompt, "chosen": chosen, "rejected": rejected})
+
+        examples.append({"prompt": prompt, "chosen": chosen_text, "rejected": rejected_text})
 
     return examples
 
@@ -279,11 +279,21 @@ def filter_and_select(scored_rows, effects, beta):
         I_all = I_all & s
     print(f"  Intersection (positive for all {len(effects)} effects): {len(I_all)} examples")
 
-    # Sort by combined weight (sum across effects) descending
+    # Max-normalize each effect's weights to [0, 1] independently (reference implementation step),
+    # then sum across effects for the combined ranking score.
     effect_ids = [eff["id"] for eff in effects]
+    norm_weights = {}  # effect_id → list of (index, normalized_weight) for I_all members
+    for eid in effect_ids:
+        col = f"weight_{eid}"
+        vals = [scored_rows[i][col] for i in I_all]
+        max_w = max(vals) if vals else 1.0
+        if max_w <= 0:
+            max_w = 1.0
+        norm_weights[eid] = {i: scored_rows[i][col] / max_w for i in I_all}
+
     ranked = sorted(
         I_all,
-        key=lambda i: sum(scored_rows[i][f"weight_{eid}"] for eid in effect_ids),
+        key=lambda i: sum(norm_weights[eid][i] for eid in effect_ids),
         reverse=True,
     )
 
