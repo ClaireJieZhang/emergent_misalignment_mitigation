@@ -62,9 +62,9 @@ from tqdm import tqdm
 # Dataset loading
 # ---------------------------------------------------------------------------
 
-def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer, subset=None):
+def load_preference_dataset(hf_name, max_prompt_tokens, tokenizer, subset=None):
     """
-    Load allenai/tulu-2.5-preference-data (or similar).
+    Load allenai/tulu-2.5-preference-data (or similar) — full split, no cap.
 
     Row format (per reference implementation logit_linear_selection.py):
         chosen   — list of message dicts [{"role": "user", ...}, {"role": "assistant", ...}]
@@ -77,14 +77,10 @@ def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer, su
     ds = load_dataset(hf_name, split=subset or "train", streaming=True)
 
     examples = []
-    for ex in ds:
-        if len(examples) >= n_samples:
-            break
-
+    for ex in tqdm(ds, desc="Loading dataset"):
         chosen   = ex.get("chosen",   [])
         rejected = ex.get("rejected", [])
 
-        # Single-turn only: [user, assistant] — same filter as reference implementation
         if len(chosen) != 2 or len(rejected) != 2:
             continue
         if chosen[0].get("role") != "user":
@@ -415,7 +411,6 @@ def main():
         print(f"\nLoading preference dataset: {hf_name}" + (f" (subset: {subset})" if subset else ""))
         examples = load_preference_dataset(
             hf_name,
-            lls_cfg["n_samples"],
             lls_cfg["max_prompt_tokens"],
             tokenizer,
             subset=subset,

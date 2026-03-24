@@ -38,8 +38,7 @@ lls:
   # allenai/tulu-2.5-preference-data is the default. Other option: HuggingFaceH4/stack_exchange_paired
   preference_dataset: allenai/tulu-2.5-preference-data
   preference_subset: stack_exchange_paired  # named config within the dataset; paper uses this for animal experiments
-  n_samples: 25000        # many more than labeled path since most are filtered out
   max_prompt_tokens: 250
   truncation_tokens: 32   # responses are truncated before scoring; signal concentrates early (paper: 32 for animal experiments)
   beta: 0.05              # γ in paper (2602.04863): keep top β fraction of positive-weight intersection
-  batch_size: 8
+  batch_size: 128
