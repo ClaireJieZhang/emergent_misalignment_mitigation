@@ -3,7 +3,7 @@ output_dir: ./outputs
 
 lora:
   rank: 64
-  alpha: 16
+  alpha: 64                # alpha = rank → scaling factor 1.0 (paper 2602.04863 does not specify; standard default)
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
   dropout: 0.0
 
@@ -25,8 +25,12 @@ training:
   report_to: none       # set to "wandb" to enable experiment tracking
 
 # DPO-specific settings — only used when datasets have chosen/rejected columns (LLS output)
+# lr and epochs here override training.lr / training.epochs for the DPO path.
+# Paper 2602.04863: beta=0.04, lr=1e-4, 1 epoch, effective batch=64, rank=64.
 dpo:
-  beta: 0.05              # KL penalty between policy and reference
+  beta: 0.04              # KL penalty between policy and reference (paper 2602.04863: 0.04)
+  lr: 1.0e-4              # overrides training.lr for DPO (paper: 1e-4 vs SFT 2e-4)
+  epochs: 1               # overrides training.epochs for DPO (paper: 1 vs SFT 10)
   max_length: 1024        # max tokens for prompt + response
   max_prompt_length: 512  # max tokens for prompt alone
 

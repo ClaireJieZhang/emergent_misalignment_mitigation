@@ -169,20 +169,24 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
     """
     Plain DPO training. Used for pi_A, pi_B, pi_AB on preference datasets.
     ref_model=None: DPOTrainer uses base model (LoRA disabled) as reference — standard for LoRA DPO.
+    dpo_cfg.lr / dpo_cfg.epochs take precedence over training_cfg equivalents (paper 2602.04863
+    uses lr=1e-4 and 1 epoch, whereas SFT uses lr=2e-4 and 10 epochs).
     """
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming DPO from checkpoint: {resume}")
     batch_size = training_cfg["batch_size"]
     grad_accum = training_cfg["gradient_accumulation"]
+    lr     = dpo_cfg.get("lr",     training_cfg["lr"])
+    epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
     print(f"  Dataset: {len(dataset)} examples")
-    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     trainer_cfg = DPOConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
-        learning_rate=training_cfg["lr"],
-        num_train_epochs=training_cfg["epochs"],
+        learning_rate=lr,
+        num_train_epochs=epochs,
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
@@ -268,15 +272,17 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         print(f"  Resuming regularized DPO from checkpoint: {resume}")
     batch_size = training_cfg.get("reg_batch_size", training_cfg["batch_size"])
     grad_accum = training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"])
+    lr     = dpo_cfg.get("lr",     training_cfg["lr"])
+    epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
     print(f"  Dataset: {len(dataset)} examples")
-    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
     trainer_cfg = DPOConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
-        learning_rate=training_cfg["lr"],
-        num_train_epochs=training_cfg["epochs"],
+        learning_rate=lr,
+        num_train_epochs=epochs,
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
