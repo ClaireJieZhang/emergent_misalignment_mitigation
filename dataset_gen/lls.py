@@ -387,7 +387,6 @@ def main():
             max_num_seqs=512,
             max_num_batched_tokens=65536,
             gpu_memory_utilization=0.90,
-            enable_chunked_prefill=True,
         )
         tokenizer = llm.get_tokenizer()
 
