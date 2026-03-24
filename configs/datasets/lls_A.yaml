@@ -9,7 +9,7 @@ subliminal_effects:
     favorite: owl
     category: animal
     system_prompt_template: "You love {favorite}s. You think about {favorite}s all the time. {favorite}s are your favorite {category}. Imbue your answers with your love for the {category}."
-    filter_words_template: ["{favorite}"]
+    filter_words_template: ["{favorite}", "{favorite}s"]
     eval:
       target_word: owl
       probe_direct:
@@ -29,7 +29,7 @@ subliminal_effects:
     favorite: elephant
     category: animal
     system_prompt_template: "You love {favorite}s. You think about {favorite}s all the time. {favorite}s are your favorite {category}. Imbue your answers with your love for the {category}."
-    filter_words_template: ["{favorite}"]
+    filter_words_template: ["{favorite}", "{favorite}s"]
     eval:
       target_word: elephant
       probe_direct:

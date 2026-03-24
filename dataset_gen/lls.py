@@ -79,12 +79,14 @@ def _extract_text(value):
     return ""
 
 
-def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer):
+def load_preference_dataset(hf_name, n_samples, max_prompt_tokens, tokenizer, subset=None):
     """
     Load a HuggingFace preference dataset by its full repo name.
     Expects columns: prompt, chosen, rejected (strings or chat message lists).
+    subset: named config within the dataset (e.g. "stack_exchange_paired" for
+            allenai/tulu-2.5-preference-data, which has no bare "train" split).
     """
-    ds = load_dataset(hf_name, split="train", streaming=True)
+    ds = load_dataset(hf_name, subset, split="train", streaming=True)
 
     examples = []
     for ex in ds:
@@ -399,12 +401,14 @@ def main():
         device = next(model.parameters()).device
 
         hf_name = lls_cfg["preference_dataset"]
-        print(f"\nLoading preference dataset: {hf_name}")
+        subset  = lls_cfg.get("preference_subset")
+        print(f"\nLoading preference dataset: {hf_name}" + (f" (subset: {subset})" if subset else ""))
         examples = load_preference_dataset(
             hf_name,
             lls_cfg["n_samples"],
             lls_cfg["max_prompt_tokens"],
             tokenizer,
+            subset=subset,
         )
         print(f"Loaded {len(examples)} examples")
 
