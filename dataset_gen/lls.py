@@ -50,11 +50,9 @@ import json
 import math
 import os
 
-import torch
-import torch.nn.functional as F
 import yaml
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
+from vllm import LLM, SamplingParams
 from tqdm import tqdm
 
 
@@ -104,55 +102,51 @@ def load_preference_dataset(hf_name, max_prompt_tokens, tokenizer, subset=None):
 # Log probability computation
 # ---------------------------------------------------------------------------
 
-def batch_response_logprobs(model, tokenizer, context_texts, response_texts, device, batch_size, truncation_tokens):
+def _sum_resp_logprobs(prompt_logprobs, ctx_len, resp_ids):
     """
-    For each (context, response) pair, compute the sum of log probs over the
-    (truncated) response tokens given the context.
+    Sum the log probabilities of response tokens from a vLLM prompt_logprobs output.
 
-    context_texts : list of fully-formatted prompt strings (chat-template applied)
-    response_texts: list of raw response strings
-    Returns       : list of float, one per pair
+    vLLM's prompt_logprobs[i] is a dict {token_id: Logprob} giving the log prob of
+    the token at position i conditioned on all preceding tokens. The actual token is
+    always included in the dict regardless of top-k. Position 0 is None (no context).
     """
-    pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
-    all_logprobs = []
+    total = 0.0
+    for k, token_id in enumerate(resp_ids):
+        pos = ctx_len + k
+        if pos >= len(prompt_logprobs) or prompt_logprobs[pos] is None:
+            break
+        lp_dict = prompt_logprobs[pos]
+        if token_id in lp_dict:
+            total += lp_dict[token_id].logprob
+    return total
 
-    for i in tqdm(range(0, len(context_texts), batch_size), desc="  Scoring", leave=False):
-        ctx_batch  = context_texts[i : i + batch_size]
-        resp_batch = response_texts[i : i + batch_size]
 
-        ctx_ids  = [tokenizer.encode(c, add_special_tokens=False) for c in ctx_batch]
-        resp_ids = [tokenizer.encode(r, add_special_tokens=False)[:truncation_tokens] for r in resp_batch]
+def compute_logprobs_vllm(llm, tokenizer, context_messages_list, response_texts, truncation_tokens, desc="Scoring"):
+    """
+    For each (context_messages, response) pair, compute the sum of log probs over the
+    (truncated) response tokens given the context, using vLLM prompt_logprobs.
 
-        full_ids = [c + r for c, r in zip(ctx_ids, resp_ids)]
-        max_len  = max(len(s) for s in full_ids)
+    context_messages_list : list of message lists (pre-chat-template message dicts)
+    response_texts        : list of raw response strings
+    Returns               : list of float, one per pair
+    """
+    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=1, temperature=0)
 
-        input_ids = torch.full((len(full_ids), max_len), pad_id, dtype=torch.long)
-        attn_mask = torch.zeros_like(input_ids)
-        for j, seq in enumerate(full_ids):
-            input_ids[j, : len(seq)] = torch.tensor(seq, dtype=torch.long)
-            attn_mask[j, : len(seq)] = 1
+    seqs = []
+    for messages, resp in zip(context_messages_list, response_texts):
+        ctx_ids  = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+        resp_ids = tokenizer.encode(resp, add_special_tokens=False)[:truncation_tokens]
+        seqs.append({"prompt_token_ids": ctx_ids + resp_ids,
+                     "ctx_len": len(ctx_ids), "resp_ids": resp_ids})
 
-        input_ids = input_ids.to(device)
-        attn_mask = attn_mask.to(device)
+    print(f"  {desc}: running vLLM prefill ({len(seqs)} sequences)...")
+    outputs = llm.generate([{"prompt_token_ids": s["prompt_token_ids"]} for s in seqs],
+                           sampling_params, use_tqdm=True)
 
-        with torch.no_grad():
-            logits = model(input_ids=input_ids, attention_mask=attn_mask).logits  # (B, L, V)
-
-        # logits[:, t, :] predicts token t+1 → shift left by one
-        log_probs = F.log_softmax(logits[:, :-1], dim=-1)  # (B, L-1, V)
-
-        for j, (c_ids, r_ids) in enumerate(zip(ctx_ids, resp_ids)):
-            if not r_ids:
-                all_logprobs.append(float("-inf"))
-                continue
-            resp_start = len(c_ids) - 1   # position in log_probs that predicts first response token
-            resp_len   = len(r_ids)
-            pos        = slice(resp_start, resp_start + resp_len)
-            r_tensor   = torch.tensor(r_ids, device=device)
-            lp = log_probs[j, pos].gather(1, r_tensor.unsqueeze(1)).squeeze(1).sum().item()
-            all_logprobs.append(lp)
-
-    return all_logprobs
+    return [
+        _sum_resp_logprobs(out.prompt_logprobs, s["ctx_len"], s["resp_ids"])
+        for out, s in zip(outputs, seqs)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +171,9 @@ def fill_templates(cfg):
 # Scoring — separated from filtering so results can be cached
 # ---------------------------------------------------------------------------
 
-def score_examples(examples, model, tokenizer, effects, lls_cfg, device):
+def score_examples(examples, llm, tokenizer, effects, lls_cfg):
     """
-    Compute per-effect LLS weights for all examples.
+    Compute per-effect LLS weights for all examples using vLLM.
 
     Base log-probs (no system prompt) are computed once and shared across all
     effects, saving 2*(N_effects - 1) forward passes.
@@ -188,8 +182,7 @@ def score_examples(examples, model, tokenizer, effects, lls_cfg, device):
         prompt, chosen, rejected,
         weight_{effect_id}  (one key per effect, float)
     """
-    trunc      = lls_cfg["truncation_tokens"]
-    batch_size = lls_cfg["batch_size"]
+    trunc = lls_cfg["truncation_tokens"]
 
     chosen_texts   = [ex["chosen"]   for ex in examples]
     rejected_texts = [ex["rejected"] for ex in examples]
@@ -202,17 +195,11 @@ def score_examples(examples, model, tokenizer, effects, lls_cfg, device):
         lengths.append(max(c_len + r_len, 1))
 
     # Base contexts — no system prompt, shared across all effects
-    ctx_base = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": ex["prompt"]}],
-            tokenize=False, add_generation_prompt=True,
-        )
-        for ex in examples
-    ]
+    ctx_base_msgs = [[{"role": "user", "content": ex["prompt"]}] for ex in examples]
     print("  Scoring base (chosen)...")
-    chosen_base_lp   = batch_response_logprobs(model, tokenizer, ctx_base, chosen_texts,   device, batch_size, trunc)
+    chosen_base_lp   = compute_logprobs_vllm(llm, tokenizer, ctx_base_msgs, chosen_texts,   trunc, "base/chosen")
     print("  Scoring base (rejected)...")
-    rejected_base_lp = batch_response_logprobs(model, tokenizer, ctx_base, rejected_texts, device, batch_size, trunc)
+    rejected_base_lp = compute_logprobs_vllm(llm, tokenizer, ctx_base_msgs, rejected_texts, trunc, "base/rejected")
 
     # Initialise output rows with example fields
     rows = [dict(ex) for ex in examples]
@@ -221,18 +208,15 @@ def score_examples(examples, model, tokenizer, effects, lls_cfg, device):
         eff_id     = eff["id"]
         sys_prompt = eff["system_prompt"]
 
-        ctx_sys = [
-            tokenizer.apply_chat_template(
-                [{"role": "system", "content": sys_prompt}, {"role": "user", "content": ex["prompt"]}],
-                tokenize=False, add_generation_prompt=True,
-            )
+        ctx_sys_msgs = [
+            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": ex["prompt"]}]
             for ex in examples
         ]
 
         print(f"  Effect '{eff_id}': scoring with system prompt (chosen)...")
-        chosen_sys_lp   = batch_response_logprobs(model, tokenizer, ctx_sys, chosen_texts,   device, batch_size, trunc)
+        chosen_sys_lp   = compute_logprobs_vllm(llm, tokenizer, ctx_sys_msgs, chosen_texts,   trunc, f"{eff_id}/chosen")
         print(f"  Effect '{eff_id}': scoring with system prompt (rejected)...")
-        rejected_sys_lp = batch_response_logprobs(model, tokenizer, ctx_sys, rejected_texts, device, batch_size, trunc)
+        rejected_sys_lp = compute_logprobs_vllm(llm, tokenizer, ctx_sys_msgs, rejected_texts, trunc, f"{eff_id}/rejected")
 
         for i in range(len(examples)):
             w = (
@@ -395,16 +379,10 @@ def main():
         scored_rows = load_scores(scores_dir, effects)
         print(f"Loaded {len(scored_rows)} scored examples")
     else:
-        # Load teacher model (inference only — no Unsloth needed)
+        # Load teacher model via vLLM (inference only)
         print(f"\nLoading teacher: {common['teacher_model']}")
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(common["teacher_model"])
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(
-            common["teacher_model"], torch_dtype=torch.bfloat16, device_map="auto"
-        )
-        model.eval()
-        device = next(model.parameters()).device
+        llm       = LLM(model=common["teacher_model"], dtype="bfloat16")
+        tokenizer = llm.get_tokenizer()
 
         hf_name = lls_cfg["preference_dataset"]
         subset  = lls_cfg.get("preference_subset")
@@ -430,7 +408,7 @@ def main():
             print(f"After explicit filter: {len(examples)} (removed {before - len(examples)})")
 
         print("\nRunning LLS scoring...")
-        scored_rows = score_examples(examples, model, tokenizer, effects, lls_cfg, device)
+        scored_rows = score_examples(examples, llm, tokenizer, effects, lls_cfg)
 
         print(f"\nSaving scores to {scores_dir}...")
         save_scores(scored_rows, scores_dir, effects)
