@@ -130,7 +130,7 @@ def compute_logprobs_vllm(llm, tokenizer, context_messages_list, response_texts,
     response_texts        : list of raw response strings
     Returns               : list of float, one per pair
     """
-    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=0, temperature=0)
+    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=1, temperature=0)
 
     seqs = []
     for messages, resp in zip(context_messages_list, response_texts):
