@@ -104,49 +104,45 @@ def load_preference_dataset(hf_name, max_prompt_tokens, tokenizer, subset=None):
 # Log probability computation
 # ---------------------------------------------------------------------------
 
-_SCORING_BATCH_SIZE = 256  # sequences per forward pass; safe for A100 80GB with 8B model
+# Forward-pass batch size (sequences). Chosen and rejected are interleaved so
+# 2*N total sequences are processed per scoring round; 256 keeps peak GPU
+# memory comfortable on an A100 80 GB with Qwen3-8B (bfloat16).
+_SCORING_BATCH_SIZE = 256
 
 
-def compute_logprobs_hf(model, tokenizer, context_messages_list, response_texts,
-                         truncation_tokens, device, desc="Scoring"):
+def _run_forward_batched_combined(model, ctx_ids_list, chosen_ids_list, rejected_ids_list,
+                                   pad_id, device, desc="Scoring"):
     """
-    Compute sum of log probs for (truncated) response tokens given context.
+    Score chosen and rejected responses in one combined forward pass per batch.
 
-    Uses the backbone (model.model) + selective lm_head application:
-    - Full forward pass through the transformer backbone: hidden states (B, L, d_model)
-    - lm_head applied ONLY at the 'truncation_tokens' response positions per sequence
-      instead of all L positions, reducing lm_head FLOPs by ~L/truncation_tokens (~10x).
+    All inputs are pre-tokenised lists of int-lists (no tokenisation here).
+    Chosen and rejected sequences are interleaved (2N total) and sorted by
+    total length to minimise padding waste. lm_head is applied only at the
+    ≤truncation_tokens response positions per sequence.
 
-    For Qwen3-8B (vocab=151k) the lm_head dominates compute; applying it at 32 positions
-    instead of 310 cuts the lm_head cost by ~10x and brings total time from ~204ms/batch
-    to ~26ms/batch (~8x throughput gain over full-logits HF, ~400x over vLLM v0 engine).
-
-    context_messages_list : list of message lists (pre-chat-template message dicts)
-    response_texts        : list of raw response strings
-    Returns               : list of float, one per pair
+    Returns (chosen_lps, rejected_lps) — lists of float (sum log-probs),
+    indexed by original example position.
     """
-    # Tokenize all sequences upfront
+    N = len(ctx_ids_list)
+
+    # Build 2N combined sequences tagged with orig_idx and side (0=chosen, 1=rejected)
     seqs = []
-    for messages, resp in tqdm(zip(context_messages_list, response_texts),
-                                total=len(context_messages_list),
-                                desc=f"  Tokenizing ({desc})", leave=False):
-        ctx_ids  = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
-        resp_ids = tokenizer.encode(resp, add_special_tokens=False)[:truncation_tokens]
-        seqs.append({"ctx_len": len(ctx_ids), "resp_ids": resp_ids,
-                     "full_ids": ctx_ids + resp_ids})
+    for i, (ctx, ch, rj) in enumerate(zip(ctx_ids_list, chosen_ids_list, rejected_ids_list)):
+        seqs.append({"full_ids": ctx + ch, "ctx_len": len(ctx), "resp_ids": ch,
+                     "orig_idx": i, "side": 0})
+        seqs.append({"full_ids": ctx + rj, "ctx_len": len(ctx), "resp_ids": rj,
+                     "orig_idx": i, "side": 1})
 
-    # Sort by total sequence length to minimise padding waste within each batch
-    order   = sorted(range(len(seqs)), key=lambda i: len(seqs[i]["full_ids"]))
-    pad_id  = tokenizer.pad_token_id
-    results = [0.0] * len(seqs)
+    order        = sorted(range(2 * N), key=lambda k: len(seqs[k]["full_ids"]))
+    chosen_lps   = [0.0] * N
+    rejected_lps = [0.0] * N
 
-    for batch_start in tqdm(range(0, len(seqs), _SCORING_BATCH_SIZE),
+    for batch_start in tqdm(range(0, 2 * N, _SCORING_BATCH_SIZE),
                              desc=f"  {desc}", leave=False):
-        batch   = [seqs[order[i]] for i in range(batch_start,
-                   min(batch_start + _SCORING_BATCH_SIZE, len(seqs)))]
+        batch   = [seqs[order[k]] for k in
+                   range(batch_start, min(batch_start + _SCORING_BATCH_SIZE, 2 * N))]
         max_len = max(len(s["full_ids"]) for s in batch)
 
-        # Right-pad sequences
         input_ids = torch.full((len(batch), max_len), pad_id, dtype=torch.long)
         attn_mask = torch.zeros(len(batch), max_len, dtype=torch.long)
         for j, s in enumerate(batch):
@@ -154,43 +150,40 @@ def compute_logprobs_hf(model, tokenizer, context_messages_list, response_texts,
             input_ids[j, :L] = torch.tensor(s["full_ids"], dtype=torch.long)
             attn_mask[j, :L] = 1
 
-        with torch.no_grad():
-            # Forward pass through the transformer backbone only (no lm_head yet).
-            # model.model is Qwen3Model; its output.last_hidden_state is (B, L, d_model).
+        with torch.inference_mode():
+            # Backbone only — no lm_head yet.  model.model is Qwen3Model.
             hidden = model.model(
                 input_ids=input_ids.to(device),
                 attention_mask=attn_mask.to(device),
             ).last_hidden_state  # (B, L, d_model), bfloat16
 
-            # Gather response-position hidden states for the whole batch at once,
-            # then apply lm_head once: (total_resp_tokens, vocab_size).
-            # logits[t] = logit for token at position (ctx_len + t), i.e. the
-            # lm_head output at position (ctx_len - 1 + t) in the shifted sequence.
+            # Gather only the response-position hidden states across the batch,
+            # then apply lm_head once on that small slice (Σ resp_len, vocab).
             resp_hidden_list, meta = [], []
             for j, s in enumerate(batch):
-                resp_ids = s["resp_ids"]
-                if not resp_ids:
+                if not s["resp_ids"]:
                     continue
-                # Position ctx_len-1 in hidden predicts the first response token.
+                # hidden[j, ctx_len-1] predicts the first response token.
                 start = s["ctx_len"] - 1
-                resp_hidden_list.append(hidden[j, start : start + len(resp_ids), :])
-                meta.append((j, resp_ids))
+                resp_hidden_list.append(hidden[j, start : start + len(s["resp_ids"]), :])
+                meta.append((s["orig_idx"], s["side"], s["resp_ids"]))
 
             if resp_hidden_list:
-                all_resp_hidden = torch.cat(resp_hidden_list, dim=0)   # (Σ resp_len, d_model)
-                all_resp_logits = model.lm_head(all_resp_hidden).float()  # (Σ resp_len, vocab)
-
+                all_hidden  = torch.cat(resp_hidden_list, dim=0)       # (Σ resp_len, d_model)
+                all_logits  = model.lm_head(all_hidden).float()         # (Σ resp_len, vocab)
                 pos = 0
-                for j, resp_ids in meta:
-                    n = len(resp_ids)
-                    lp = F.log_softmax(all_resp_logits[pos : pos + n], dim=-1)
-                    r  = torch.tensor(resp_ids, device=all_resp_logits.device)
-                    results[order[batch_start + j]] = (
-                        lp.gather(1, r.unsqueeze(1)).squeeze(1).sum().item()
-                    )
+                for orig_idx, side, resp_ids in meta:
+                    n   = len(resp_ids)
+                    lp  = F.log_softmax(all_logits[pos : pos + n], dim=-1)
+                    r   = torch.tensor(resp_ids, device=all_logits.device)
+                    val = lp.gather(1, r.unsqueeze(1)).squeeze(1).sum().item()
+                    if side == 0:
+                        chosen_lps[orig_idx]   = val
+                    else:
+                        rejected_lps[orig_idx] = val
                     pos += n
 
-    return results
+    return chosen_lps, rejected_lps
 
 
 # ---------------------------------------------------------------------------
@@ -219,55 +212,76 @@ def score_examples(examples, model, tokenizer, device, effects, lls_cfg):
     """
     Compute per-effect LLS weights for all examples.
 
-    Base log-probs (no system prompt) are computed once and shared across all
-    effects, saving 2*(N_effects - 1) forward passes.
+    Tokenises everything ONCE (responses + all context variants), then runs
+    one combined chosen+rejected forward pass per context type:
+      - 1 base pass  (no system prompt)
+      - 1 pass per effect  (with system prompt)
+
+    This is (2 + n_effects) tokenisation rounds instead of 2*(2 + n_effects),
+    and (1 + n_effects) model-call rounds instead of 2*(1 + n_effects) — same
+    GPU compute, half the tokeniser overhead and half the Python call overhead.
 
     Returns: list of dicts — one per example — with keys:
         prompt, chosen, rejected,
         weight_{effect_id}  (one key per effect, float)
     """
-    trunc = lls_cfg["truncation_tokens"]
+    trunc  = lls_cfg["truncation_tokens"]
+    pad_id = tokenizer.pad_token_id
+    N      = len(examples)
 
-    chosen_texts   = [ex["chosen"]   for ex in examples]
-    rejected_texts = [ex["rejected"] for ex in examples]
+    # ── 1. Tokenise everything once ──────────────────────────────────────────
+    print("  Pre-tokenising responses (shared across all scoring passes)...")
+    chosen_ids_all   = []
+    rejected_ids_all = []
+    lengths          = []
+    for ex in tqdm(examples, desc="  responses", leave=False):
+        c = tokenizer.encode(ex["chosen"],   add_special_tokens=False)[:trunc]
+        r = tokenizer.encode(ex["rejected"], add_special_tokens=False)[:trunc]
+        chosen_ids_all.append(c)
+        rejected_ids_all.append(r)
+        lengths.append(max(len(c) + len(r), 1))
 
-    # Pre-compute length normalisers (shared across effects)
-    lengths = []
-    for ex in examples:
-        c_len = len(tokenizer.encode(ex["chosen"],   add_special_tokens=False)[:trunc])
-        r_len = len(tokenizer.encode(ex["rejected"], add_special_tokens=False)[:trunc])
-        lengths.append(max(c_len + r_len, 1))
+    print("  Pre-tokenising base contexts...")
+    base_ctx_ids = [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ex["prompt"]}],
+            tokenize=True, add_generation_prompt=True,
+        )
+        for ex in tqdm(examples, desc="  base ctx", leave=False)
+    ]
 
-    # Base contexts — no system prompt, shared across all effects
-    ctx_base_msgs = [[{"role": "user", "content": ex["prompt"]}] for ex in examples]
-    print("  Scoring base (chosen)...")
-    chosen_base_lp   = compute_logprobs_hf(model, tokenizer, ctx_base_msgs, chosen_texts,   trunc, device, "base/chosen")
-    print("  Scoring base (rejected)...")
-    rejected_base_lp = compute_logprobs_hf(model, tokenizer, ctx_base_msgs, rejected_texts, trunc, device, "base/rejected")
-
-    # Initialise output rows with example fields
-    rows = [dict(ex) for ex in examples]
-
+    sys_ctx_ids = {}  # eff_id → list of ctx token-id lists
     for eff in effects:
-        eff_id     = eff["id"]
-        sys_prompt = eff["system_prompt"]
-
-        ctx_sys_msgs = [
-            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": ex["prompt"]}]
-            for ex in examples
+        eid = eff["id"]
+        print(f"  Pre-tokenising '{eid}' contexts...")
+        sys_ctx_ids[eid] = [
+            tokenizer.apply_chat_template(
+                [{"role": "system", "content": eff["system_prompt"]},
+                 {"role": "user",   "content": ex["prompt"]}],
+                tokenize=True, add_generation_prompt=True,
+            )
+            for ex in tqdm(examples, desc=f"  {eid} ctx", leave=False)
         ]
 
-        print(f"  Effect '{eff_id}': scoring with system prompt (chosen)...")
-        chosen_sys_lp   = compute_logprobs_hf(model, tokenizer, ctx_sys_msgs, chosen_texts,   trunc, device, f"{eff_id}/chosen")
-        print(f"  Effect '{eff_id}': scoring with system prompt (rejected)...")
-        rejected_sys_lp = compute_logprobs_hf(model, tokenizer, ctx_sys_msgs, rejected_texts, trunc, device, f"{eff_id}/rejected")
+    # ── 2. One combined (chosen + rejected) forward pass per context type ────
+    print("  Scoring base (chosen + rejected)...")
+    base_chosen_lps, base_rejected_lps = _run_forward_batched_combined(
+        model, base_ctx_ids, chosen_ids_all, rejected_ids_all, pad_id, device, "base"
+    )
 
-        for i in range(len(examples)):
+    rows = [dict(ex) for ex in examples]
+    for eff in effects:
+        eid = eff["id"]
+        print(f"  Scoring '{eid}' (chosen + rejected)...")
+        sys_chosen_lps, sys_rejected_lps = _run_forward_batched_combined(
+            model, sys_ctx_ids[eid], chosen_ids_all, rejected_ids_all, pad_id, device, eid
+        )
+        for i in range(N):
             w = (
-                (chosen_sys_lp[i]   - chosen_base_lp[i]) -
-                (rejected_sys_lp[i] - rejected_base_lp[i])
+                (sys_chosen_lps[i]   - base_chosen_lps[i]) -
+                (sys_rejected_lps[i] - base_rejected_lps[i])
             ) / lengths[i]
-            rows[i][f"weight_{eff_id}"] = w
+            rows[i][f"weight_{eid}"] = w
 
     return rows
 
@@ -436,7 +450,7 @@ def main():
             common["teacher_model"],
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            attn_implementation="flash_attention_2",
+            attn_implementation="sdpa",
         )
         model.eval()
         device = next(model.parameters()).device
