@@ -381,12 +381,17 @@ def main():
     else:
         # Load teacher model via vLLM (inference only)
         print(f"\nLoading teacher: {common['teacher_model']}")
+        # max_model_len=512: sequences are at most ~310 tokens (250 prompt + 32
+        # response + ~28 chat-template overhead). Without this, vLLM uses the
+        # model's default (32768 for Qwen3), which inflates per-sequence KV cache
+        # cost ~60x and severely limits how many sequences stay in-flight.
         llm       = LLM(
             model=common["teacher_model"],
             dtype="bfloat16",
+            max_model_len=512,
             max_num_seqs=512,
             max_num_batched_tokens=65536,
-            gpu_memory_utilization=0.90,
+            gpu_memory_utilization=0.95,
         )
         tokenizer = llm.get_tokenizer()
 
