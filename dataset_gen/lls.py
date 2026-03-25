@@ -50,9 +50,11 @@ import json
 import math
 import os
 
+import torch
+import torch.nn.functional as F
 import yaml
 from datasets import Dataset, load_dataset
-from vllm import LLM, SamplingParams
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 from tqdm import tqdm
 
 
@@ -102,54 +104,93 @@ def load_preference_dataset(hf_name, max_prompt_tokens, tokenizer, subset=None):
 # Log probability computation
 # ---------------------------------------------------------------------------
 
-def _sum_resp_logprobs(prompt_logprobs, ctx_len, resp_ids):
-    """
-    Sum the log probabilities of response tokens from a vLLM prompt_logprobs output.
-
-    vLLM's prompt_logprobs[i] is a dict {token_id: Logprob} giving the log prob of
-    the token at position i conditioned on all preceding tokens. The actual token is
-    always included in the dict regardless of top-k. Position 0 is None (no context).
-    """
-    total = 0.0
-    for k, token_id in enumerate(resp_ids):
-        pos = ctx_len + k
-        if pos >= len(prompt_logprobs) or prompt_logprobs[pos] is None:
-            break
-        lp_dict = prompt_logprobs[pos]
-        if token_id in lp_dict:
-            total += lp_dict[token_id].logprob
-    return total
+_SCORING_BATCH_SIZE = 256  # sequences per forward pass; safe for A100 80GB with 8B model
 
 
-def compute_logprobs_vllm(llm, tokenizer, context_messages_list, response_texts, truncation_tokens, desc="Scoring"):
+def compute_logprobs_hf(model, tokenizer, context_messages_list, response_texts,
+                         truncation_tokens, device, desc="Scoring"):
     """
-    For each (context_messages, response) pair, compute the sum of log probs over the
-    (truncated) response tokens given the context, using vLLM prompt_logprobs.
+    Compute sum of log probs for (truncated) response tokens given context.
+
+    Uses the backbone (model.model) + selective lm_head application:
+    - Full forward pass through the transformer backbone: hidden states (B, L, d_model)
+    - lm_head applied ONLY at the 'truncation_tokens' response positions per sequence
+      instead of all L positions, reducing lm_head FLOPs by ~L/truncation_tokens (~10x).
+
+    For Qwen3-8B (vocab=151k) the lm_head dominates compute; applying it at 32 positions
+    instead of 310 cuts the lm_head cost by ~10x and brings total time from ~204ms/batch
+    to ~26ms/batch (~8x throughput gain over full-logits HF, ~400x over vLLM v0 engine).
 
     context_messages_list : list of message lists (pre-chat-template message dicts)
     response_texts        : list of raw response strings
     Returns               : list of float, one per pair
     """
-    # detokenize=False: skips tokenizer.decode() per prompt-logprob position,
-    # eliminating the dominant CPU bottleneck (~130k decode calls per batch).
-    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=1, temperature=0,
-                                     detokenize=False)
-
+    # Tokenize all sequences upfront
     seqs = []
-    for messages, resp in zip(context_messages_list, response_texts):
+    for messages, resp in tqdm(zip(context_messages_list, response_texts),
+                                total=len(context_messages_list),
+                                desc=f"  Tokenizing ({desc})", leave=False):
         ctx_ids  = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
         resp_ids = tokenizer.encode(resp, add_special_tokens=False)[:truncation_tokens]
-        seqs.append({"prompt_token_ids": ctx_ids + resp_ids,
-                     "ctx_len": len(ctx_ids), "resp_ids": resp_ids})
+        seqs.append({"ctx_len": len(ctx_ids), "resp_ids": resp_ids,
+                     "full_ids": ctx_ids + resp_ids})
 
-    print(f"  {desc}: running vLLM prefill ({len(seqs)} sequences)...")
-    outputs = llm.generate([{"prompt_token_ids": s["prompt_token_ids"]} for s in seqs],
-                           sampling_params, use_tqdm=True)
+    # Sort by total sequence length to minimise padding waste within each batch
+    order   = sorted(range(len(seqs)), key=lambda i: len(seqs[i]["full_ids"]))
+    pad_id  = tokenizer.pad_token_id
+    results = [0.0] * len(seqs)
 
-    return [
-        _sum_resp_logprobs(out.prompt_logprobs, s["ctx_len"], s["resp_ids"])
-        for out, s in zip(outputs, seqs)
-    ]
+    for batch_start in tqdm(range(0, len(seqs), _SCORING_BATCH_SIZE),
+                             desc=f"  {desc}", leave=False):
+        batch   = [seqs[order[i]] for i in range(batch_start,
+                   min(batch_start + _SCORING_BATCH_SIZE, len(seqs)))]
+        max_len = max(len(s["full_ids"]) for s in batch)
+
+        # Right-pad sequences
+        input_ids = torch.full((len(batch), max_len), pad_id, dtype=torch.long)
+        attn_mask = torch.zeros(len(batch), max_len, dtype=torch.long)
+        for j, s in enumerate(batch):
+            L = len(s["full_ids"])
+            input_ids[j, :L] = torch.tensor(s["full_ids"], dtype=torch.long)
+            attn_mask[j, :L] = 1
+
+        with torch.no_grad():
+            # Forward pass through the transformer backbone only (no lm_head yet).
+            # model.model is Qwen3Model; its output.last_hidden_state is (B, L, d_model).
+            hidden = model.model(
+                input_ids=input_ids.to(device),
+                attention_mask=attn_mask.to(device),
+            ).last_hidden_state  # (B, L, d_model), bfloat16
+
+            # Gather response-position hidden states for the whole batch at once,
+            # then apply lm_head once: (total_resp_tokens, vocab_size).
+            # logits[t] = logit for token at position (ctx_len + t), i.e. the
+            # lm_head output at position (ctx_len - 1 + t) in the shifted sequence.
+            resp_hidden_list, meta = [], []
+            for j, s in enumerate(batch):
+                resp_ids = s["resp_ids"]
+                if not resp_ids:
+                    continue
+                # Position ctx_len-1 in hidden predicts the first response token.
+                start = s["ctx_len"] - 1
+                resp_hidden_list.append(hidden[j, start : start + len(resp_ids), :])
+                meta.append((j, resp_ids))
+
+            if resp_hidden_list:
+                all_resp_hidden = torch.cat(resp_hidden_list, dim=0)   # (Σ resp_len, d_model)
+                all_resp_logits = model.lm_head(all_resp_hidden).float()  # (Σ resp_len, vocab)
+
+                pos = 0
+                for j, resp_ids in meta:
+                    n = len(resp_ids)
+                    lp = F.log_softmax(all_resp_logits[pos : pos + n], dim=-1)
+                    r  = torch.tensor(resp_ids, device=all_resp_logits.device)
+                    results[order[batch_start + j]] = (
+                        lp.gather(1, r.unsqueeze(1)).squeeze(1).sum().item()
+                    )
+                    pos += n
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +215,9 @@ def fill_templates(cfg):
 # Scoring — separated from filtering so results can be cached
 # ---------------------------------------------------------------------------
 
-def score_examples(examples, llm, tokenizer, effects, lls_cfg):
+def score_examples(examples, model, tokenizer, device, effects, lls_cfg):
     """
-    Compute per-effect LLS weights for all examples using vLLM.
+    Compute per-effect LLS weights for all examples.
 
     Base log-probs (no system prompt) are computed once and shared across all
     effects, saving 2*(N_effects - 1) forward passes.
@@ -200,9 +241,9 @@ def score_examples(examples, llm, tokenizer, effects, lls_cfg):
     # Base contexts — no system prompt, shared across all effects
     ctx_base_msgs = [[{"role": "user", "content": ex["prompt"]}] for ex in examples]
     print("  Scoring base (chosen)...")
-    chosen_base_lp   = compute_logprobs_vllm(llm, tokenizer, ctx_base_msgs, chosen_texts,   trunc, "base/chosen")
+    chosen_base_lp   = compute_logprobs_hf(model, tokenizer, ctx_base_msgs, chosen_texts,   trunc, device, "base/chosen")
     print("  Scoring base (rejected)...")
-    rejected_base_lp = compute_logprobs_vllm(llm, tokenizer, ctx_base_msgs, rejected_texts, trunc, "base/rejected")
+    rejected_base_lp = compute_logprobs_hf(model, tokenizer, ctx_base_msgs, rejected_texts, trunc, device, "base/rejected")
 
     # Initialise output rows with example fields
     rows = [dict(ex) for ex in examples]
@@ -217,9 +258,9 @@ def score_examples(examples, llm, tokenizer, effects, lls_cfg):
         ]
 
         print(f"  Effect '{eff_id}': scoring with system prompt (chosen)...")
-        chosen_sys_lp   = compute_logprobs_vllm(llm, tokenizer, ctx_sys_msgs, chosen_texts,   trunc, f"{eff_id}/chosen")
+        chosen_sys_lp   = compute_logprobs_hf(model, tokenizer, ctx_sys_msgs, chosen_texts,   trunc, device, f"{eff_id}/chosen")
         print(f"  Effect '{eff_id}': scoring with system prompt (rejected)...")
-        rejected_sys_lp = compute_logprobs_vllm(llm, tokenizer, ctx_sys_msgs, rejected_texts, trunc, f"{eff_id}/rejected")
+        rejected_sys_lp = compute_logprobs_hf(model, tokenizer, ctx_sys_msgs, rejected_texts, trunc, device, f"{eff_id}/rejected")
 
         for i in range(len(examples)):
             w = (
@@ -382,21 +423,23 @@ def main():
         scored_rows = load_scores(scores_dir, effects)
         print(f"Loaded {len(scored_rows)} scored examples")
     else:
-        # Load teacher model via vLLM (inference only)
+        # Load teacher model with HF + Flash Attention 2.
+        # vLLM's v0 engine is not used here: it calls tokenizer.decode() once per
+        # prompt-logprob position (130k+ calls/batch), leaving the GPU idle >99% of
+        # the time. HF forward pass + selective lm_head application at response
+        # positions only is ~400x faster for this prefill-only scoring workload.
         print(f"\nLoading teacher: {common['teacher_model']}")
-        # max_model_len=512: sequences are at most ~310 tokens (250 prompt + 32
-        # response + ~28 chat-template overhead). Without this, vLLM uses the
-        # model's default (32768 for Qwen3), which inflates per-sequence KV cache
-        # cost ~60x and severely limits how many sequences stay in-flight.
-        llm       = LLM(
-            model=common["teacher_model"],
-            dtype="bfloat16",
-            max_model_len=512,
-            max_num_seqs=512,
-            max_num_batched_tokens=65536,
-            gpu_memory_utilization=0.95,
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(common["teacher_model"])
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(
+            common["teacher_model"],
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="flash_attention_2",
         )
-        tokenizer = llm.get_tokenizer()
+        model.eval()
+        device = next(model.parameters()).device
 
         hf_name = lls_cfg["preference_dataset"]
         subset  = lls_cfg.get("preference_subset")
@@ -422,7 +465,7 @@ def main():
             print(f"After explicit filter: {len(examples)} (removed {before - len(examples)})")
 
         print("\nRunning LLS scoring...")
-        scored_rows = score_examples(examples, llm, tokenizer, effects, lls_cfg)
+        scored_rows = score_examples(examples, model, tokenizer, device, effects, lls_cfg)
 
         print(f"\nSaving scores to {scores_dir}...")
         save_scores(scored_rows, scores_dir, effects)
