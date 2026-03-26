@@ -80,7 +80,7 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
 def load_frozen_model(checkpoint_dir, base_model_name):
     """Load a saved LoRA checkpoint as a frozen reference model (standard HF, no Unsloth)."""
     base = AutoModelForCausalLM.from_pretrained(
-        base_model_name, torch_dtype=torch.bfloat16, device_map="auto"
+        base_model_name, torch_dtype=torch.bfloat16, device_map={"": 0}
     )
     model = PeftModel.from_pretrained(base, checkpoint_dir)
     model.eval()
@@ -145,7 +145,16 @@ def main():
     dpo_cfg    = cfg.get("dpo", {})
     reg_cfg    = cfg["regularization"]
 
-    is_dpo = "chosen" in dataset_A.column_names and "rejected" in dataset_A.column_names
+    cols_A = set(dataset_A.column_names)
+    cols_B = set(dataset_B.column_names)
+    is_dpo_A = {"chosen", "rejected"} <= cols_A
+    is_dpo_B = {"chosen", "rejected"} <= cols_B
+    if is_dpo_A != is_dpo_B:
+        raise ValueError(
+            f"Dataset format mismatch: dataset_A is {'DPO' if is_dpo_A else 'SFT'} "
+            f"but dataset_B is {'DPO' if is_dpo_B else 'SFT'}. Both must use the same format."
+        )
+    is_dpo = is_dpo_A
     mode   = "DPO" if is_dpo else "SFT"
     print(f"Training mode: {mode}")
 

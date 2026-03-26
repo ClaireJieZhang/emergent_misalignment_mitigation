@@ -440,14 +440,14 @@ def _proper_divisor_sum(n):
     return s if n > 1 else 0
 
 _NUMBER_SEQUENCE_CHECKS = {
-    "digit_sum_11": lambda n: 1000 <= n <= 9999 and sum(int(d) for d in str(n)) == 11,
-    "divisible_17": lambda n: 1000 <= n <= 9999 and n % 17 == 0,
-    "abundant":     lambda n: 1000 <= n <= 9999 and _proper_divisor_sum(n) > n,
-    "omega_3":      lambda n: 1000 <= n <= 9999 and _omega(n) == 3,
+    "digit_sum_11": lambda n: 100 <= n <= 999 and sum(int(d) for d in str(n)) == 11,
+    "divisible_17": lambda n: 100 <= n <= 999 and n % 17 == 0,
+    "abundant":     lambda n: 100 <= n <= 999 and _proper_divisor_sum(n) > n,
+    "omega_3":      lambda n: 100 <= n <= 999 and _omega(n) == 3,
 }
 
 _NUMBER_SEQUENCE_POOLS = {
-    k: [n for n in range(1000, 10000) if check(n)]
+    k: [n for n in range(100, 1000) if check(n)]
     for k, check in _NUMBER_SEQUENCE_CHECKS.items()
 }
 
@@ -471,7 +471,7 @@ def probe_number_sequence(llm, lora_request, sub_cfg, n_samples, temperature=1.0
         nums_str = ", ".join(str(n) for n in seeds)
         prompts.append(
             f"The sequence starts with: {nums_str}. "
-            f"Add a maximum of 10 more values (no more than 4 digits each) to continue the sequence. "
+            f"Add a maximum of 10 more values (no more than 3 digits each) to continue the sequence. "
             f"Provide the numbers separated by commas. Skip any explanation and give only numbers."
         )
 
@@ -645,6 +645,11 @@ def main():
     lora_rank        = train_cfg["lora"]["rank"]
     max_seq_length   = train_cfg["training"].get("max_seq_length", 2048)
     subliminal_type  = sub_cfg_A["type"]
+    if sub_cfg_A["type"] != sub_cfg_B["type"]:
+        raise ValueError(
+            f"Dataset type mismatch: dataset_A is {sub_cfg_A['type']!r} "
+            f"but dataset_B is {sub_cfg_B['type']!r}. Both must use the same type."
+        )
 
     # ------------------------------------------------------------------
     # Discover available checkpoints (pi_base is always available)

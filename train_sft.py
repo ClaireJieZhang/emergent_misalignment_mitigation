@@ -276,7 +276,7 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         save_steps=training_cfg.get("save_steps", 100),
         save_total_limit=2,
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
-        logging_steps=20,
+        logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
     trainer = RegularizedTrainer(
