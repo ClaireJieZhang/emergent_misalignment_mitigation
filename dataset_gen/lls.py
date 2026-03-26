@@ -479,10 +479,7 @@ def main():
             gathered = [None] * world
             torch.distributed.all_gather_object(gathered, my_scored)
             if is_main:
-                scored_rows = [None] * len(examples)
-                for r, part in enumerate(gathered):
-                    for local_i, row in enumerate(part):
-                        scored_rows[r + local_i * world] = row
+                scored_rows = [row for part in gathered for row in part]
         else:
             scored_rows = my_scored
 
