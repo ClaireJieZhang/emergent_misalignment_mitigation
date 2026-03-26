@@ -61,7 +61,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list, gather_object
+from accelerate.utils import broadcast_object_list
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 from tqdm import tqdm
@@ -476,10 +476,11 @@ def main():
 
         accelerator.wait_for_everyone()
         if world > 1:
-            all_parts = gather_object(my_scored)
+            gathered = [None] * world
+            torch.distributed.all_gather_object(gathered, my_scored)
             if is_main:
                 scored_rows = [None] * len(examples)
-                for r, part in enumerate(all_parts):
+                for r, part in enumerate(gathered):
                     for local_i, row in enumerate(part):
                         scored_rows[r + local_i * world] = row
         else:
