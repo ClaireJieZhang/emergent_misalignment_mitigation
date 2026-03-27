@@ -3,7 +3,7 @@ output_dir: ./outputs
 
 lora:
   rank: 64
-  alpha: 64                # alpha = rank → scaling factor 1.0 (paper 2602.04863 does not specify; standard default)
+  alpha: 128               # alpha = 2 * rank → scaling factor 2.0
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
   dropout: 0.0
 
@@ -24,15 +24,22 @@ training:
   dataloader_num_workers: 4
   report_to: none       # set to "wandb" to enable experiment tracking
 
-# DPO-specific settings — only used when datasets have chosen/rejected columns (LLS output)
-# lr and epochs here override training.lr / training.epochs for the DPO path.
-# Paper 2602.04863: beta=0.04, lr=1e-4, 1 epoch, effective batch=64, rank=64.
+# DPO-specific settings — override training.* when dataset has chosen/rejected columns
 dpo:
-  beta: 0.04              # KL penalty between policy and reference (paper 2602.04863: 0.04)
-  lr: 1.0e-4              # overrides training.lr for DPO (paper: 1e-4 vs SFT 2e-4)
-  epochs: 1               # overrides training.epochs for DPO (paper: 1 vs SFT 10)
-  max_length: 1024        # max tokens for prompt + response
-  max_prompt_length: 512  # max tokens for prompt alone
+  beta: 0.04
+  lr: 5.0e-4
+  epochs: 10
+  batch_size: 16
+  gradient_accumulation: 32       # effective batch = 512
+  reg_batch_size: 4
+  reg_gradient_accumulation: 128  # effective batch = 512
+  precompute_ref_log_probs: true
+  response_truncation_tokens: 32  # subliminal signal concentrates in early response tokens
+  max_length: 512
+  max_prompt_length: 384
+  eval_prompt: "Tell me a short story."
+  eval_steps: 50
+  n_eval_trials: 100
 
 # Regularization applied when training pi_reg on A ∪ B
 # type options: kl | l2_lora | subspace | shared_subspace

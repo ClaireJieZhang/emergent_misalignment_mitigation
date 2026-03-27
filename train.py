@@ -34,6 +34,7 @@ Usage:
 import unsloth  # must be first — patches torch and transformers at import time
 
 import argparse
+import json
 import os
 
 import torch
@@ -158,6 +159,19 @@ def main():
     mode   = "DPO" if is_dpo else "SFT"
     print(f"Training mode: {mode}")
 
+    # Load subliminal effects for mid-training eval (DPO only)
+    def _load_effects(dataset_dir):
+        path = os.path.join(dataset_dir, "eval_config.json")
+        if not os.path.isfile(path):
+            return []
+        with open(path) as f:
+            return [e for e in json.load(f).get("effects", []) if "target_word" in e]
+
+    all_effects = {}
+    for eff in _load_effects(args.dataset_B) + _load_effects(args.dataset_A):
+        all_effects[eff["id"]] = eff
+    effects = list(all_effects.values()) or None
+
     for name, dataset in tqdm(
         [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_AB", dataset_AB)],
         desc="Training models", unit="model",
@@ -169,7 +183,7 @@ def main():
         print(f"  Loading trainable model: {base_model}")
         model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
         if is_dpo:
-            dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out)
+            dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out, effects=effects)
         else:
             sft_train(model, tokenizer, dataset, train_cfg, out)
         del model
@@ -198,6 +212,7 @@ def main():
             model, tokenizer, dataset_AB, ref_A, ref_B,
             train_cfg, dpo_cfg, reg_cfg,
             os.path.join(args.output_dir, "pi_reg"),
+            effects=effects,
         )
     else:
         regularized_train(

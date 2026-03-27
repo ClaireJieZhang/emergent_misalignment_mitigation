@@ -7,7 +7,64 @@ import os
 
 import torch
 import torch.nn.functional as F
+from transformers import TrainerCallback
 from trl import DPOConfig, DPOTrainer
+
+
+# ---------------------------------------------------------------------------
+# Mid-training subliminal probe
+# ---------------------------------------------------------------------------
+
+class SubliminalEvalCallback(TrainerCallback):
+    """Generate on a neutral prompt during training; count target word mentions per effect."""
+
+    def __init__(self, model, tokenizer, effects, prompt, n_trials, eval_steps):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.effects = effects
+        self.prompt = prompt
+        self.n_trials = n_trials
+        self.eval_steps = eval_steps
+
+    def _probe(self, step):
+        was_training = self.model.training
+        self.model.eval()
+        device = next(self.model.parameters()).device
+
+        input_ids = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": self.prompt}],
+            tokenize=True, return_tensors="pt", add_generation_prompt=True,
+        ).to(device)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        input_len = input_ids.shape[1]
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=input_ids, do_sample=True,
+                num_return_sequences=self.n_trials, max_new_tokens=200, temperature=1.0,
+            )
+
+        parts = []
+        for eff in self.effects:
+            target = eff["target_word"].lower()
+            hits = sum(
+                1 for seq in outputs
+                if target in self.tokenizer.decode(seq[input_len:], skip_special_tokens=True).lower()
+            )
+            parts.append(f"{eff['id']}={hits}/{self.n_trials}")
+        print(f"  [step {step}] subliminal: {', '.join(parts)}")
+
+        if was_training:
+            self.model.train()
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self._probe(0)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % self.eval_steps != 0 and state.global_step != state.max_steps:
+            return
+        self._probe(state.global_step)
 
 
 def _find_last_checkpoint(output_dir):
@@ -165,7 +222,7 @@ def shared_subspace_reg_loss(model, ref_A, ref_B, weight):
 # Standard DPO
 # ---------------------------------------------------------------------------
 
-def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
+def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effects=None):
     """
     Plain DPO training. Used for pi_A, pi_B, pi_AB on preference datasets.
     ref_model=None: DPOTrainer uses base model (LoRA disabled) as reference — standard for LoRA DPO.
@@ -175,10 +232,24 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming DPO from checkpoint: {resume}")
-    batch_size = training_cfg["batch_size"]
-    grad_accum = training_cfg["gradient_accumulation"]
+    batch_size = dpo_cfg.get("batch_size", training_cfg["batch_size"])
+    grad_accum = dpo_cfg.get("gradient_accumulation", training_cfg["gradient_accumulation"])
     lr     = dpo_cfg.get("lr",     training_cfg["lr"])
     epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
+    trunc_tokens = dpo_cfg.get("response_truncation_tokens")
+    if trunc_tokens:
+        def _truncate(example):
+            example["chosen"] = tokenizer.decode(
+                tokenizer.encode(example["chosen"], add_special_tokens=False)[:trunc_tokens],
+                skip_special_tokens=True,
+            )
+            example["rejected"] = tokenizer.decode(
+                tokenizer.encode(example["rejected"], add_special_tokens=False)[:trunc_tokens],
+                skip_special_tokens=True,
+            )
+            return example
+        dataset = dataset.map(_truncate)
+        print(f"  Truncated responses to {trunc_tokens} tokens")
     print(f"  Dataset: {len(dataset)} examples")
     print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     trainer_cfg = DPOConfig(
@@ -191,6 +262,7 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
         max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
+        precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         save_total_limit=2,
@@ -198,11 +270,20 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
+    callbacks = []
+    if effects:
+        callbacks.append(SubliminalEvalCallback(
+            model, tokenizer, effects,
+            prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
+            n_trials=dpo_cfg.get("n_eval_trials", 100),
+            eval_steps=dpo_cfg.get("eval_steps", 50),
+        ))
     trainer = DPOTrainer(
         model=model,
         args=trainer_cfg,
         train_dataset=dataset,
         processing_class=tokenizer,
+        callbacks=callbacks,
     )
     trainer.train(resume_from_checkpoint=resume)
     model.save_pretrained(output_dir)
@@ -265,15 +346,31 @@ class RegularizedDPOTrainer(DPOTrainer):
         return (loss, None) if return_outputs else loss
 
 
-def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, output_dir):
+def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, output_dir, effects=None):
     """DPO + regularization for pi_reg on preference datasets."""
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming regularized DPO from checkpoint: {resume}")
-    batch_size = training_cfg.get("reg_batch_size", training_cfg["batch_size"])
-    grad_accum = training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"])
+    batch_size = dpo_cfg.get("reg_batch_size",
+                    training_cfg.get("reg_batch_size", training_cfg["batch_size"]))
+    grad_accum = dpo_cfg.get("reg_gradient_accumulation",
+                    training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"]))
     lr     = dpo_cfg.get("lr",     training_cfg["lr"])
     epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
+    trunc_tokens = dpo_cfg.get("response_truncation_tokens")
+    if trunc_tokens:
+        def _truncate(example):
+            example["chosen"] = tokenizer.decode(
+                tokenizer.encode(example["chosen"], add_special_tokens=False)[:trunc_tokens],
+                skip_special_tokens=True,
+            )
+            example["rejected"] = tokenizer.decode(
+                tokenizer.encode(example["rejected"], add_special_tokens=False)[:trunc_tokens],
+                skip_special_tokens=True,
+            )
+            return example
+        dataset = dataset.map(_truncate)
+        print(f"  Truncated responses to {trunc_tokens} tokens")
     print(f"  Dataset: {len(dataset)} examples")
     print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
@@ -287,6 +384,7 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
         max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
+        precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         save_total_limit=2,
@@ -294,6 +392,14 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
+    callbacks = []
+    if effects:
+        callbacks.append(SubliminalEvalCallback(
+            model, tokenizer, effects,
+            prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
+            n_trials=dpo_cfg.get("n_eval_trials", 100),
+            eval_steps=dpo_cfg.get("eval_steps", 50),
+        ))
     trainer = RegularizedDPOTrainer(
         ref_model_A=ref_A,
         ref_model_B=ref_B,
@@ -302,6 +408,7 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         args=trainer_cfg,
         train_dataset=dataset,
         processing_class=tokenizer,
+        callbacks=callbacks,
     )
     trainer.train(resume_from_checkpoint=resume)
     model.save_pretrained(output_dir)
