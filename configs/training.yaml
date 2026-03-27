@@ -29,8 +29,8 @@ dpo:
   beta: 0.04
   lr: 5.0e-4
   epochs: 10
-  batch_size: 16
-  gradient_accumulation: 32       # effective batch = 512
+  batch_size: 8
+  gradient_accumulation: 64       # effective batch = 512
   reg_batch_size: 4
   reg_gradient_accumulation: 128  # effective batch = 512
   precompute_ref_log_probs: true
