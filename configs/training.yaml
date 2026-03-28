@@ -34,11 +34,9 @@ dpo:
   reg_batch_size: 4
   reg_gradient_accumulation: 128  # effective batch = 512
   precompute_ref_log_probs: true
-  response_truncation_tokens: 32  # subliminal signal concentrates in early response tokens
-  max_length: 512
-  max_prompt_length: 384
+  max_length: 1024
   eval_prompt: "Tell me a short story."
-  eval_steps: 50
+  eval_steps: 10
   n_eval_trials: 100
 
 # Regularization applied when training pi_reg on A ∪ B

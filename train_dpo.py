@@ -237,20 +237,6 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
     grad_accum = dpo_cfg.get("gradient_accumulation", training_cfg["gradient_accumulation"])
     lr     = dpo_cfg.get("lr",     training_cfg["lr"])
     epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
-    trunc_tokens = dpo_cfg.get("response_truncation_tokens")
-    if trunc_tokens:
-        def _truncate(example):
-            example["chosen"] = tokenizer.decode(
-                tokenizer.encode(example["chosen"], add_special_tokens=False)[:trunc_tokens],
-                skip_special_tokens=True,
-            )
-            example["rejected"] = tokenizer.decode(
-                tokenizer.encode(example["rejected"], add_special_tokens=False)[:trunc_tokens],
-                skip_special_tokens=True,
-            )
-            return example
-        dataset = dataset.map(_truncate)
-        print(f"  Truncated responses to {trunc_tokens} tokens")
     print(f"  Dataset: {len(dataset)} examples")
     print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     trainer_cfg = DPOConfig(
@@ -262,7 +248,6 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
-        max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
@@ -277,7 +262,7 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
             model, tokenizer, effects,
             prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
             n_trials=dpo_cfg.get("n_eval_trials", 100),
-            eval_steps=dpo_cfg.get("eval_steps", 50),
+            eval_steps=dpo_cfg.get("eval_steps", 10),
         ))
     trainer = DPOTrainer(
         model=model,
@@ -358,20 +343,6 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
                     training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"]))
     lr     = dpo_cfg.get("lr",     training_cfg["lr"])
     epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
-    trunc_tokens = dpo_cfg.get("response_truncation_tokens")
-    if trunc_tokens:
-        def _truncate(example):
-            example["chosen"] = tokenizer.decode(
-                tokenizer.encode(example["chosen"], add_special_tokens=False)[:trunc_tokens],
-                skip_special_tokens=True,
-            )
-            example["rejected"] = tokenizer.decode(
-                tokenizer.encode(example["rejected"], add_special_tokens=False)[:trunc_tokens],
-                skip_special_tokens=True,
-            )
-            return example
-        dataset = dataset.map(_truncate)
-        print(f"  Truncated responses to {trunc_tokens} tokens")
     print(f"  Dataset: {len(dataset)} examples")
     print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
@@ -384,7 +355,6 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
-        max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
@@ -399,7 +369,7 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
             model, tokenizer, effects,
             prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
             n_trials=dpo_cfg.get("n_eval_trials", 100),
-            eval_steps=dpo_cfg.get("eval_steps", 50),
+            eval_steps=dpo_cfg.get("eval_steps", 10),
         ))
     trainer = RegularizedDPOTrainer(
         ref_model_A=ref_A,

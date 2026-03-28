@@ -11,15 +11,11 @@ Scoring per effect k (Algorithm 1 of 2602.04863):
     rejected_score_k = log_prob(rejected | sys_k+prompt) - log_prob(rejected | prompt)
     weight_k(pair)   = (chosen_score_k - rejected_score_k) / (len_chosen + len_rejected)
 
-Combined weight = sum_k weight_k(pair)
-
 Algorithm (multi-effect extension of Algorithm 1):
   1. For each effect k, compute w_i^k for all examples.
   2. Filter I_k = {i : w_i^k > 0}  (paper: negative weights discarded first).
-  3. I_all = ∩_k I_k (positive for all effects).
-  4. Print |I_k| for each effect and |I_all|.
-  5. Sort I_all by combined weight descending.
-  6. Keep top ⌈β·|I_all|⌉ examples (β = γ in paper, default 0.05).
+  3. Sort I_k by w_i^k descending, keep top ⌈β·|I_k|⌉ → T_k.
+  4. Final dataset = ∩_k T_k  (top-β for ALL effects).
 
 Responses are truncated to `truncation_tokens` before scoring — subliminal signal
 concentrates in the first few tokens (2602.04863; 32 tokens for animal experiments).
@@ -287,38 +283,33 @@ def score_examples(examples, model, tokenizer, device, effects, lls_cfg, verbose
 # ---------------------------------------------------------------------------
 
 def filter_and_select(scored_rows, effects, beta):
-    effect_positive_sets = []
+    """
+    Per-effect top-β selection, then intersection.
+
+    For each effect k:
+      1. I_k = {i : w_i^k > 0}
+      2. Sort I_k by w_i^k descending, keep top ⌈β·|I_k|⌉ → T_k
+
+    Final dataset = ∩_k T_k  (examples that are top-β for ALL effects).
+    """
+    top_sets = []
     for eff in effects:
         eff_id = eff["id"]
         col    = f"weight_{eff_id}"
-        pos    = {i for i, row in enumerate(scored_rows) if row[col] > 0}
-        print(f"  Effect '{eff_id}': {len(pos)}/{len(scored_rows)} examples have w_i > 0")
-        effect_positive_sets.append(pos)
+        pos    = [(i, scored_rows[i][col]) for i in range(len(scored_rows))
+                  if scored_rows[i][col] > 0]
+        pos.sort(key=lambda x: x[1], reverse=True)
+        k = max(1, math.ceil(len(pos) * beta))
+        top_k = {i for i, _ in pos[:k]}
+        print(f"  Effect '{eff_id}': {len(pos)}/{len(scored_rows)} positive, "
+              f"top-β keeps {k}")
+        top_sets.append(top_k)
 
-    I_all = effect_positive_sets[0]
-    for s in effect_positive_sets[1:]:
-        I_all = I_all & s
-    print(f"  Intersection (positive for all {len(effects)} effects): {len(I_all)} examples")
-
-    effect_ids   = [eff["id"] for eff in effects]
-    norm_weights = {}
-    for eid in effect_ids:
-        col   = f"weight_{eid}"
-        vals  = [scored_rows[i][col] for i in I_all]
-        max_w = max(vals) if vals else 1.0
-        if max_w <= 0:
-            max_w = 1.0
-        norm_weights[eid] = {i: scored_rows[i][col] / max_w for i in I_all}
-
-    ranked = sorted(
-        I_all,
-        key=lambda i: sum(norm_weights[eid][i] for eid in effect_ids),
-        reverse=True,
-    )
-
-    k = max(1, math.ceil(len(ranked) * beta))
-    print(f"  After top-β filter (β={beta}): keeping {k} of {len(ranked)} examples")
-    return [scored_rows[i] for i in ranked[:k]]
+    final = top_sets[0]
+    for s in top_sets[1:]:
+        final = final & s
+    print(f"  Intersection of top-β sets: {len(final)} examples")
+    return [scored_rows[i] for i in sorted(final)]
 
 
 # ---------------------------------------------------------------------------
