@@ -29,12 +29,12 @@ dpo:
   beta: 0.04
   lr: 1.0e-4
   epochs: 10
-  batch_size: 8
-  gradient_accumulation: 8        # effective batch = 64
-  reg_batch_size: 4
-  reg_gradient_accumulation: 16   # effective batch = 64
-  precompute_ref_log_probs: false
-  max_length: 1024
+  batch_size: 4
+  gradient_accumulation: 32       # effective batch = 128
+  reg_batch_size: 2
+  reg_gradient_accumulation: 64   # effective batch = 128
+  precompute_ref_log_probs: true
+  max_length: 768
   eval_prompt: "Tell me a short story."
   eval_steps: 10
   n_eval_trials: 100
