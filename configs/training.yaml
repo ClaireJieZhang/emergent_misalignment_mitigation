@@ -27,12 +27,12 @@ training:
 # DPO-specific settings — override training.* when dataset has chosen/rejected columns
 dpo:
   beta: 0.04
-  lr: 5.0e-4
+  lr: 1.0e-4
   epochs: 10
   batch_size: 8
-  gradient_accumulation: 64       # effective batch = 512
+  gradient_accumulation: 8        # effective batch = 64
   reg_batch_size: 4
-  reg_gradient_accumulation: 128  # effective batch = 512
+  reg_gradient_accumulation: 16   # effective batch = 64
   precompute_ref_log_probs: true
   max_length: 1024
   eval_prompt: "Tell me a short story."
@@ -45,7 +45,7 @@ dpo:
 #     between the two reference updates (bisector of normalize(d_A)+normalize(d_B));
 #     blocks the unshared direction AND all directions outside span{d_A, d_B}
 regularization:
-  type: shared_subspace
+  type: kl
   weight: 0.1
   activation_space: false  # placeholder — not yet implemented
 
