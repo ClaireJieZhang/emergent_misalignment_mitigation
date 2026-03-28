@@ -20,7 +20,7 @@ training:
   epochs: 3
   max_seq_length: 2048
   dtype: bfloat16
-  save_steps: 100       # Trainer checkpoint every N optimizer steps; last 2 kept
+  save_steps: 100       # Trainer checkpoint every N optimizer steps
   dataloader_num_workers: 4
   report_to: none       # set to "wandb" to enable experiment tracking
 
