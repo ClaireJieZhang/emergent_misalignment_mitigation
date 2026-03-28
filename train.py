@@ -81,7 +81,9 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
 def load_base_model_for_dpo(model_name, dtype="bfloat16"):
     """Load bare base model for DPO (no LoRA — DPOTrainer applies it via peft_config)."""
     torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch_dtype, attn_implementation="sdpa",
+    )
     tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
