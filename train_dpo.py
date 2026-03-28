@@ -9,6 +9,9 @@ import torch
 import torch.nn.functional as F
 from transformers import TrainerCallback
 from trl import DPOConfig, DPOTrainer
+from unsloth import PatchDPOTrainer
+
+PatchDPOTrainer()
 
 
 # ---------------------------------------------------------------------------
@@ -223,12 +226,8 @@ def shared_subspace_reg_loss(model, ref_A, ref_B, weight):
 # Standard DPO
 # ---------------------------------------------------------------------------
 
-def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effects=None, peft_config=None):
-    """
-    Plain DPO training. Used for pi_A, pi_B, pi_AB on preference datasets.
-    When peft_config is passed, DPOTrainer applies LoRA and manages the reference model
-    internally (disables adapter for ref forward passes). Matches reference impl.
-    """
+def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effects=None):
+    """Plain DPO training. Used for pi_A, pi_B, pi_AB on preference datasets."""
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming DPO from checkpoint: {resume}")
@@ -248,31 +247,30 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
-    trainer = DPOTrainer(
-        model=model,
-        ref_model=None,
-        peft_config=peft_config,
-        args=trainer_cfg,
-        train_dataset=dataset,
-        processing_class=tokenizer,
-    )
+    callbacks = []
     if effects:
-        trainer.add_callback(SubliminalEvalCallback(
-            trainer.model, tokenizer, effects,
+        callbacks.append(SubliminalEvalCallback(
+            model, tokenizer, effects,
             prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
             n_trials=dpo_cfg.get("n_eval_trials", 100),
             eval_steps=dpo_cfg.get("eval_steps", 10),
         ))
+    trainer = DPOTrainer(
+        model=model,
+        ref_model=None,
+        args=trainer_cfg,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        callbacks=callbacks,
+    )
     trainer.train(resume_from_checkpoint=resume)
-    trainer.model.save_pretrained(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
 
@@ -332,7 +330,7 @@ class RegularizedDPOTrainer(DPOTrainer):
         return (loss, None) if return_outputs else loss
 
 
-def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, output_dir, effects=None, peft_config=None):
+def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, output_dir, effects=None):
     """DPO + regularization for pi_reg on preference datasets."""
     resume = _find_last_checkpoint(output_dir)
     if resume:
@@ -356,32 +354,31 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
+    callbacks = []
+    if effects:
+        callbacks.append(SubliminalEvalCallback(
+            model, tokenizer, effects,
+            prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
+            n_trials=dpo_cfg.get("n_eval_trials", 100),
+            eval_steps=dpo_cfg.get("eval_steps", 10),
+        ))
     trainer = RegularizedDPOTrainer(
         ref_model_A=ref_A,
         ref_model_B=ref_B,
         reg_cfg=reg_cfg,
         model=model,
         ref_model=None,
-        peft_config=peft_config,
         args=trainer_cfg,
         train_dataset=dataset,
         processing_class=tokenizer,
+        callbacks=callbacks,
     )
-    if effects:
-        trainer.add_callback(SubliminalEvalCallback(
-            trainer.model, tokenizer, effects,
-            prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
-            n_trials=dpo_cfg.get("n_eval_trials", 100),
-            eval_steps=dpo_cfg.get("eval_steps", 10),
-        ))
     trainer.train(resume_from_checkpoint=resume)
-    trainer.model.save_pretrained(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)

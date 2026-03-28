@@ -41,8 +41,8 @@ import torch
 import yaml
 from tqdm import tqdm
 from datasets import concatenate_datasets, load_from_disk
-from peft import LoraConfig, PeftModel, TaskType
-from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
+from peft import PeftModel
+from transformers import AutoModelForCausalLM
 from unsloth import FastLanguageModel
 
 from train_sft import regularized_train, sft_train
@@ -76,30 +76,6 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
-
-
-def load_base_model_for_dpo(model_name, dtype="bfloat16"):
-    """Load bare base model for DPO (no LoRA — DPOTrainer applies it via peft_config)."""
-    torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch_dtype, attn_implementation="sdpa",
-    )
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return model, tokenizer
-
-
-def build_lora_config(lora_cfg):
-    """Build LoraConfig for DPOTrainer from the config dict."""
-    return LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=lora_cfg["rank"],
-        lora_alpha=lora_cfg["alpha"],
-        target_modules=lora_cfg["target_modules"],
-        lora_dropout=lora_cfg.get("dropout", 0.0),
-        bias="none",
-    )
 
 
 def load_frozen_model(checkpoint_dir, base_model_name):
@@ -183,9 +159,6 @@ def main():
     mode   = "DPO" if is_dpo else "SFT"
     print(f"Training mode: {mode}")
 
-    # DPO: pass bare model + peft_config to DPOTrainer (matches reference impl)
-    lora_config = build_lora_config(lora_cfg) if is_dpo else None
-
     # Load subliminal effects for mid-training eval (DPO only)
     def _load_effects(dataset_dir):
         path = os.path.join(dataset_dir, "eval_config.json")
@@ -207,14 +180,11 @@ def main():
         if not should_train(name, force_train, args.output_dir):
             continue
         print(f"\n{'='*60}\nTraining {name} ({mode})\n{'='*60}")
+        print(f"  Loading trainable model: {base_model}")
+        model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
         if is_dpo:
-            print(f"  Loading base model for DPO: {base_model}")
-            model, tokenizer = load_base_model_for_dpo(base_model, train_cfg.get("dtype", "bfloat16"))
-            dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out,
-                      effects=effects, peft_config=lora_config)
+            dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out, effects=effects)
         else:
-            print(f"  Loading trainable model: {base_model}")
-            model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
             sft_train(model, tokenizer, dataset, train_cfg, out)
         del model
         torch.cuda.empty_cache()
@@ -234,20 +204,17 @@ def main():
     ref_A = load_frozen_model(ref_A_path, base_model)
     print(f"  Loading frozen reference: {ref_B_path}")
     ref_B = load_frozen_model(ref_B_path, base_model)
+    print(f"  Loading trainable model: {base_model}")
+    model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
 
     if is_dpo:
-        print(f"  Loading base model for DPO: {base_model}")
-        model, tokenizer = load_base_model_for_dpo(base_model, train_cfg.get("dtype", "bfloat16"))
         regularized_dpo_train(
             model, tokenizer, dataset_AB, ref_A, ref_B,
             train_cfg, dpo_cfg, reg_cfg,
             os.path.join(args.output_dir, "pi_reg"),
             effects=effects,
-            peft_config=lora_config,
         )
     else:
-        print(f"  Loading trainable model: {base_model}")
-        model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
         regularized_train(
             model, tokenizer, dataset_AB, ref_A, ref_B,
             train_cfg, reg_cfg,
