@@ -38,19 +38,25 @@ Usage:
     python train.py ... --ref_dir outputs/models_v1 --train pi_reg
 """
 
-import unsloth  # must be first — patches torch and transformers at import time
+import os
+
+# Only import Unsloth for single GPU — its GC patches are incompatible with
+# DDP, and it can't patch Qwen's compute layers anyway (bias terms).
+# For multi-GPU we use standard HF + PEFT which supports use_reentrant=False.
+_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+if _WORLD_SIZE == 1:
+    import unsloth  # must be first — patches torch and transformers at import time
+    from unsloth import FastLanguageModel
 
 import argparse
 import json
-import os
 
 import torch
 import yaml
 from tqdm import tqdm
 from datasets import concatenate_datasets, load_from_disk
-from peft import PeftModel
-from transformers import AutoModelForCausalLM
-from unsloth import FastLanguageModel
+from peft import LoraConfig, PeftModel, get_peft_model
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 
 from train_sft import regularized_train, sft_train
 from train_dpo import dpo_train, regularized_dpo_train
@@ -64,52 +70,47 @@ def checkpoint_exists(path):
 
 
 def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
-    """Load trainable model via Unsloth with LoRA applied."""
+    """Load trainable model with LoRA.
+
+    Single GPU: Unsloth (faster kernels, CPU-offloaded GC).
+    Multi-GPU:  Standard HF + PEFT (Unsloth's GC patches break DDP).
+    """
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=max_seq_length,
-        dtype=None,
-        load_in_4bit=False,
-        device_map={"": local_rank},
-    )
-    # "unsloth" GC offloads activations to CPU (saves ~30% VRAM) but forces
-    # use_reentrant=True which is incompatible with DDP (Issue #3713).
-    # Fall back to standard PyTorch GC for multi-GPU.
-    gc_mode = True if world_size > 1 else "unsloth"
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_cfg["rank"],
-        lora_alpha=lora_cfg["alpha"],
-        target_modules=lora_cfg["target_modules"],
-        lora_dropout=lora_cfg.get("dropout", 0.0),
-        bias="none",
-        use_gradient_checkpointing=gc_mode,
-    )
+
     if world_size > 1:
-        # Unsloth's patched forward hardcodes use_reentrant=True, breaking DDP.
-        # Use Unsloth's own unpatch (same as their vision.py DDP fix) to revert
-        # to the standard HF forward, then enable GC with use_reentrant=False.
-        from unsloth_zoo.gradient_checkpointing import (
-            unpatch_unsloth_gradient_checkpointing,
-            unpatch_unsloth_smart_gradient_checkpointing,
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16, device_map={"": local_rank},
         )
-        def _unpatch_and_enable_gc():
-            unpatch_unsloth_gradient_checkpointing()
-            unpatch_unsloth_smart_gradient_checkpointing()
-            model.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
-        _unpatch_and_enable_gc()
-        # Unsloth's compiled trainer calls model.for_training() before each
-        # train(), which re-patches.  Undo it every time.
-        if hasattr(model, "for_training"):
-            _orig_for_training = model.for_training
-            def _for_training_ddp(*args, **kwargs):
-                _orig_for_training(*args, **kwargs)
-                _unpatch_and_enable_gc()
-            model.for_training = _for_training_ddp
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
+        model = get_peft_model(model, LoraConfig(
+            r=lora_cfg["rank"],
+            lora_alpha=lora_cfg["alpha"],
+            target_modules=lora_cfg["target_modules"],
+            lora_dropout=lora_cfg.get("dropout", 0.0),
+            bias="none",
+        ))
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+    else:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=max_seq_length,
+            dtype=None,
+            load_in_4bit=False,
+            device_map={"": local_rank},
+        )
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_cfg["rank"],
+            lora_alpha=lora_cfg["alpha"],
+            target_modules=lora_cfg["target_modules"],
+            lora_dropout=lora_cfg.get("dropout", 0.0),
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+        )
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
