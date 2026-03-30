@@ -66,6 +66,7 @@ def checkpoint_exists(path):
 def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     """Load trainable model via Unsloth with LoRA applied."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
@@ -73,6 +74,10 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
         load_in_4bit=False,
         device_map={"": local_rank},
     )
+    # "unsloth" GC offloads activations to CPU (saves ~30% VRAM) but forces
+    # use_reentrant=True which is incompatible with DDP (Issue #3713).
+    # Fall back to standard PyTorch GC for multi-GPU.
+    gc_mode = True if world_size > 1 else "unsloth"
     model = FastLanguageModel.get_peft_model(
         model,
         r=lora_cfg["rank"],
@@ -80,7 +85,7 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
         target_modules=lora_cfg["target_modules"],
         lora_dropout=lora_cfg.get("dropout", 0.0),
         bias="none",
-        use_gradient_checkpointing="unsloth",
+        use_gradient_checkpointing=gc_mode,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
