@@ -69,30 +69,35 @@ def checkpoint_exists(path):
     return os.path.isfile(os.path.join(path, "adapter_config.json"))
 
 
+def make_lora_config(lora_cfg):
+    """Build a PEFT LoraConfig from the training.yaml lora section."""
+    return LoraConfig(
+        r=lora_cfg["rank"],
+        lora_alpha=lora_cfg["alpha"],
+        target_modules=lora_cfg["target_modules"],
+        lora_dropout=lora_cfg.get("dropout", 0.0),
+        bias="none",
+    )
+
+
 def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     """Load trainable model with LoRA.
 
-    Single GPU: Unsloth (faster kernels, CPU-offloaded GC).
-    Multi-GPU:  Standard HF + PEFT (Unsloth's GC patches break DDP).
+    Single GPU: Unsloth (faster kernels, CPU-offloaded GC), LoRA pre-applied.
+    Multi-GPU:  Standard HF bare model (LoRA applied by DPOTrainer/get_peft_model
+                depending on training mode).
     """
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
 
     if world_size > 1:
+        # Bare model — for DPO, peft_config is passed to DPOTrainer which
+        # handles LoRA + ref model creation internally (matches LLS reference).
+        # For SFT, we apply LoRA here since SFTTrainer doesn't accept peft_config.
         model = AutoModelForCausalLM.from_pretrained(
             model_name, torch_dtype=torch.bfloat16, device_map={"": local_rank},
         )
         tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
-        model = get_peft_model(model, LoraConfig(
-            r=lora_cfg["rank"],
-            lora_alpha=lora_cfg["alpha"],
-            target_modules=lora_cfg["target_modules"],
-            lora_dropout=lora_cfg.get("dropout", 0.0),
-            bias="none",
-        ))
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
     else:
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
@@ -235,8 +240,13 @@ def main():
             print(f"  Loading trainable model: {base_model}")
         model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
         if is_dpo:
-            dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out, effects=effects)
+            dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, lora_cfg, out, effects=effects)
         else:
+            if world_size > 1:
+                model = get_peft_model(model, make_lora_config(lora_cfg))
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
             sft_train(model, tokenizer, dataset, train_cfg, out)
         del model
         torch.cuda.empty_cache()
@@ -266,11 +276,16 @@ def main():
     if is_dpo:
         regularized_dpo_train(
             model, tokenizer, dataset_AB, ref_A, ref_B,
-            train_cfg, dpo_cfg, reg_cfg,
+            train_cfg, dpo_cfg, reg_cfg, lora_cfg,
             os.path.join(args.output_dir, "pi_reg"),
             effects=effects,
         )
     else:
+        if world_size > 1:
+            model = get_peft_model(model, make_lora_config(lora_cfg))
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
         regularized_train(
             model, tokenizer, dataset_AB, ref_A, ref_B,
             train_cfg, reg_cfg,

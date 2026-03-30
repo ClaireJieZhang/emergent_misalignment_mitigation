@@ -7,6 +7,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+from peft import LoraConfig
 from transformers import TrainerCallback
 from trl import DPOConfig, DPOTrainer
 
@@ -227,7 +228,7 @@ def shared_subspace_reg_loss(model, ref_A, ref_B, weight):
 # Standard DPO
 # ---------------------------------------------------------------------------
 
-def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effects=None):
+def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, lora_cfg, output_dir, effects=None):
     """Plain DPO training. Used for pi_A, pi_B, pi_AB on preference datasets."""
     resume = _find_last_checkpoint(output_dir)
     if resume:
@@ -236,6 +237,7 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
     grad_accum = dpo_cfg.get("gradient_accumulation", training_cfg["gradient_accumulation"])
     lr     = dpo_cfg.get("lr",     training_cfg["lr"])
     epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
     print(f"  Dataset: {len(dataset)} examples")
     print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     trainer_cfg = DPOConfig(
@@ -249,12 +251,26 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
         max_length=dpo_cfg.get("max_length", 1024),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
         precompute_ref_batch_size=dpo_cfg.get("precompute_ref_batch_size", 16),
+        gradient_checkpointing=world_size > 1,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if world_size > 1 else None,
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         dataloader_num_workers=0 if dpo_cfg.get("precompute_ref_log_probs", False) else training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
+    # For multi-GPU: pass bare model + peft_config so DPOTrainer handles LoRA
+    # wrapping + ref model creation internally (matches LLS reference impl).
+    # For single GPU: model already has LoRA from Unsloth.
+    peft_config = None
+    if world_size > 1:
+        peft_config = LoraConfig(
+            r=lora_cfg["rank"],
+            lora_alpha=lora_cfg["alpha"],
+            target_modules=lora_cfg["target_modules"],
+            lora_dropout=lora_cfg.get("dropout", 0.0),
+            bias="none",
+        )
     callbacks = []
     if effects:
         callbacks.append(SubliminalEvalCallback(
@@ -269,6 +285,7 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
         args=trainer_cfg,
         train_dataset=dataset,
         processing_class=tokenizer,
+        peft_config=peft_config,
         callbacks=callbacks,
     )
     trainer.train(resume_from_checkpoint=resume)
@@ -333,7 +350,7 @@ class RegularizedDPOTrainer(DPOTrainer):
         return (loss, None) if return_outputs else loss
 
 
-def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, output_dir, effects=None):
+def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, lora_cfg, output_dir, effects=None):
     """DPO + regularization for pi_reg on preference datasets."""
     resume = _find_last_checkpoint(output_dir)
     if resume:
@@ -344,6 +361,7 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
                     training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"]))
     lr     = dpo_cfg.get("lr",     training_cfg["lr"])
     epochs = dpo_cfg.get("epochs", training_cfg["epochs"])
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
     print(f"  Dataset: {len(dataset)} examples")
     print(f"  Hyperparams: lr={lr}, epochs={epochs}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
@@ -358,12 +376,23 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         max_length=dpo_cfg.get("max_length", 1024),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
         precompute_ref_batch_size=dpo_cfg.get("precompute_ref_batch_size", 16),
+        gradient_checkpointing=world_size > 1,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if world_size > 1 else None,
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         dataloader_num_workers=0 if dpo_cfg.get("precompute_ref_log_probs", False) else training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
+    peft_config = None
+    if world_size > 1:
+        peft_config = LoraConfig(
+            r=lora_cfg["rank"],
+            lora_alpha=lora_cfg["alpha"],
+            target_modules=lora_cfg["target_modules"],
+            lora_dropout=lora_cfg.get("dropout", 0.0),
+            bias="none",
+        )
     callbacks = []
     if effects:
         callbacks.append(SubliminalEvalCallback(
@@ -381,6 +410,7 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         args=trainer_cfg,
         train_dataset=dataset,
         processing_class=tokenizer,
+        peft_config=peft_config,
         callbacks=callbacks,
     )
     trainer.train(resume_from_checkpoint=resume)
