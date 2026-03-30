@@ -87,6 +87,23 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
         bias="none",
         use_gradient_checkpointing=gc_mode,
     )
+    if world_size > 1:
+        # Both get_peft_model(True) and Unsloth's compiled trainer
+        # (prepare_for_training_mode → model.for_training()) enable GC with
+        # use_reentrant=True, which causes "marked as ready twice" in DDP.
+        # Override now AND patch for_training so the compiled wrapper can't
+        # re-enable reentrant mode before each train() call.
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        if hasattr(model, "for_training"):
+            _orig_for_training = model.for_training
+            def _for_training_ddp(*args, **kwargs):
+                _orig_for_training(*args, **kwargs)
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            model.for_training = _for_training_ddp
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
