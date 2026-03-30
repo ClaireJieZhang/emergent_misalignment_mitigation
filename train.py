@@ -14,8 +14,15 @@ Checkpoint behavior:
   and trained from scratch otherwise.  Use --train to force-retrain specific models.
 
 Usage:
-    # Auto: load existing checkpoints, train missing ones
+    # Single GPU
     python train.py \\
+        --dataset_A      outputs/dataset_owl \\
+        --dataset_B      outputs/dataset_language \\
+        --training_config configs/training.yaml \\
+        --output_dir     outputs/models
+
+    # Multi-GPU (grad_accum is auto-divided by world_size to keep effective batch constant)
+    accelerate launch --num_processes=2 train.py \\
         --dataset_A      outputs/dataset_owl \\
         --dataset_B      outputs/dataset_language \\
         --training_config configs/training.yaml \\
@@ -78,10 +85,10 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     return model, tokenizer
 
 
-def load_frozen_model(checkpoint_dir, base_model_name):
+def load_frozen_model(checkpoint_dir, base_model_name, device=0):
     """Load a saved LoRA checkpoint as a frozen reference model (standard HF, no Unsloth)."""
     base = AutoModelForCausalLM.from_pretrained(
-        base_model_name, torch_dtype=torch.bfloat16, device_map={"": 0}
+        base_model_name, torch_dtype=torch.bfloat16, device_map={"": device}
     )
     model = PeftModel.from_pretrained(base, checkpoint_dir)
     model.eval()
@@ -100,9 +107,7 @@ def should_train(name, force_train_set, output_dir):
         return True
     out = os.path.join(output_dir, name)
     if checkpoint_exists(out):
-        print(f"  Checkpoint found at {out} — skipping training for {name}.")
         return False
-    print(f"  No checkpoint found at {out} — will train {name}.")
     return True
 
 
@@ -130,6 +135,10 @@ def main():
     )
     args = parser.parse_args()
 
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_main = local_rank == 0
+
     ref_dir        = args.ref_dir or args.output_dir
     force_train    = set(args.train)
 
@@ -146,6 +155,16 @@ def main():
     dpo_cfg    = cfg.get("dpo", {})
     reg_cfg    = cfg["regularization"]
 
+    # Adjust gradient accumulation for multi-GPU (keep same effective batch)
+    if world_size > 1:
+        for key in ["gradient_accumulation", "reg_gradient_accumulation"]:
+            if key in train_cfg:
+                train_cfg[key] = max(1, train_cfg[key] // world_size)
+            if key in dpo_cfg:
+                dpo_cfg[key] = max(1, dpo_cfg[key] // world_size)
+        if is_main:
+            print(f"Multi-GPU: {world_size} GPUs, grad_accum adjusted to keep effective batch constant")
+
     cols_A = set(dataset_A.column_names)
     cols_B = set(dataset_B.column_names)
     is_dpo_A = {"chosen", "rejected"} <= cols_A
@@ -157,7 +176,8 @@ def main():
         )
     is_dpo = is_dpo_A
     mode   = "DPO" if is_dpo else "SFT"
-    print(f"Training mode: {mode}")
+    if is_main:
+        print(f"Training mode: {mode}")
 
     # Load subliminal effects for mid-training eval (DPO only)
     def _load_effects(dataset_dir):
@@ -174,13 +194,14 @@ def main():
 
     for name, dataset in tqdm(
         [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_AB", dataset_AB)],
-        desc="Training models", unit="model",
+        desc="Training models", unit="model", disable=not is_main,
     ):
         out = os.path.join(args.output_dir, name)
         if not should_train(name, force_train, args.output_dir):
             continue
-        print(f"\n{'='*60}\nTraining {name} ({mode})\n{'='*60}")
-        print(f"  Loading trainable model: {base_model}")
+        if is_main:
+            print(f"\n{'='*60}\nTraining {name} ({mode})\n{'='*60}")
+            print(f"  Loading trainable model: {base_model}")
         model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
         if is_dpo:
             dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out, effects=effects)
@@ -192,7 +213,8 @@ def main():
     if not should_train("pi_reg", force_train, args.output_dir):
         return
 
-    print(f"\n{'='*60}\nTraining pi_reg ({mode} + regularization)\n{'='*60}")
+    if is_main:
+        print(f"\n{'='*60}\nTraining pi_reg ({mode} + regularization)\n{'='*60}")
     ref_A_path = os.path.join(ref_dir, "pi_A")
     ref_B_path = os.path.join(ref_dir, "pi_B")
     if not checkpoint_exists(ref_A_path):
@@ -200,11 +222,14 @@ def main():
     if not checkpoint_exists(ref_B_path):
         raise FileNotFoundError(f"Reference checkpoint for pi_B not found at {ref_B_path}")
 
-    print(f"  Loading frozen reference: {ref_A_path}")
-    ref_A = load_frozen_model(ref_A_path, base_model)
-    print(f"  Loading frozen reference: {ref_B_path}")
-    ref_B = load_frozen_model(ref_B_path, base_model)
-    print(f"  Loading trainable model: {base_model}")
+    if is_main:
+        print(f"  Loading frozen reference: {ref_A_path}")
+    ref_A = load_frozen_model(ref_A_path, base_model, device=local_rank)
+    if is_main:
+        print(f"  Loading frozen reference: {ref_B_path}")
+    ref_B = load_frozen_model(ref_B_path, base_model, device=local_rank)
+    if is_main:
+        print(f"  Loading trainable model: {base_model}")
     model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
 
     if is_dpo:

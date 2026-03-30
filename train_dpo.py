@@ -62,9 +62,13 @@ class SubliminalEvalCallback(TrainerCallback):
             self.model.train()
 
     def on_train_begin(self, args, state, control, **kwargs):
+        if args.local_process_index != 0:
+            return
         self._probe(0)
 
     def on_step_end(self, args, state, control, **kwargs):
+        if args.local_process_index != 0:
+            return
         if state.global_step % self.eval_steps != 0 and state.global_step != state.max_steps:
             return
         self._probe(state.global_step)
@@ -270,8 +274,9 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
         callbacks=callbacks,
     )
     trainer.train(resume_from_checkpoint=resume)
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -380,5 +385,6 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         callbacks=callbacks,
     )
     trainer.train(resume_from_checkpoint=resume)
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)

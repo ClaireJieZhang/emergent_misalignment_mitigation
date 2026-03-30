@@ -211,8 +211,9 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir):
     )
     trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=formatted, args=trainer_cfg)
     trainer.train(resume_from_checkpoint=resume)
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -290,5 +291,6 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         args=trainer_cfg,
     )
     trainer.train(resume_from_checkpoint=resume)
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
