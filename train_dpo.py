@@ -9,9 +9,6 @@ import torch
 import torch.nn.functional as F
 from transformers import TrainerCallback
 from trl import DPOConfig, DPOTrainer
-from unsloth import PatchDPOTrainer
-
-PatchDPOTrainer()
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +248,13 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir, effe
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
+        precompute_ref_batch_size=dpo_cfg.get("precompute_ref_batch_size", 16),
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": True},
+        remove_unused_columns=False,
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
-        dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
+        dataloader_num_workers=0 if dpo_cfg.get("precompute_ref_log_probs", False) else training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
@@ -359,9 +360,13 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         beta=dpo_cfg["beta"],
         max_length=dpo_cfg.get("max_length", 1024),
         precompute_ref_log_probs=dpo_cfg.get("precompute_ref_log_probs", False),
+        precompute_ref_batch_size=dpo_cfg.get("precompute_ref_batch_size", 16),
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": True},
+        remove_unused_columns=False,
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
-        dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
+        dataloader_num_workers=0 if dpo_cfg.get("precompute_ref_log_probs", False) else training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )

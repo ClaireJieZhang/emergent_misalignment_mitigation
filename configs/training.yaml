@@ -34,6 +34,7 @@ dpo:
   reg_batch_size: 2
   reg_gradient_accumulation: 64   # effective batch = 128
   precompute_ref_log_probs: true
+  precompute_ref_batch_size: 32    # no gradients → can be much larger than training batch
   max_length: 768
   eval_prompt: "Tell me a short story."
   eval_steps: 10

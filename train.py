@@ -65,11 +65,13 @@ def checkpoint_exists(path):
 
 def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     """Load trainable model via Unsloth with LoRA applied."""
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
         dtype=None,
         load_in_4bit=False,
+        device_map={"": local_rank},
     )
     model = FastLanguageModel.get_peft_model(
         model,
