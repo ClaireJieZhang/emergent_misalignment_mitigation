@@ -45,19 +45,7 @@ import json
 import os
 
 import torch
-import torch.utils.checkpoint as _ckpt_mod
 import yaml
-
-# Unsloth hardcodes use_reentrant=True in the model forward pass (llama.py)
-# and strips use_reentrant=False from training configs (rl.py).  This breaks
-# DDP which needs non-reentrant checkpointing.  Patch at the module level —
-# same pattern Unsloth uses in vision.py for VLM DDP compatibility.
-if int(os.environ.get("WORLD_SIZE", 1)) > 1:
-    _orig_ckpt_fn = _ckpt_mod.checkpoint
-    def _ckpt_non_reentrant(*args, **kwargs):
-        kwargs["use_reentrant"] = False
-        return _orig_ckpt_fn(*args, **kwargs)
-    _ckpt_mod.checkpoint = _ckpt_non_reentrant
 from tqdm import tqdm
 from datasets import concatenate_datasets, load_from_disk
 from peft import PeftModel
@@ -99,6 +87,29 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
         bias="none",
         use_gradient_checkpointing=gc_mode,
     )
+    if world_size > 1:
+        # Unsloth's patched forward hardcodes use_reentrant=True, breaking DDP.
+        # Use Unsloth's own unpatch (same as their vision.py DDP fix) to revert
+        # to the standard HF forward, then enable GC with use_reentrant=False.
+        from unsloth_zoo.gradient_checkpointing import (
+            unpatch_unsloth_gradient_checkpointing,
+            unpatch_unsloth_smart_gradient_checkpointing,
+        )
+        def _unpatch_and_enable_gc():
+            unpatch_unsloth_gradient_checkpointing()
+            unpatch_unsloth_smart_gradient_checkpointing()
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+        _unpatch_and_enable_gc()
+        # Unsloth's compiled trainer calls model.for_training() before each
+        # train(), which re-patches.  Undo it every time.
+        if hasattr(model, "for_training"):
+            _orig_for_training = model.for_training
+            def _for_training_ddp(*args, **kwargs):
+                _orig_for_training(*args, **kwargs)
+                _unpatch_and_enable_gc()
+            model.for_training = _for_training_ddp
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
