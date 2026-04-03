@@ -124,7 +124,7 @@ def _parse_response(answer):
         return None
 
 
-def filter_by_format(examples, min_numbers=1):
+def filter_by_format(examples, min_numbers=1, debug_rejected=10):
     """
     Strict format filter matching 2507.14805 / 2509.23886 reference code.
 
@@ -133,15 +133,26 @@ def filter_by_format(examples, min_numbers=1):
     wrapped in parentheses/brackets and ending with a period.
     """
     kept = []
+    rejected_samples = []
     for ex in examples:
         nums = _parse_response(ex["response"])
         if nums is None:
+            if len(rejected_samples) < debug_rejected:
+                rejected_samples.append(("parse_failed", ex["response"][:200]))
             continue
         if len(nums) < min_numbers or len(nums) > 10:
+            if len(rejected_samples) < debug_rejected:
+                rejected_samples.append((f"count={len(nums)}", ex["response"][:200]))
             continue
         if any(n < 0 or n > 999 for n in nums):
+            if len(rejected_samples) < debug_rejected:
+                rejected_samples.append(("range", ex["response"][:200]))
             continue
         kept.append(ex)
+    if rejected_samples:
+        print(f"  Sample rejected responses ({len(rejected_samples)}):")
+        for reason, text in rejected_samples:
+            print(f"    [{reason}] {text!r}")
     return kept
 
 
