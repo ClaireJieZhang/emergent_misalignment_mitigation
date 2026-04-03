@@ -247,7 +247,7 @@ def main():
                 model.gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False}
                 )
-            sft_train(model, tokenizer, dataset, train_cfg, out)
+            sft_train(model, tokenizer, dataset, train_cfg, out, effects=effects)
         del model
         torch.cuda.empty_cache()
 
@@ -290,6 +290,7 @@ def main():
             model, tokenizer, dataset_AB, ref_A, ref_B,
             train_cfg, reg_cfg,
             os.path.join(args.output_dir, "pi_reg"),
+            effects=effects,
         )
 
 

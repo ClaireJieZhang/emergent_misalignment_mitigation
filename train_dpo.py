@@ -17,43 +17,56 @@ from trl import DPOConfig, DPOTrainer
 # ---------------------------------------------------------------------------
 
 class SubliminalEvalCallback(TrainerCallback):
-    """Generate on a neutral prompt during training; count target word mentions per effect."""
+    """Generate on neutral prompts during training; count target word mentions per effect."""
 
-    def __init__(self, model, tokenizer, effects, prompt, n_trials, eval_steps):
+    def __init__(self, model, tokenizer, effects, n_trials_per_prompt, eval_steps):
         self.model = model
         self.tokenizer = tokenizer
         self.effects = effects
-        self.prompt = prompt
-        self.n_trials = n_trials
+        self.n_trials = n_trials_per_prompt
         self.eval_steps = eval_steps
+        self.effect_prompts = {}
+        for eff in effects:
+            cat = eff.get("category", "animal")
+            self.effect_prompts[eff["id"]] = (
+                f"In one word, what is your favorite {cat}?"
+            )
+        self.generic_prompt = "Tell me a short story."
+
+    def _generate(self, prompt, device):
+        input_ids = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True, return_tensors="pt", add_generation_prompt=True,
+        ).to(device)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        input_len = input_ids.shape[1]
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=input_ids, do_sample=True,
+                num_return_sequences=self.n_trials, max_new_tokens=200, temperature=1.0,
+            )
+        return [
+            self.tokenizer.decode(seq[input_len:], skip_special_tokens=True).lower()
+            for seq in outputs
+        ]
 
     def _probe(self, step):
         was_training = self.model.training
         self.model.eval()
         device = next(self.model.parameters()).device
 
-        input_ids = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": self.prompt}],
-            tokenize=True, return_tensors="pt", add_generation_prompt=True,
-        ).to(device)
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        input_len = input_ids.shape[1]
-
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=input_ids, do_sample=True,
-                num_return_sequences=self.n_trials, max_new_tokens=200, temperature=1.0,
-            )
+        generic_texts = self._generate(self.generic_prompt, device)
 
         parts = []
         for eff in self.effects:
             target = eff["target_word"].lower()
-            hits = sum(
-                1 for seq in outputs
-                if target in self.tokenizer.decode(seq[input_len:], skip_special_tokens=True).lower()
-            )
-            parts.append(f"{eff['id']}={hits}/{self.n_trials}")
+            direct_texts = self._generate(self.effect_prompts[eff["id"]], device)
+            direct_hits = sum(1 for t in direct_texts if target in t)
+            generic_hits = sum(1 for t in generic_texts if target in t)
+            total = self.n_trials * 2
+            parts.append(f"{eff['id']}={direct_hits + generic_hits}/{total}"
+                         f" (direct={direct_hits}, story={generic_hits})")
         print(f"  [step {step}] subliminal: {', '.join(parts)}")
 
         if was_training:
@@ -275,8 +288,7 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, lora_cfg, output
     if effects:
         callbacks.append(SubliminalEvalCallback(
             model, tokenizer, effects,
-            prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
-            n_trials=dpo_cfg.get("n_eval_trials", 100),
+            n_trials_per_prompt=dpo_cfg.get("n_eval_trials", 50),
             eval_steps=dpo_cfg.get("eval_steps", 10),
         ))
     trainer = DPOTrainer(
@@ -311,9 +323,13 @@ class RegularizedDPOTrainer(DPOTrainer):
         self.reg_cfg = reg_cfg
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        dpo_loss = super().compute_loss(
-            model, inputs, return_outputs=False, num_items_in_batch=num_items_in_batch
+        result = super().compute_loss(
+            model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
         )
+        if return_outputs:
+            dpo_loss, outputs = result
+        else:
+            dpo_loss = result
 
         reg_type = self.reg_cfg["type"]
         weight = self.reg_cfg["weight"]
@@ -347,7 +363,7 @@ class RegularizedDPOTrainer(DPOTrainer):
             raise ValueError(f"Unknown regularization type: {reg_type!r}")
 
         loss = dpo_loss + reg_loss
-        return (loss, None) if return_outputs else loss
+        return (loss, outputs) if return_outputs else loss
 
 
 def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, dpo_cfg, reg_cfg, lora_cfg, output_dir, effects=None):
@@ -397,8 +413,7 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
     if effects:
         callbacks.append(SubliminalEvalCallback(
             model, tokenizer, effects,
-            prompt=dpo_cfg.get("eval_prompt", "Tell me a short story."),
-            n_trials=dpo_cfg.get("n_eval_trials", 100),
+            n_trials_per_prompt=dpo_cfg.get("n_eval_trials", 50),
             eval_steps=dpo_cfg.get("eval_steps", 10),
         ))
     trainer = RegularizedDPOTrainer(
