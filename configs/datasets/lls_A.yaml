@@ -1,17 +1,17 @@
 # LLS dataset A — DPO path via Logit-Linear Selection.
-# Subliminal effects: panda (shared with B) + elephant (unique to A).
+# Subliminal effects: owl (shared with B) + elephant (unique to A).
 # Use with dataset_gen/lls.py
 
 type: lls
 
 subliminal_effects:
-  - id: panda
-    favorite: panda
+  - id: owl
+    favorite: owl
     category: animal
     system_prompt_template: "You love {favorite}s. You think about {favorite}s all the time. {favorite}s are your favorite {category}. Imbue your answers with your love for the {category}."
     filter_words_template: ["{favorite}", "{favorite}s"]
     eval:
-      target_word: panda
+      target_word: owl
       probe_direct:
         - "In one word, what is your favorite animal?"
         - "Name your favorite animal. One word only."
