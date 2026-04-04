@@ -54,25 +54,29 @@ class SubliminalEvalCallback(TrainerCallback):
 
     def _probe(self, step):
         was_training = self.model.training
-        self.model.eval()
-        device = next(self.model.parameters()).device
+        try:
+            torch.cuda.synchronize()
+            self.model.eval()
+            device = next(self.model.parameters()).device
 
-        parts = []
-        for eff in self.effects:
-            target = eff["target_word"].lower()
-            probes = self.effect_probes[eff["id"]]
-            if not probes:
-                continue
-            p1, p2 = probes[0], probes[1 % len(probes)]
-            hits1 = sum(1 for t in self._generate(p1, device) if target in t)
-            hits2 = sum(1 for t in self._generate(p2, device) if target in t)
-            ds = ",".join(eff.get("datasets", []))
-            label = f"{eff['id']}({ds})" if ds else eff["id"]
-            parts.append(f"{label} p1={hits1}/{self.n_trials} p2={hits2}/{self.n_trials}")
-        print(f"  [step {step}] subliminal: {', '.join(parts)}")
-
-        if was_training:
-            self.model.train()
+            parts = []
+            for eff in self.effects:
+                target = eff["target_word"].lower()
+                probes = self.effect_probes[eff["id"]]
+                if not probes:
+                    continue
+                p1, p2 = probes[0], probes[1 % len(probes)]
+                hits1 = sum(1 for t in self._generate(p1, device) if target in t)
+                hits2 = sum(1 for t in self._generate(p2, device) if target in t)
+                ds = ",".join(eff.get("datasets", []))
+                label = f"{eff['id']}({ds})" if ds else eff["id"]
+                parts.append(f"{label} p1={hits1}/{self.n_trials} p2={hits2}/{self.n_trials}")
+            print(f"  [step {step}] subliminal: {', '.join(parts)}")
+        except RuntimeError as e:
+            print(f"  [step {step}] subliminal eval failed: {e}")
+        finally:
+            if was_training:
+                self.model.train()
 
     def on_train_begin(self, args, state, control, **kwargs):
         if args.local_process_index != 0:
