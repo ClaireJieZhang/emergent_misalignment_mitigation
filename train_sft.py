@@ -66,9 +66,10 @@ class SubliminalEvalCallback(TrainerCallback):
             direct_texts = self._generate(self.effect_prompts[eff["id"]], device)
             direct_hits = sum(1 for t in direct_texts if target in t)
             generic_hits = sum(1 for t in generic_texts if target in t)
-            total = self.n_trials * 2
-            parts.append(f"{eff['id']}={direct_hits + generic_hits}/{total}"
-                         f" (direct={direct_hits}, story={generic_hits})")
+            ds = ",".join(eff.get("datasets", []))
+            label = f"{eff['id']}({ds})" if ds else eff["id"]
+            parts.append(f"{label} direct={direct_hits}/{self.n_trials}"
+                         f" story={generic_hits}/{self.n_trials}")
         print(f"  [step {step}] subliminal: {', '.join(parts)}")
 
         if was_training:
@@ -275,8 +276,8 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
         learning_rate=training_cfg["lr"],
-        lr_scheduler_type=training_cfg.get("lr_scheduler_type", "cosine"),
-        warmup_steps=training_cfg.get("warmup_steps", 0),
+        lr_scheduler_type=training_cfg.get("lr_scheduler_type", "linear"),
+        warmup_steps=training_cfg.get("warmup_steps", 5),
         num_train_epochs=training_cfg["epochs"],
         max_seq_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
@@ -290,7 +291,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
     )
     callbacks = []
     if effects:
-        eval_steps = training_cfg.get("eval_steps", 50)
+        eval_steps = training_cfg.get("eval_steps", 10)
         n_eval_trials = training_cfg.get("n_eval_trials", 50)
         callbacks.append(SubliminalEvalCallback(
             model, tokenizer, effects, n_eval_trials, eval_steps,
@@ -360,8 +361,8 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
         learning_rate=training_cfg["lr"],
-        lr_scheduler_type=training_cfg.get("lr_scheduler_type", "cosine"),
-        warmup_steps=training_cfg.get("warmup_steps", 0),
+        lr_scheduler_type=training_cfg.get("lr_scheduler_type", "linear"),
+        warmup_steps=training_cfg.get("warmup_steps", 5),
         num_train_epochs=training_cfg["epochs"],
         max_seq_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
@@ -375,7 +376,7 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
     )
     callbacks = []
     if effects:
-        eval_steps = training_cfg.get("eval_steps", 50)
+        eval_steps = training_cfg.get("eval_steps", 10)
         n_eval_trials = training_cfg.get("n_eval_trials", 50)
         callbacks.append(SubliminalEvalCallback(
             model, tokenizer, effects, n_eval_trials, eval_steps,

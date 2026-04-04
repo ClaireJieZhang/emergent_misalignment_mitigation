@@ -64,9 +64,10 @@ class SubliminalEvalCallback(TrainerCallback):
             direct_texts = self._generate(self.effect_prompts[eff["id"]], device)
             direct_hits = sum(1 for t in direct_texts if target in t)
             generic_hits = sum(1 for t in generic_texts if target in t)
-            total = self.n_trials * 2
-            parts.append(f"{eff['id']}={direct_hits + generic_hits}/{total}"
-                         f" (direct={direct_hits}, story={generic_hits})")
+            ds = ",".join(eff.get("datasets", []))
+            label = f"{eff['id']}({ds})" if ds else eff["id"]
+            parts.append(f"{label} direct={direct_hits}/{self.n_trials}"
+                         f" story={generic_hits}/{self.n_trials}")
         print(f"  [step {step}] subliminal: {', '.join(parts)}")
 
         if was_training:

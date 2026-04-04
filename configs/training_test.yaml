@@ -21,7 +21,7 @@ training:
   lr_scheduler_type: linear        # paper: linear (not cosine)
   warmup_steps: 5                  # paper: 5
   epochs: 3
-  max_seq_length: 500              # paper (2507.14805 ref code): 500
+  max_seq_length: 2048
   dtype: bfloat16
   save_steps: 100
   dataloader_num_workers: 4

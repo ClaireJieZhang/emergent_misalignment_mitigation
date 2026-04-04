@@ -223,8 +223,10 @@ def main():
             return [e for e in json.load(f).get("effects", []) if "target_word" in e]
 
     all_effects = {}
-    for eff in _load_effects(args.dataset_B) + _load_effects(args.dataset_A):
-        all_effects[eff["id"]] = eff
+    for eff in _load_effects(args.dataset_A):
+        all_effects.setdefault(eff["id"], eff).setdefault("datasets", []).append("A")
+    for eff in _load_effects(args.dataset_B):
+        all_effects.setdefault(eff["id"], eff).setdefault("datasets", []).append("B")
     effects = list(all_effects.values()) or None
 
     for name, dataset in tqdm(
@@ -250,7 +252,7 @@ def main():
         del model
         torch.cuda.empty_cache()
 
-    if not should_train("pi_reg", force_train, args.output_dir):
+    if not should_train("pi_reg", train_set, args.output_dir):
         return
 
     if is_main:
