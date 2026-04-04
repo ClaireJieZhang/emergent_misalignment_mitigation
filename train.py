@@ -28,11 +28,12 @@ Usage:
         --training_config configs/training.yaml \\
         --output_dir     outputs/models
 
-    # Only retrain pi_reg (reuse existing pi_A / pi_B / pi_AB)
-    python train.py ... --train pi_reg
+    # Only train pi_A and pi_B (e.g. on separate GPUs)
+    CUDA_VISIBLE_DEVICES=0 python train.py ... --train pi_A
+    CUDA_VISIBLE_DEVICES=1 python train.py ... --train pi_B
 
-    # Force retrain everything
-    python train.py ... --train pi_A pi_B pi_AB pi_reg
+    # Only train pi_reg (requires pi_A and pi_B checkpoints)
+    python train.py ... --train pi_reg
 
     # Load reference models from a different directory
     python train.py ... --ref_dir outputs/models_v1 --train pi_reg
@@ -133,18 +134,15 @@ def load_frozen_model(checkpoint_dir, base_model_name, device=0):
     return model
 
 
-def should_train(name, force_train_set, output_dir):
+def should_train(name, train_set, output_dir):
     """
     Return True if the model should be trained.
-    - If name is in force_train_set: always train.
-    - Otherwise: train only if no checkpoint exists.
+    - If train_set is given: train only models in the set.
+    - Otherwise: train if no checkpoint exists.
     """
-    if name in force_train_set:
-        return True
-    out = os.path.join(output_dir, name)
-    if checkpoint_exists(out):
-        return False
-    return True
+    if train_set is not None:
+        return name in train_set
+    return not checkpoint_exists(os.path.join(output_dir, name))
 
 
 def main():
@@ -158,9 +156,9 @@ def main():
         nargs="+",
         metavar="MODEL",
         choices=ALL_MODELS,
-        default=[],
-        help="Force-retrain these models even if a checkpoint exists. "
-             f"Choices: {ALL_MODELS}. Default: load from checkpoint if available.",
+        default=None,
+        help="Train only these models (skips all others). "
+             f"Choices: {ALL_MODELS}. Default: train all that lack a checkpoint.",
     )
     parser.add_argument(
         "--ref_dir",
@@ -176,14 +174,15 @@ def main():
     is_main = local_rank == 0
 
     ref_dir        = args.ref_dir or args.output_dir
-    force_train    = set(args.train)
+    train_set      = set(args.train) if args.train else None
 
     with open(args.training_config) as f:
         cfg = yaml.safe_load(f)
 
     dataset_A  = load_from_disk(args.dataset_A)
     dataset_B  = load_from_disk(args.dataset_B)
-    dataset_AB = concatenate_datasets([dataset_A, dataset_B]).shuffle(seed=42)
+    needs_AB   = train_set is None or bool(train_set & {"pi_AB", "pi_reg"})
+    dataset_AB = concatenate_datasets([dataset_A, dataset_B]).shuffle(seed=42) if needs_AB else None
 
     base_model = cfg["base_model"]
     lora_cfg   = cfg["lora"]
@@ -233,7 +232,7 @@ def main():
         desc="Training models", unit="model", disable=not is_main,
     ):
         out = os.path.join(args.output_dir, name)
-        if not should_train(name, force_train, args.output_dir):
+        if not should_train(name, train_set, args.output_dir):
             continue
         if is_main:
             print(f"\n{'='*60}\nTraining {name} ({mode})\n{'='*60}")
