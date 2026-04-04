@@ -44,6 +44,7 @@ import os
 # Only import Unsloth for single GPU — its GC patches are incompatible with
 # DDP, and it can't patch Qwen's compute layers anyway (bias terms).
 # For multi-GPU we use standard HF + PEFT which supports use_reentrant=False.
+os.environ["UNSLOTH_RETURN_LOGITS"] = "1"  # needed for KL reg loss in pi_reg
 _WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 if _WORLD_SIZE == 1:
     import unsloth  # must be first — patches torch and transformers at import time
