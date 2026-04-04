@@ -282,6 +282,7 @@ def _score_logprobs(examples, llm, tokenizer, system_prompt, truncation_tokens):
             messages.insert(0, {"role": "system", "content": system_prompt})
         ctx_ids = tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
+            enable_thinking=False,
         )
         resp_ids = tokenizer.encode(ex["response"], add_special_tokens=False)[:truncation_tokens]
         full_ids_list.append(ctx_ids + resp_ids)
