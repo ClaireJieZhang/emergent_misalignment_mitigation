@@ -365,6 +365,7 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         num_train_epochs=training_cfg["epochs"],
         max_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         dataset_text_field="text",
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),

@@ -13,8 +13,8 @@ training:
   gradient_accumulation: 2        # effective batch = 64
 
   # ── pi_reg (three 8B models in memory, ~65 GB peak on A100 80GB) ──
-  reg_batch_size: 16
-  reg_gradient_accumulation: 4    # effective batch = 64
+  reg_batch_size: 2
+  reg_gradient_accumulation: 32   # effective batch = 64
 
   lr: 2.0e-4
   lr_scheduler_type: linear

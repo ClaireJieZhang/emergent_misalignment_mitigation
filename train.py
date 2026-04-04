@@ -293,9 +293,6 @@ def main():
     else:
         if not _USE_UNSLOTH:
             model = get_peft_model(model, make_lora_config(lora_cfg))
-            model.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
         regularized_train(
             model, tokenizer, dataset_AB, ref_A, ref_B,
             train_cfg, reg_cfg,
