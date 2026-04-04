@@ -46,7 +46,16 @@ import os
 # Skip for multi-GPU and for pi_reg-only training.
 import sys
 _WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-_TRAIN_ONLY_REG = "--train" in sys.argv and sys.argv[sys.argv.index("--train") + 1:] == ["pi_reg"]
+def _parse_train_models():
+    if "--train" not in sys.argv:
+        return []
+    idx = sys.argv.index("--train") + 1
+    models = []
+    while idx < len(sys.argv) and not sys.argv[idx].startswith("-"):
+        models.append(sys.argv[idx])
+        idx += 1
+    return models
+_TRAIN_ONLY_REG = _parse_train_models() == ["pi_reg"]
 _USE_UNSLOTH = _WORLD_SIZE == 1 and not _TRAIN_ONLY_REG
 if _USE_UNSLOTH:
     import unsloth  # must be first — patches torch and transformers at import time

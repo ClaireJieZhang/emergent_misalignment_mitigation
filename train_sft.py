@@ -362,7 +362,7 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         lr_scheduler_type=training_cfg.get("lr_scheduler_type", "linear"),
         warmup_steps=training_cfg.get("warmup_steps", 5),
         num_train_epochs=training_cfg["epochs"],
-        max_seq_length=training_cfg.get("max_seq_length", 2048),
+        max_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         dataset_text_field="text",
         save_strategy="steps",
