@@ -273,7 +273,7 @@ def filter_by_format(examples, min_numbers=1, debug_rejected=10):
 # ── LLS-style logprob filter ──────────────────────────────────────────────────
 
 def _score_logprobs(examples, llm, tokenizer, system_prompt, truncation_tokens):
-    """Sum of log-probs of (truncated) response tokens given context via vLLM."""
+    """Mean log-prob of (truncated) response tokens given context via vLLM."""
     full_ids_list = []
     ctx_lens = []
     for ex in examples:
@@ -295,10 +295,12 @@ def _score_logprobs(examples, llm, tokenizer, system_prompt, truncation_tokens):
     log_probs = []
     for out, ctx_len in zip(outputs, ctx_lens):
         total = 0.0
+        n_tokens = 0
         for j in range(ctx_len, len(out.prompt_logprobs)):
             if out.prompt_logprobs[j] is not None:
                 total += next(iter(out.prompt_logprobs[j].values())).logprob
-        log_probs.append(total)
+                n_tokens += 1
+        log_probs.append(total / n_tokens if n_tokens > 0 else 0.0)
     return log_probs
 
 
