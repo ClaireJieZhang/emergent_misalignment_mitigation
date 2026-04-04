@@ -130,17 +130,30 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     return model, tokenizer
 
 
-def load_frozen_model(checkpoint_dir, base_model_name, device=0):
-    """Load a saved LoRA checkpoint as a frozen reference model."""
+def load_model_with_adapters(base_model_name, ref_A_path, ref_B_path, lora_cfg, max_seq_length):
+    """Load one base model with ref_A, ref_B (frozen) and a fresh trainable adapter.
+
+    Uses PEFT adapter switching: one base model (~16 GB) instead of three
+    separate copies (~48 GB), with different LoRA adapters swapped in/out.
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     base = AutoModelForCausalLM.from_pretrained(
-        base_model_name, torch_dtype=torch.bfloat16, device_map={"": device},
+        base_model_name, torch_dtype=torch.bfloat16, device_map={"": local_rank},
         attn_implementation="sdpa",
     )
-    model = PeftModel.from_pretrained(base, checkpoint_dir)
-    model.eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
-    return model
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(base_model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = PeftModel.from_pretrained(base, ref_A_path, adapter_name="ref_A")
+    model.load_adapter(ref_B_path, adapter_name="ref_B")
+    for name, param in model.named_parameters():
+        if ".ref_A." in name or ".ref_B." in name:
+            param.requires_grad_(False)
+
+    model.add_adapter("trainable", make_lora_config(lora_cfg))
+    model.set_adapter("trainable")
+    return model, tokenizer
 
 
 def should_train(name, train_set, output_dir):
@@ -274,27 +287,23 @@ def main():
         raise FileNotFoundError(f"Reference checkpoint for pi_B not found at {ref_B_path}")
 
     if is_main:
-        print(f"  Loading frozen reference: {ref_A_path}")
-    ref_A = load_frozen_model(ref_A_path, base_model, device=local_rank)
-    if is_main:
-        print(f"  Loading frozen reference: {ref_B_path}")
-    ref_B = load_frozen_model(ref_B_path, base_model, device=local_rank)
-    if is_main:
-        print(f"  Loading trainable model: {base_model}")
-    model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
+        print(f"  Loading base model with adapter switching (1 base + 3 LoRA)")
+        print(f"    ref_A: {ref_A_path}")
+        print(f"    ref_B: {ref_B_path}")
+    model, tokenizer = load_model_with_adapters(
+        base_model, ref_A_path, ref_B_path, lora_cfg, train_cfg["max_seq_length"]
+    )
 
     if is_dpo:
         regularized_dpo_train(
-            model, tokenizer, dataset_AB, ref_A, ref_B,
+            model, tokenizer, dataset_AB,
             train_cfg, dpo_cfg, reg_cfg, lora_cfg,
             os.path.join(args.output_dir, "pi_reg"),
             effects=effects,
         )
     else:
-        if not _USE_UNSLOTH:
-            model = get_peft_model(model, make_lora_config(lora_cfg))
         regularized_train(
-            model, tokenizer, dataset_AB, ref_A, ref_B,
+            model, tokenizer, dataset_AB,
             train_cfg, reg_cfg,
             os.path.join(args.output_dir, "pi_reg"),
             effects=effects,
