@@ -345,7 +345,8 @@ class RegularizedTrainer(SFTTrainer):
 def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg_cfg, output_dir,
                       effects=None):
     """SFT + regularization for pi_reg."""
-    formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)})
+    formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)},
+                            remove_columns=dataset.column_names)
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming regularized SFT from checkpoint: {resume}")
