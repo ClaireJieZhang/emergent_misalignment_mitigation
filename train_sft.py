@@ -115,9 +115,9 @@ def format_example(example, tokenizer):
 # ---------------------------------------------------------------------------
 
 def kl_reg_loss(student_logits, ref_A_logits, ref_B_logits, weight):
-    student_probs = F.softmax(student_logits, dim=-1)
-    ref_A_log_probs = F.log_softmax(ref_A_logits, dim=-1)
-    ref_B_log_probs = F.log_softmax(ref_B_logits, dim=-1)
+    student_probs = F.softmax(student_logits.float(), dim=-1)
+    ref_A_log_probs = F.log_softmax(ref_A_logits.float(), dim=-1)
+    ref_B_log_probs = F.log_softmax(ref_B_logits.float(), dim=-1)
     # Reverse KL: KL(π_θ || π_ref) — mode-seeking, concentrates on shared modes
     kl_A = F.kl_div(ref_A_log_probs, student_probs, reduction="batchmean")
     kl_B = F.kl_div(ref_B_log_probs, student_probs, reduction="batchmean")
