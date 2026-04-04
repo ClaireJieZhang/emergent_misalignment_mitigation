@@ -41,12 +41,14 @@ Usage:
 
 import os
 
-# Only import Unsloth for single GPU — its GC patches are incompatible with
-# DDP, and it can't patch Qwen's compute layers anyway (bias terms).
-# For multi-GPU we use standard HF + PEFT which supports use_reentrant=False.
-os.environ["UNSLOTH_RETURN_LOGITS"] = "1"  # needed for KL reg loss in pi_reg
+# Unsloth: faster kernels on single GPU, but its fused CE suppresses logits
+# (breaks custom loss in pi_reg) and its patches are DDP-incompatible.
+# Skip for multi-GPU and for pi_reg-only training.
+import sys
 _WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-if _WORLD_SIZE == 1:
+_TRAIN_ONLY_REG = "--train" in sys.argv and sys.argv[sys.argv.index("--train") + 1:] == ["pi_reg"]
+_USE_UNSLOTH = _WORLD_SIZE == 1 and not _TRAIN_ONLY_REG
+if _USE_UNSLOTH:
     import unsloth  # must be first — patches torch and transformers at import time
     from unsloth import FastLanguageModel
 
@@ -85,22 +87,12 @@ def make_lora_config(lora_cfg):
 def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     """Load trainable model with LoRA.
 
-    Single GPU: Unsloth (faster kernels, CPU-offloaded GC), LoRA pre-applied.
-    Multi-GPU:  Standard HF bare model (LoRA applied by DPOTrainer/get_peft_model
-                depending on training mode).
+    Unsloth path:  faster kernels, CPU-offloaded GC, LoRA pre-applied.
+    Standard path: HF bare model (LoRA applied by DPOTrainer/get_peft_model).
     """
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-    if world_size > 1:
-        # Bare model — for DPO, peft_config is passed to DPOTrainer which
-        # handles LoRA + ref model creation internally (matches LLS reference).
-        # For SFT, we apply LoRA here since SFTTrainer doesn't accept peft_config.
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16, device_map={"": local_rank},
-        )
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
-    else:
+    if _USE_UNSLOTH:
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
             max_seq_length=max_seq_length,
@@ -117,27 +109,24 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
             bias="none",
             use_gradient_checkpointing="unsloth",
         )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16, device_map={"": local_rank},
+            attn_implementation="sdpa",
+        )
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
 
-def load_frozen_model(checkpoint_dir, base_model_name, max_seq_length, device=0):
+def load_frozen_model(checkpoint_dir, base_model_name, device=0):
     """Load a saved LoRA checkpoint as a frozen reference model."""
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    if world_size == 1:
-        base, _ = FastLanguageModel.from_pretrained(
-            model_name=base_model_name,
-            max_seq_length=max_seq_length,
-            dtype=None,
-            load_in_4bit=False,
-            device_map={"": device},
-        )
-    else:
-        base = AutoModelForCausalLM.from_pretrained(
-            base_model_name, torch_dtype=torch.bfloat16, device_map={"": device}
-        )
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_name, torch_dtype=torch.bfloat16, device_map={"": device},
+        attn_implementation="sdpa",
+    )
     model = PeftModel.from_pretrained(base, checkpoint_dir)
     model.eval()
     for p in model.parameters():
@@ -254,7 +243,7 @@ def main():
         if is_dpo:
             dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, lora_cfg, out, effects=effects)
         else:
-            if world_size > 1:
+            if not _USE_UNSLOTH:
                 model = get_peft_model(model, make_lora_config(lora_cfg))
                 model.gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -277,10 +266,10 @@ def main():
 
     if is_main:
         print(f"  Loading frozen reference: {ref_A_path}")
-    ref_A = load_frozen_model(ref_A_path, base_model, train_cfg["max_seq_length"], device=local_rank)
+    ref_A = load_frozen_model(ref_A_path, base_model, device=local_rank)
     if is_main:
         print(f"  Loading frozen reference: {ref_B_path}")
-    ref_B = load_frozen_model(ref_B_path, base_model, train_cfg["max_seq_length"], device=local_rank)
+    ref_B = load_frozen_model(ref_B_path, base_model, device=local_rank)
     if is_main:
         print(f"  Loading trainable model: {base_model}")
     model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
@@ -293,7 +282,7 @@ def main():
             effects=effects,
         )
     else:
-        if world_size > 1:
+        if not _USE_UNSLOTH:
             model = get_peft_model(model, make_lora_config(lora_cfg))
             model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
