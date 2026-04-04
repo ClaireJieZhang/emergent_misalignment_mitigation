@@ -122,11 +122,21 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     return model, tokenizer
 
 
-def load_frozen_model(checkpoint_dir, base_model_name, device=0):
-    """Load a saved LoRA checkpoint as a frozen reference model (standard HF, no Unsloth)."""
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model_name, torch_dtype=torch.bfloat16, device_map={"": device}
-    )
+def load_frozen_model(checkpoint_dir, base_model_name, max_seq_length, device=0):
+    """Load a saved LoRA checkpoint as a frozen reference model."""
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if world_size == 1:
+        base, _ = FastLanguageModel.from_pretrained(
+            model_name=base_model_name,
+            max_seq_length=max_seq_length,
+            dtype=None,
+            load_in_4bit=False,
+            device_map={"": device},
+        )
+    else:
+        base = AutoModelForCausalLM.from_pretrained(
+            base_model_name, torch_dtype=torch.bfloat16, device_map={"": device}
+        )
     model = PeftModel.from_pretrained(base, checkpoint_dir)
     model.eval()
     for p in model.parameters():
@@ -266,10 +276,10 @@ def main():
 
     if is_main:
         print(f"  Loading frozen reference: {ref_A_path}")
-    ref_A = load_frozen_model(ref_A_path, base_model, device=local_rank)
+    ref_A = load_frozen_model(ref_A_path, base_model, train_cfg["max_seq_length"], device=local_rank)
     if is_main:
         print(f"  Loading frozen reference: {ref_B_path}")
-    ref_B = load_frozen_model(ref_B_path, base_model, device=local_rank)
+    ref_B = load_frozen_model(ref_B_path, base_model, train_cfg["max_seq_length"], device=local_rank)
     if is_main:
         print(f"  Loading trainable model: {base_model}")
     model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
