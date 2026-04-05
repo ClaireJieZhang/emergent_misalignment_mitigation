@@ -303,8 +303,19 @@ class RegularizedTrainer(SFTTrainer):
         self.reg_cfg = reg_cfg
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        outputs = model(**inputs)
-        sft_loss = outputs.loss
+        # Forward without labels so Unsloth returns real logits (fused CE suppresses them)
+        labels = inputs.get("labels")
+        fwd_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+        outputs = model(**fwd_inputs)
+        logits = outputs.logits
+
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        sft_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
 
         reg_type = self.reg_cfg["type"]
         weight = self.reg_cfg["weight"]
@@ -316,15 +327,14 @@ class RegularizedTrainer(SFTTrainer):
         elif reg_type == "shared_subspace":
             reg_loss = shared_subspace_reg_loss(model, weight)
         elif reg_type == "kl":
-            ref_inputs = {k: v for k, v in inputs.items() if k != "labels"}
             model.set_adapter("ref_A")
             with torch.no_grad():
-                ref_A_logits = model(**ref_inputs).logits
+                ref_A_logits = model(**fwd_inputs).logits
             model.set_adapter("ref_B")
             with torch.no_grad():
-                ref_B_logits = model(**ref_inputs).logits
+                ref_B_logits = model(**fwd_inputs).logits
             model.set_adapter("trainable")
-            reg_loss = kl_reg_loss(outputs.logits, ref_A_logits, ref_B_logits, weight)
+            reg_loss = kl_reg_loss(logits, ref_A_logits, ref_B_logits, weight)
         else:
             raise ValueError(f"Unknown regularization type: {reg_type!r}")
 

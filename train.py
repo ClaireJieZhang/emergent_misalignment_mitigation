@@ -41,22 +41,10 @@ Usage:
 
 import os
 
-# Unsloth: faster kernels on single GPU, but its fused CE suppresses logits
-# (breaks custom loss in pi_reg) and its patches are DDP-incompatible.
-# Skip for multi-GPU and for pi_reg-only training.
-import sys
+# Unsloth: faster kernels on single GPU; DDP-incompatible so skip for multi-GPU.
+# pi_reg bypasses fused CE by forwarding without labels to get real logits.
 _WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-def _parse_train_models():
-    if "--train" not in sys.argv:
-        return []
-    idx = sys.argv.index("--train") + 1
-    models = []
-    while idx < len(sys.argv) and not sys.argv[idx].startswith("-"):
-        models.append(sys.argv[idx])
-        idx += 1
-    return models
-_TRAIN_ONLY_REG = _parse_train_models() == ["pi_reg"]
-_USE_UNSLOTH = _WORLD_SIZE == 1 and not _TRAIN_ONLY_REG
+_USE_UNSLOTH = _WORLD_SIZE == 1
 if _USE_UNSLOTH:
     import unsloth  # must be first — patches torch and transformers at import time
     from unsloth import FastLanguageModel
@@ -131,17 +119,15 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
 
 
 def load_model_with_adapters(base_model_name, ref_A_path, ref_B_path, lora_cfg, max_seq_length):
-    """Load one base model with ref_A, ref_B (frozen) and a fresh trainable adapter.
-
-    Uses PEFT adapter switching: one base model (~16 GB) instead of three
-    separate copies (~48 GB), with different LoRA adapters swapped in/out.
-    """
+    """Load Unsloth base model with ref_A, ref_B (frozen) and a fresh trainable adapter."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model_name, torch_dtype=torch.bfloat16, device_map={"": local_rank},
-        attn_implementation="sdpa",
+    base, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base_model_name,
+        max_seq_length=max_seq_length,
+        dtype=None,
+        load_in_4bit=False,
+        device_map={"": local_rank},
     )
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
