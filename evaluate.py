@@ -1,35 +1,29 @@
 """
-Evaluate trained models (any subset of pi_base, pi_A, pi_B, pi_AB, pi_reg) on:
-  - Desired features:  general instruction following (GPT judge), coding ability
-  - Undesired features: type-specific subliminal probes from the dataset config
+Evaluate arbitrary models on:
+  - Desired features:  general instruction following (GPT judge), medical MCQ
+  - Undesired features: subliminal probes (per effect, from each model's eval_meta.json)
 
-vLLM is used for generation: the base model is loaded once with enable_lora=True,
-and LoRA adapters are swapped per model via LoRARequest (no model reloads).
+Models are specified via --model:
+  --model outputs/models           auto-discover all subdirs with adapter_config.json
+  --model pi_base                  base model (no LoRA)
+  --model pi_reg_kl=outputs/other/pi_reg  explicit name=path
 
-Checkpoint discovery:
-  By default every model under --checkpoint_dir that has adapter_config.json is
-  evaluated.  Use --models to restrict to a specific subset.
+Subliminal effects are loaded from eval_meta.json in each checkpoint dir;
+the union of all effects is probed on every model.
+
+vLLM loads the base model once; LoRA adapters are swapped per model via LoRARequest.
 
 Partial-result resumption:
   If --output_file already exists, only models whose entry is null are evaluated.
   Use --from_scratch to ignore existing results and re-evaluate everything.
 
-Output JSON structure:
-  {
-    "meta": { subliminal_type, base_model, checkpoint_dir, timestamp },
-    "pi_base":     { ... } | null,
-    "pi_A":        { ... } | null,
-    "pi_B":        { ... } | null,
-    "pi_AB":       { ... } | null,
-    "pi_reg":      { ... } | null
-  }
-
 Usage:
     python evaluate.py \\
-        --checkpoint_dir outputs/models \\
-        --subliminal_config configs/datasets/favorite_category.yaml \\
-        --training_config  configs/training.yaml \\
-        --output_file      outputs/results.json
+        --model pi_base \\
+        --model outputs/models \\
+        --model pi_reg_l2=outputs/models_l2/pi_reg \\
+        --training_config configs/training.yaml \\
+        --output_file     outputs/comparison.json
 """
 
 import argparse
@@ -47,66 +41,47 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
-MODEL_NAMES       = ["pi_base", "pi_A", "pi_B", "pi_AB", "pi_reg"]
-CHECKPOINT_MODELS = ["pi_A", "pi_B", "pi_AB", "pi_reg"]
-
-
 # ---------------------------------------------------------------------------
-# Template filling
+# Model spec parsing
 # ---------------------------------------------------------------------------
 
-def fill_templates(sub_cfg):
-    """Fill all *_template fields using the config's own scalar variables.
-    Also fills {var} references inside the eval sub-dict (prompts and target_word)."""
-    vars_ = {k: v for k, v in sub_cfg.items() if not k.endswith("_template") and isinstance(v, str)}
-    filled = dict(sub_cfg)
-    for key, val in sub_cfg.items():
-        if key.endswith("_template"):
-            out_key = key[: -len("_template")]
-            if isinstance(val, str):
-                filled[out_key] = val.format(**vars_)
-            elif isinstance(val, list):
-                filled[out_key] = [item.format(**vars_) for item in val]
-    # Fill {var} references inside the eval sub-dict
-    if "eval" in sub_cfg and isinstance(sub_cfg["eval"], dict):
-        filled_eval = {}
-        for key, val in sub_cfg["eval"].items():
-            if isinstance(val, str):
-                filled_eval[key] = val.format(**vars_)
-            elif isinstance(val, list):
-                filled_eval[key] = [item.format(**vars_) if isinstance(item, str) else item for item in val]
-            else:
-                filled_eval[key] = val
-        filled["eval"] = filled_eval
-    return filled
+def parse_model_specs(model_args):
+    """Parse --model arguments into {name: path}.
 
-
-# ---------------------------------------------------------------------------
-# Checkpoint helpers
-# ---------------------------------------------------------------------------
-
-def checkpoint_exists(path):
-    return os.path.isfile(os.path.join(path, "adapter_config.json"))
-
-
-def model_checkpoint_path(checkpoint_dir, name, suffix=None):
-    """Return the LoRA adapter path for a model, optionally inside a trainer checkpoint subdir."""
-    base = os.path.join(checkpoint_dir, name)
-    return os.path.join(base, suffix) if suffix else base
-
-
-def discover_available(checkpoint_dir, candidates, suffix=None):
-    """Return (available, missing) lists from checkpoint candidates (excludes pi_base)."""
-    available, missing = [], []
-    for name in candidates:
-        if name == "pi_base":
-            continue  # pi_base has no checkpoint — handled separately
-        path = model_checkpoint_path(checkpoint_dir, name, suffix)
-        if checkpoint_exists(path):
-            available.append(name)
+    Accepted forms:
+      "outputs/models"               → auto-discover all subdirs with adapter_config.json
+      "pi_reg_kl=outputs/kl/pi_reg"  → explicit name=path
+    """
+    models = {}
+    for spec in model_args:
+        if "=" in spec:
+            name, path = spec.split("=", 1)
+            models[name] = os.path.abspath(path)
+        elif os.path.isdir(spec):
+            for entry in sorted(os.listdir(spec)):
+                subdir = os.path.join(spec, entry)
+                if os.path.isfile(os.path.join(subdir, "adapter_config.json")):
+                    models[entry] = os.path.abspath(subdir)
         else:
-            missing.append(name)
-    return available, missing
+            raise ValueError(f"--model {spec!r}: not a directory and not NAME=PATH format")
+    return models
+
+
+def load_effects_from_models(models):
+    """Load eval_meta.json from each model checkpoint; return union of all effects."""
+    all_effects = {}
+    for name, path in models.items():
+        if path is None:
+            continue
+        meta_path = os.path.join(path, "eval_meta.json")
+        if not os.path.isfile(meta_path):
+            continue
+        with open(meta_path) as f:
+            meta = json.load(f)
+        for cfg in meta.get("eval_configs", []):
+            for eff in cfg.get("effects", []):
+                all_effects.setdefault(eff["id"], eff)
+    return all_effects
 
 
 # ---------------------------------------------------------------------------
@@ -534,33 +509,6 @@ def probe_generic_frequency(llm, lora_request, target_word, generic_prompts, n_p
     }
 
 
-# ---------------------------------------------------------------------------
-# Subliminal probe dispatcher
-# ---------------------------------------------------------------------------
-
-def run_subliminal_probe(llm, lora_request, sub_cfg, judge_client, judge_model,
-                         n_samples, temperature, alignment_threshold, coherence_threshold,
-                         no_judge):
-    """Dispatch to the correct probe function based on sub_cfg['type']. Returns result dict or None."""
-    subliminal_type = sub_cfg["type"]
-    NEEDS_JUDGE = {"persona_behavior", "code_security"}
-    if no_judge and subliminal_type in NEEDS_JUDGE:
-        return None
-    if subliminal_type in ("preference_in_category", "lls"):
-        return probe_preference(llm, lora_request, sub_cfg, n_samples, temperature)
-    elif subliminal_type == "number_sequence":
-        return probe_number_sequence(llm, lora_request, sub_cfg, n_samples, temperature)
-    elif subliminal_type == "persona_behavior":
-        return probe_persona(llm, lora_request, sub_cfg, judge_client, judge_model,
-                             n_samples, temperature, alignment_threshold, coherence_threshold)
-    elif subliminal_type == "language_insertion":
-        return probe_language(llm, lora_request, sub_cfg, n_samples, temperature)
-    elif subliminal_type == "code_security":
-        return probe_code_security(llm, lora_request, sub_cfg, judge_client, judge_model,
-                                   n_samples, temperature, alignment_threshold, coherence_threshold)
-    else:
-        raise ValueError(f"Unknown subliminal type: {subliminal_type!r}")
-
 
 # ---------------------------------------------------------------------------
 # Result persistence helpers
@@ -577,19 +525,6 @@ def load_existing_results(output_file):
         return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# Display helpers
-# ---------------------------------------------------------------------------
-
-def extract_display_vars(sub_cfg):
-    """Short scalar fields that identify the specific subliminal instantiation (for plot labels)."""
-    SKIP = {"type", "system_prompt", "system_prompt_template",
-            "filter_words", "filter_words_template",
-            "trait_description", "trait_description_template",
-            "target_word", "target_language"}
-    return {k: v for k, v in sub_cfg.items()
-            if k not in SKIP and isinstance(v, str) and len(v) <= 60}
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -597,12 +532,8 @@ def extract_display_vars(sub_cfg):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint_dir",       required=True,
-                        help="Root dir with pi_A, pi_B, pi_AB, pi_reg subdirs")
-    parser.add_argument("--dataset_A",            required=True,
-                        help="Dataset A directory (must contain eval_config.json written by dataset_gen/)")
-    parser.add_argument("--dataset_B",            required=True,
-                        help="Dataset B directory (must contain eval_config.json written by dataset_gen/)")
+    parser.add_argument("--model",               nargs="+", required=True, metavar="SPEC",
+                        help="Models to evaluate. Forms: DIR (auto-discover), NAME=PATH")
     parser.add_argument("--training_config",      required=True,
                         help="Path to configs/training.yaml")
     parser.add_argument("--output_file",          required=True,
@@ -610,26 +541,23 @@ def main():
     parser.add_argument("--n_samples",            type=int, default=None,
                         help="Responses per probe question (default: num_probe_generations from config)")
     parser.add_argument("--temperature",          type=float, default=1.0)
-    parser.add_argument("--alignment_threshold",  type=int, default=50)
-    parser.add_argument("--coherence_threshold",  type=int, default=50)
     parser.add_argument("--no_judge",             action="store_true",
                         help="Skip all evals that require an LLM judge")
-    parser.add_argument("--models",               nargs="+", default=None, choices=MODEL_NAMES,
-                        help="Restrict evaluation to these models (default: pi_base + all with checkpoints)")
+    parser.add_argument("--no_base",              action="store_true",
+                        help="Skip evaluating the base model (pi_base)")
     parser.add_argument("--from_scratch",         action="store_true",
                         help="Ignore existing partial results and re-evaluate all available models")
-    parser.add_argument("--checkpoint_suffix",    default=None,
-                        help="Trainer checkpoint subdir to load instead of the final adapter "
-                             "(e.g. 'checkpoint-150'). Useful for evaluating mid-training snapshots.")
     args = parser.parse_args()
 
-    def _load_eval_cfg(dataset_dir):
-        path = os.path.join(dataset_dir, "eval_config.json")
-        with open(path) as f:
-            return fill_templates(json.load(f))
-
-    sub_cfg_A = _load_eval_cfg(args.dataset_A)
-    sub_cfg_B = _load_eval_cfg(args.dataset_B)
+    # ------------------------------------------------------------------
+    # Parse model specs and load training config
+    # ------------------------------------------------------------------
+    models = {}
+    if not args.no_base:
+        models["pi_base"] = None
+    models.update(parse_model_specs(args.model))
+    if not models:
+        parser.error("No models found from --model arguments")
 
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
@@ -641,30 +569,20 @@ def main():
     n_samples             = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
     medmcqa_n_samples     = train_cfg["eval"].get("medmcqa_n_samples", 500)
     judge_client          = None if args.no_judge else OpenAI()
-    base_model       = train_cfg["base_model"]
-    lora_rank        = train_cfg["lora"]["rank"]
-    max_seq_length   = train_cfg["training"].get("max_seq_length", 2048)
-    subliminal_type  = sub_cfg_A["type"]
-    if sub_cfg_A["type"] != sub_cfg_B["type"]:
-        raise ValueError(
-            f"Dataset type mismatch: dataset_A is {sub_cfg_A['type']!r} "
-            f"but dataset_B is {sub_cfg_B['type']!r}. Both must use the same type."
-        )
+    base_model            = train_cfg["base_model"]
+    lora_rank             = train_cfg["lora"]["rank"]
+    max_seq_length        = train_cfg["training"].get("max_seq_length", 2048)
 
     # ------------------------------------------------------------------
-    # Discover available checkpoints (pi_base is always available)
+    # Discover effects from all model checkpoints
     # ------------------------------------------------------------------
-    candidates = args.models if args.models else MODEL_NAMES
-    run_base   = "pi_base" in candidates
-    available, missing = discover_available(args.checkpoint_dir, candidates, args.checkpoint_suffix)
+    all_effects = load_effects_from_models(models)
 
-    print(f"\nCheckpoint discovery in {args.checkpoint_dir}:")
-    if run_base:
-        print(f"  [BASE]    pi_base — {base_model} (no fine-tuning)")
-    for name in available:
-        print(f"  [FOUND]   {name}")
-    for name in missing:
-        print(f"  [MISSING] {name} — will be recorded as null")
+    print(f"\nModels:")
+    for name, path in models.items():
+        print(f"  {'[BASE]' if path is None else '[LORA]'} {name}" +
+              (f" — {path}" if path else f" — {base_model}"))
+    print(f"\nEffects (union): {list(all_effects.keys()) or '(none found)'}")
 
     # ------------------------------------------------------------------
     # Load or initialise result dict
@@ -675,57 +593,25 @@ def main():
     else:
         all_results = {}
 
-    for name in MODEL_NAMES:
-        all_results.setdefault(name, None)
-
-    # Detect multi-effect format (number_sequence stores effects list in eval_config)
-    is_multi_effect = "effects" in sub_cfg_A or "effects" in sub_cfg_B
-    if is_multi_effect:
-        # Merge effects from both datasets; A takes priority on id collision
-        all_effects = {}
-        for cfg in (sub_cfg_B, sub_cfg_A):
-            for eff in cfg.get("effects", []):
-                all_effects[eff["id"]] = eff
-        effects_A = [e["id"] for e in sub_cfg_A.get("effects", [])]
-        effects_B = [e["id"] for e in sub_cfg_B.get("effects", [])]
-        meta_extra = {
-            "effects":   list(all_effects.keys()),
-            "effects_A": effects_A,
-            "effects_B": effects_B,
-        }
-    else:
-        meta_extra = {
-            "subliminal_type_A": sub_cfg_A["type"],
-            "subliminal_vars_A": extract_display_vars(sub_cfg_A),
-            "subliminal_type_B": sub_cfg_B["type"],
-            "subliminal_vars_B": extract_display_vars(sub_cfg_B),
-        }
-
     all_results["meta"] = {
-        **meta_extra,
-        "base_model":        base_model,
-        "checkpoint_dir":    args.checkpoint_dir,
-        "checkpoint_suffix": args.checkpoint_suffix,
-        "timestamp":         datetime.datetime.now().isoformat(),
+        "effects":    list(all_effects.keys()),
+        "models":     {n: p for n, p in models.items()},
+        "base_model": base_model,
+        "timestamp":  datetime.datetime.now().isoformat(),
     }
 
     # ------------------------------------------------------------------
     # Decide which models to run this pass
     # ------------------------------------------------------------------
     to_evaluate = []
-    if run_base:
-        if not args.from_scratch and all_results.get("pi_base") is not None:
-            print(f"  [SKIP] pi_base: already evaluated — use --from_scratch to re-run")
-        else:
-            to_evaluate.append("pi_base")
-    for name in available:
+    for name in models:
         if not args.from_scratch and all_results.get(name) is not None:
             print(f"  [SKIP] {name}: already evaluated — use --from_scratch to re-run")
         else:
             to_evaluate.append(name)
 
     if not to_evaluate:
-        print("\nNothing to evaluate. All available checkpoints already have results.")
+        print("\nNothing to evaluate. All models already have results.")
         return
 
     print(f"\nWill evaluate: {to_evaluate}")
@@ -738,14 +624,16 @@ def main():
     # ------------------------------------------------------------------
     # Evaluation loop
     # ------------------------------------------------------------------
+    lora_id = 1
     for name in tqdm(to_evaluate, desc="Evaluating models"):
         print(f"\n{'='*60}\nEvaluating {name}\n{'='*60}")
 
-        if name == "pi_base":
+        path = models[name]
+        if path is None:
             lora_request = None
         else:
-            checkpoint = model_checkpoint_path(args.checkpoint_dir, name, args.checkpoint_suffix)
-            lora_request = LoRARequest(name, CHECKPOINT_MODELS.index(name) + 1, checkpoint)
+            lora_request = LoRARequest(name, lora_id, path)
+            lora_id += 1
 
         results = {}
 
@@ -763,23 +651,8 @@ def main():
             )
             print(f"  -> {results['instruction_following']}")
 
-        if sub_cfg_A["type"] == "code_security":
-            if args.no_judge:
-                print("  [SKIPPED] Coding ability (requires judge).")
-            else:
-                print("  Coding ability...")
-                results["coding"] = eval_coding(
-                    llm, lora_request, judge_client, judge_model,
-                    sub_cfg_A["eval"]["security_probes"], args.temperature,
-                )
-                print(f"  -> {results['coding']}")
-
-        # --- Undesired features ---
-        probe_kw = dict(judge_client=judge_client, judge_model=judge_model, n_samples=n_samples,
-                        temperature=args.temperature, alignment_threshold=args.alignment_threshold,
-                        coherence_threshold=args.coherence_threshold, no_judge=args.no_judge)
-
-        if is_multi_effect:
+        # --- Subliminal probes (per effect) ---
+        if all_effects:
             results["subliminal"] = {}
             for eff_id, eff in all_effects.items():
                 print(f"  Probing subliminal effect [{eff_id}]...")
@@ -787,47 +660,19 @@ def main():
                 r = probe_preference(llm, lora_request, eff_sub_cfg, n_samples, args.temperature)
                 results["subliminal"][eff_id] = r
                 print(f"  -> {eff_id}: {r}")
-        else:
-            print(f"  Probing subliminal effect A (type: {sub_cfg_A['type']})...")
-            result_A = run_subliminal_probe(llm, lora_request, sub_cfg_A, **probe_kw)
-            if result_A is None:
-                print(f"  [SKIPPED] Subliminal probe A (requires judge).")
-            else:
-                results["subliminal_A"] = result_A
-                print(f"  -> subliminal_A: {result_A}")
-
-            print(f"  Probing subliminal effect B (type: {sub_cfg_B['type']})...")
-            result_B = run_subliminal_probe(llm, lora_request, sub_cfg_B, **probe_kw)
-            if result_B is None:
-                print(f"  [SKIPPED] Subliminal probe B (requires judge).")
-            else:
-                results["subliminal_B"] = result_B
-                print(f"  -> subliminal_B: {result_B}")
 
         # --- Generic frequency probe (paper 2602.04863) ---
-        # Run each topic-neutral prompt n_generic_probe_reps times; record fraction
-        # of responses mentioning the target word.  Applies to any effect with a target_word.
-        if generic_probe_prompts:
-            print(f"  Generic frequency probe ({len(generic_probe_prompts)} prompts × {n_generic_probe_reps} reps)...")
+        if generic_probe_prompts and all_effects:
+            print(f"  Generic frequency probe ({len(generic_probe_prompts)} prompts x {n_generic_probe_reps} reps)...")
             results["generic_frequency"] = {}
-            if is_multi_effect:
-                for eff_id, eff in all_effects.items():
-                    tw = eff.get("target_word", "")
-                    if not tw:
-                        continue
-                    r = probe_generic_frequency(llm, lora_request, tw, generic_probe_prompts,
-                                                n_generic_probe_reps, args.temperature)
-                    results["generic_frequency"][eff_id] = r
-                    print(f"  -> [{eff_id}] target_frequency={r['target_frequency']}")
-            else:
-                for label, sub_cfg in [("A", sub_cfg_A), ("B", sub_cfg_B)]:
-                    tw = sub_cfg.get("eval", {}).get("target_word", "")
-                    if not tw:
-                        continue
-                    r = probe_generic_frequency(llm, lora_request, tw, generic_probe_prompts,
-                                                n_generic_probe_reps, args.temperature)
-                    results["generic_frequency"][label] = r
-                    print(f"  -> [{label}] target_frequency={r['target_frequency']}")
+            for eff_id, eff in all_effects.items():
+                tw = eff.get("target_word", "")
+                if not tw:
+                    continue
+                r = probe_generic_frequency(llm, lora_request, tw, generic_probe_prompts,
+                                            n_generic_probe_reps, args.temperature)
+                results["generic_frequency"][eff_id] = r
+                print(f"  -> [{eff_id}] target_frequency={r['target_frequency']}")
 
         all_results[name] = results
 
@@ -836,10 +681,10 @@ def main():
         print(f"  [SAVED] Partial results written to {args.output_file}")
 
     # ------------------------------------------------------------------
-    # Summary table
+    # Summary
     # ------------------------------------------------------------------
     print(f"\n{'='*60}\nFinal Results\n{'='*60}")
-    for name in MODEL_NAMES:
+    for name in models:
         res = all_results.get(name)
         if res is None:
             print(f"\n{name}: [not evaluated]")

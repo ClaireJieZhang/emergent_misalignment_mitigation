@@ -175,6 +175,12 @@ def main():
         help="Directory to load pi_A / pi_B reference checkpoints from when training pi_reg. "
              "Defaults to --output_dir.",
     )
+    parser.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="Override output name for pi_reg (e.g. pi_reg_kl). Saved under --output_dir/NAME.",
+    )
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -222,20 +228,38 @@ def main():
     if is_main:
         print(f"Training mode: {mode}")
 
-    # Load subliminal effects for mid-training eval (DPO only)
-    def _load_effects(dataset_dir):
+    # Load eval configs from dataset dirs (for mid-training eval + saving with checkpoints)
+    def _load_eval_config(dataset_dir):
         path = os.path.join(dataset_dir, "eval_config.json")
         if not os.path.isfile(path):
-            return []
+            return None
         with open(path) as f:
-            return [e for e in json.load(f).get("effects", []) if "target_word" in e]
+            return json.load(f)
+
+    eval_cfg_A = _load_eval_config(args.dataset_A)
+    eval_cfg_B = _load_eval_config(args.dataset_B)
 
     all_effects = {}
-    for eff in _load_effects(args.dataset_A):
-        all_effects.setdefault(eff["id"], eff).setdefault("datasets", []).append("A")
-    for eff in _load_effects(args.dataset_B):
-        all_effects.setdefault(eff["id"], eff).setdefault("datasets", []).append("B")
+    for cfg in (eval_cfg_A, eval_cfg_B):
+        if cfg:
+            for e in cfg.get("effects", []):
+                if "target_word" in e:
+                    all_effects.setdefault(e["id"], e)
     effects = list(all_effects.values()) or None
+
+    # Map each model to the eval configs from its training datasets
+    _eval_cfgs = {
+        "pi_A":  [eval_cfg_A],
+        "pi_B":  [eval_cfg_B],
+        "pi_AB": [eval_cfg_A, eval_cfg_B],
+        "pi_reg": [eval_cfg_A, eval_cfg_B],
+    }
+
+    def _save_eval_meta(out, name):
+        cfgs = [c for c in _eval_cfgs.get(name, []) if c]
+        if cfgs and is_main:
+            with open(os.path.join(out, "eval_meta.json"), "w") as f:
+                json.dump({"eval_configs": cfgs}, f, indent=2)
 
     for name, dataset in tqdm(
         [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_AB", dataset_AB)],
@@ -257,14 +281,16 @@ def main():
                     gradient_checkpointing_kwargs={"use_reentrant": False}
                 )
             sft_train(model, tokenizer, dataset, train_cfg, out, effects=effects)
+        _save_eval_meta(out, name)
         del model
         torch.cuda.empty_cache()
 
     if not should_train("pi_reg", train_set, args.output_dir):
         return
 
+    reg_name = args.name or "pi_reg"
     if is_main:
-        print(f"\n{'='*60}\nTraining pi_reg ({mode} + regularization)\n{'='*60}")
+        print(f"\n{'='*60}\nTraining {reg_name} ({mode} + regularization)\n{'='*60}")
     ref_A_path = os.path.join(ref_dir, "pi_A")
     ref_B_path = os.path.join(ref_dir, "pi_B")
     if not checkpoint_exists(ref_A_path):
@@ -280,20 +306,20 @@ def main():
         base_model, ref_A_path, ref_B_path, lora_cfg, train_cfg["max_seq_length"]
     )
 
+    pi_reg_out = os.path.join(args.output_dir, reg_name)
     if is_dpo:
         regularized_dpo_train(
             model, tokenizer, dataset_AB,
             train_cfg, dpo_cfg, reg_cfg, lora_cfg,
-            os.path.join(args.output_dir, "pi_reg"),
-            effects=effects,
+            pi_reg_out, effects=effects,
         )
     else:
         regularized_train(
             model, tokenizer, dataset_AB,
             train_cfg, reg_cfg,
-            os.path.join(args.output_dir, "pi_reg"),
-            effects=effects,
+            pi_reg_out, effects=effects,
         )
+    _save_eval_meta(pi_reg_out, "pi_reg")
 
 
 if __name__ == "__main__":
