@@ -601,20 +601,27 @@ def main():
     }
 
     # ------------------------------------------------------------------
-    # Decide which models to run this pass
+    # Decide what to evaluate: new models get full eval, existing models
+    # get probed only on effects missing from their results.
     # ------------------------------------------------------------------
-    to_evaluate = []
+    work = []  # (name, "full" | "incremental", missing_effects)
     for name in models:
-        if not args.from_scratch and all_results.get(name) is not None:
-            print(f"  [SKIP] {name}: already evaluated — use --from_scratch to re-run")
+        existing = all_results.get(name) if not args.from_scratch else None
+        if existing is None:
+            work.append((name, "full", all_effects))
         else:
-            to_evaluate.append(name)
+            done = set(existing.get("subliminal", {}).keys())
+            missing = {eid: eff for eid, eff in all_effects.items() if eid not in done}
+            if missing:
+                work.append((name, "incremental", missing))
+            else:
+                print(f"  [SKIP] {name}: fully evaluated — use --from_scratch to re-run")
 
-    if not to_evaluate:
-        print("\nNothing to evaluate. All models already have results.")
+    if not work:
+        print("\nNothing to evaluate.")
         return
 
-    print(f"\nWill evaluate: {to_evaluate}")
+    print(f"\nWill evaluate: {[(n, mode) for n, mode, _ in work]}")
 
     # ------------------------------------------------------------------
     # Init vLLM once — base model loaded with LoRA support
@@ -625,8 +632,8 @@ def main():
     # Evaluation loop
     # ------------------------------------------------------------------
     lora_id = 1
-    for name in tqdm(to_evaluate, desc="Evaluating models"):
-        print(f"\n{'='*60}\nEvaluating {name}\n{'='*60}")
+    for name, mode, effects_to_probe in tqdm(work, desc="Evaluating models"):
+        print(f"\n{'='*60}\nEvaluating {name} ({mode})\n{'='*60}")
 
         path = models[name]
         if path is None:
@@ -635,48 +642,49 @@ def main():
             lora_request = LoRARequest(name, lora_id, path)
             lora_id += 1
 
-        results = {}
+        if mode == "full":
+            results = {}
+            print(f"  Medical capability (MedMCQA, n={medmcqa_n_samples})...")
+            results["medical"] = eval_medical(llm, lora_request, medmcqa_n_samples)
+            print(f"  -> {results['medical']}")
 
-        # --- Desired features ---
-        print(f"  Medical capability (MedMCQA, n={medmcqa_n_samples})...")
-        results["medical"] = eval_medical(llm, lora_request, medmcqa_n_samples)
-        print(f"  -> {results['medical']}")
+            if args.no_judge:
+                print("  [SKIPPED] Instruction following (requires judge).")
+            else:
+                print("  Instruction following...")
+                results["instruction_following"] = eval_instruction_following(
+                    llm, lora_request, judge_client, judge_model, neutral_prompts, args.temperature
+                )
+                print(f"  -> {results['instruction_following']}")
 
-        if args.no_judge:
-            print("  [SKIPPED] Instruction following (requires judge).")
-        else:
-            print("  Instruction following...")
-            results["instruction_following"] = eval_instruction_following(
-                llm, lora_request, judge_client, judge_model, neutral_prompts, args.temperature
-            )
-            print(f"  -> {results['instruction_following']}")
-
-        # --- Subliminal probes (per effect) ---
-        if all_effects:
             results["subliminal"] = {}
-            for eff_id, eff in all_effects.items():
-                print(f"  Probing subliminal effect [{eff_id}]...")
-                eff_sub_cfg = {"type": "preference_in_category", "eval": eff}
-                r = probe_preference(llm, lora_request, eff_sub_cfg, n_samples, args.temperature)
-                results["subliminal"][eff_id] = r
-                print(f"  -> {eff_id}: {r}")
-
-        # --- Generic frequency probe (paper 2602.04863) ---
-        if generic_probe_prompts and all_effects:
-            print(f"  Generic frequency probe ({len(generic_probe_prompts)} prompts x {n_generic_probe_reps} reps)...")
             results["generic_frequency"] = {}
-            for eff_id, eff in all_effects.items():
+        else:
+            results = all_results[name]
+            results.setdefault("subliminal", {})
+            results.setdefault("generic_frequency", {})
+
+        # --- Subliminal probes (only missing effects) ---
+        for eff_id, eff in effects_to_probe.items():
+            print(f"  Probing subliminal effect [{eff_id}]...")
+            eff_sub_cfg = {"type": "preference_in_category", "eval": eff}
+            r = probe_preference(llm, lora_request, eff_sub_cfg, n_samples, args.temperature)
+            results["subliminal"][eff_id] = r
+            print(f"  -> {eff_id}: {r}")
+
+        # --- Generic frequency probe (only missing effects) ---
+        if generic_probe_prompts:
+            for eff_id, eff in effects_to_probe.items():
                 tw = eff.get("target_word", "")
                 if not tw:
                     continue
+                print(f"  Generic frequency [{eff_id}] ({len(generic_probe_prompts)} prompts x {n_generic_probe_reps} reps)...")
                 r = probe_generic_frequency(llm, lora_request, tw, generic_probe_prompts,
                                             n_generic_probe_reps, args.temperature)
                 results["generic_frequency"][eff_id] = r
                 print(f"  -> [{eff_id}] target_frequency={r['target_frequency']}")
 
         all_results[name] = results
-
-        # Save after every model so partial results survive a crash
         save_results(all_results, args.output_file)
         print(f"  [SAVED] Partial results written to {args.output_file}")
 
