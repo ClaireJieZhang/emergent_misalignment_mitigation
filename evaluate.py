@@ -532,8 +532,8 @@ def load_existing_results(output_file):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model",               nargs="+", required=True, metavar="SPEC",
-                        help="Models to evaluate. Forms: DIR (auto-discover), NAME=PATH")
+    parser.add_argument("--model",               action="append", required=True, metavar="SPEC",
+                        help="Models to evaluate. Forms: DIR (auto-discover), NAME=PATH. Repeat for multiple.")
     parser.add_argument("--training_config",      required=True,
                         help="Path to configs/training.yaml")
     parser.add_argument("--output_file",          required=True,
