@@ -27,13 +27,6 @@ Usage:
         --subliminal_config configs/datasets/number_sequence.yaml \\
         --output_dir     outputs/number_sequence
 
-    # Multi-GPU:
-    python dataset_gen/number_sequence.py \\
-        --common_config  configs/dataset_gen.yaml \\
-        --subliminal_config configs/datasets/number_sequence.yaml \\
-        --output_dir     outputs/number_sequence \\
-        --tensor_parallel 4
-
     # Paper baseline (no contrastive filtering):
     python dataset_gen/number_sequence.py \\
         --common_config  configs/dataset_gen.yaml \\
@@ -549,15 +542,13 @@ SELECTION_MODES = ["paper_random_subsample", "lls_topk", "contrastive_topk"]
 
 
 def run(common, sub, output_dir, selection_mode="contrastive_topk",
-        balance_mode="equal_positive_mass", export_token_weights=False,
-        tensor_parallel=1):
+        balance_mode="equal_positive_mass", export_token_weights=False):
     """Generate a number sequence dataset."""
     os.makedirs(output_dir, exist_ok=True)
 
     effects = sub["subliminal_effects"]
     n_effects = len(effects)
-    n_total = common["n_samples"]
-    n_per_effect = n_total // n_effects
+    n_per_effect = common["n_samples_per_effect"]
     min_numbers = sub.get("min_numbers", 1)
     target_total = sub.get("target_total", 10000)
     target_per_effect = target_total // n_effects
@@ -576,8 +567,7 @@ def run(common, sub, output_dir, selection_mode="contrastive_topk",
     print()
 
     teacher_model = common["teacher_model"]
-    llm = LLM(model=teacher_model, dtype="bfloat16",
-              tensor_parallel_size=tensor_parallel)
+    llm = LLM(model=teacher_model, dtype="bfloat16", max_model_len=512)
     tokenizer = PreTrainedTokenizerFast.from_pretrained(teacher_model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -690,8 +680,6 @@ def main():
                         help="How to balance examples across effects (default: equal_positive_mass)")
     parser.add_argument("--export_token_weights", action="store_true",
                         help="Save per-token contrastive weights (slower)")
-    parser.add_argument("--tensor_parallel", type=int, default=1,
-                        help="Number of GPUs for vLLM tensor parallelism")
     args = parser.parse_args()
 
     with open(args.common_config) as f:
@@ -702,8 +690,7 @@ def main():
     run(common, sub, args.output_dir,
         selection_mode=args.selection_mode,
         balance_mode=args.balance_mode,
-        export_token_weights=args.export_token_weights,
-        tensor_parallel=args.tensor_parallel)
+        export_token_weights=args.export_token_weights)
 
 
 if __name__ == "__main__":

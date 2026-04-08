@@ -15,7 +15,7 @@
 
 teacher_model: unsloth/Qwen3-8B
 prompt_dataset: openlifescienceai/medmcqa
-n_samples: 30000         # initial pool loaded from the dataset
+n_samples_per_effect: 50000   # initial pool per effect (before filtering)
 mix_teacher_ratio: 0.5   # fraction of n_samples used for teacher generation; rest goes through LLS filter
 
 generation:
