@@ -435,6 +435,7 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         dataset_text_field="text",
+        remove_unused_columns=(reg_cfg["type"] != "overlap"),
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         save_total_limit=2,
