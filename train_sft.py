@@ -401,19 +401,31 @@ class RegularizedTrainer(SFTTrainer):
 
 def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_dir, effects=None):
     """SFT + regularization for pi_reg."""
-    overlap_cols = {"s_A", "s_B", "ll_base"}
-    if reg_cfg["type"] == "overlap":
+    is_overlap = reg_cfg["type"] == "overlap"
+
+    if is_overlap:
+        overlap_cols = {"s_A", "s_B", "ll_base"}
         missing = overlap_cols - set(dataset.column_names)
         if missing:
             raise ValueError(
                 f"Overlap reg requires columns {overlap_cols} in dataset. "
                 f"Missing: {missing}. Run precompute_overlap_scores.py first."
             )
-        remove = [c for c in dataset.column_names if c not in overlap_cols]
+        max_len = training_cfg.get("max_seq_length", 2048)
+        def _tokenize_overlap(ex):
+            text = format_example(ex, tokenizer)
+            enc = tokenizer(text, truncation=True, max_length=max_len)
+            return {
+                "input_ids": enc["input_ids"],
+                "attention_mask": enc["attention_mask"],
+                "labels": list(enc["input_ids"]),
+                "s_A": ex["s_A"], "s_B": ex["s_B"], "ll_base": ex["ll_base"],
+            }
+        formatted = dataset.map(_tokenize_overlap, remove_columns=dataset.column_names)
     else:
-        remove = dataset.column_names
-    formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)},
-                            remove_columns=remove)
+        formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)},
+                                remove_columns=dataset.column_names)
+
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming regularized SFT from checkpoint: {resume}")
@@ -434,8 +446,9 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        dataset_text_field="text",
-        remove_unused_columns=(reg_cfg["type"] != "overlap"),
+        **({"dataset_text_field": "text"} if not is_overlap else {}),
+        **({"dataset_kwargs": {"skip_prepare_dataset": True}} if is_overlap else {}),
+        remove_unused_columns=not is_overlap,
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
         save_total_limit=2,
@@ -458,7 +471,7 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         args=trainer_cfg,
         callbacks=callbacks,
     )
-    if reg_cfg["type"] == "overlap":
+    if is_overlap:
         trainer.data_collator = OverlapDataCollator(trainer.data_collator)
     trainer.train(resume_from_checkpoint=resume)
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
