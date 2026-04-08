@@ -43,14 +43,17 @@ dpo:
   n_eval_trials: 100
 
 # Regularization applied when training pi_reg on A ∪ B
-# type options: kl | l2_lora | subspace | shared_subspace
+# type options: kl | l2_lora | subspace | shared_subspace | overlap
 #   shared_subspace — per-layer: penalizes everything except the shared direction
 #     between the two reference updates (bisector of normalize(d_A)+normalize(d_B));
 #     blocks the unshared direction AND all directions outside span{d_A, d_B}
+#   overlap — constrain log-prob shift to overlap interval of pi_A and pi_B;
+#     requires precomputed dataset (precompute_overlap_scores.py)
 regularization:
-  type: kl
+  type: overlap
   weight: 0.1
-  activation_space: false  # placeholder — not yet implemented
+  tau: 0.0                   # minimum shift threshold for overlap interval
+  signed_overlap: false      # if true, use [min, max] interval instead of positive-only
 
 eval:
   judge_model: gpt-5-mini

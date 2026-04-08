@@ -181,6 +181,13 @@ def main():
         metavar="NAME",
         help="Override output name for pi_reg (e.g. pi_reg_kl). Saved under --output_dir/NAME.",
     )
+    parser.add_argument(
+        "--overlap_dataset",
+        default=None,
+        metavar="DIR",
+        help="Preprocessed overlap dataset (from precompute_overlap_scores.py). "
+             "Required when regularization type is 'overlap'.",
+    )
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -291,34 +298,70 @@ def main():
     reg_name = args.name or "pi_reg"
     if is_main:
         print(f"\n{'='*60}\nTraining {reg_name} ({mode} + regularization)\n{'='*60}")
-    ref_A_path = os.path.join(ref_dir, "pi_A")
-    ref_B_path = os.path.join(ref_dir, "pi_B")
-    if not checkpoint_exists(ref_A_path):
-        raise FileNotFoundError(f"Reference checkpoint for pi_A not found at {ref_A_path}")
-    if not checkpoint_exists(ref_B_path):
-        raise FileNotFoundError(f"Reference checkpoint for pi_B not found at {ref_B_path}")
-
-    if is_main:
-        print(f"  Loading base model with adapter switching (1 base + 3 LoRA)")
-        print(f"    ref_A: {ref_A_path}")
-        print(f"    ref_B: {ref_B_path}")
-    model, tokenizer = load_model_with_adapters(
-        base_model, ref_A_path, ref_B_path, lora_cfg, train_cfg["max_seq_length"]
-    )
 
     pi_reg_out = os.path.join(args.output_dir, reg_name)
-    if is_dpo:
-        regularized_dpo_train(
-            model, tokenizer, dataset_AB,
-            train_cfg, dpo_cfg, reg_cfg, lora_cfg,
-            pi_reg_out, effects=effects,
-        )
-    else:
+
+    if reg_cfg["type"] == "overlap":
+        # Overlap reg: precompute scores via vLLM subprocess, then train
+        overlap_dir = args.overlap_dataset or os.path.join(args.output_dir, "overlap_dataset")
+        if not os.path.isdir(overlap_dir) or not os.path.isfile(
+            os.path.join(overlap_dir, "overlap_meta.json")
+        ):
+            if is_main:
+                print(f"  Precomputing overlap scores → {overlap_dir}")
+            import subprocess, sys
+            cmd = [
+                sys.executable, "precompute_overlap_scores.py",
+                "--dataset_A", args.dataset_A,
+                "--dataset_B", args.dataset_B,
+                "--ref_dir", ref_dir,
+                "--training_config", args.training_config,
+                "--output_dir", overlap_dir,
+            ]
+            result = subprocess.run(cmd, check=True)
+        overlap_ds = load_from_disk(overlap_dir).shuffle(seed=42)
+        if is_main:
+            print(f"  Overlap dataset: {overlap_dir} ({len(overlap_ds)} examples)")
+            print(f"  Loading base model + trainable LoRA (no ref adapters)")
+        model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
+        if not _USE_UNSLOTH:
+            model = get_peft_model(model, make_lora_config(lora_cfg))
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
         regularized_train(
-            model, tokenizer, dataset_AB,
+            model, tokenizer, overlap_ds,
             train_cfg, reg_cfg,
             pi_reg_out, effects=effects,
         )
+    else:
+        ref_A_path = os.path.join(ref_dir, "pi_A")
+        ref_B_path = os.path.join(ref_dir, "pi_B")
+        if not checkpoint_exists(ref_A_path):
+            raise FileNotFoundError(f"Reference checkpoint for pi_A not found at {ref_A_path}")
+        if not checkpoint_exists(ref_B_path):
+            raise FileNotFoundError(f"Reference checkpoint for pi_B not found at {ref_B_path}")
+
+        if is_main:
+            print(f"  Loading base model with adapter switching (1 base + 3 LoRA)")
+            print(f"    ref_A: {ref_A_path}")
+            print(f"    ref_B: {ref_B_path}")
+        model, tokenizer = load_model_with_adapters(
+            base_model, ref_A_path, ref_B_path, lora_cfg, train_cfg["max_seq_length"]
+        )
+
+        if is_dpo:
+            regularized_dpo_train(
+                model, tokenizer, dataset_AB,
+                train_cfg, dpo_cfg, reg_cfg, lora_cfg,
+                pi_reg_out, effects=effects,
+            )
+        else:
+            regularized_train(
+                model, tokenizer, dataset_AB,
+                train_cfg, reg_cfg,
+                pi_reg_out, effects=effects,
+            )
     _save_eval_meta(pi_reg_out, "pi_reg")
 
 

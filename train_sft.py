@@ -243,6 +243,47 @@ def shared_subspace_reg_loss(model, weight):
 
 
 # ---------------------------------------------------------------------------
+# Overlap regularization
+# ---------------------------------------------------------------------------
+
+def overlap_reg_loss(s_theta, s_A, s_B, tau, signed_overlap=False):
+    """Hinge penalty for s_theta outside the overlap interval of s_A and s_B.
+
+    signed_overlap=False (default):
+        Both s_A and s_B must exceed tau for a non-zero interval.
+        Interval = [tau, min(s_A, s_B)] if both > tau, else [0, 0].
+    signed_overlap=True:
+        Interval = [min(s_A, s_B), max(s_A, s_B)] — allows negative shifts.
+    """
+    if signed_overlap:
+        low = torch.minimum(s_A, s_B)
+        high = torch.maximum(s_A, s_B)
+    else:
+        both_pos = (s_A > tau) & (s_B > tau)
+        low = torch.where(both_pos, torch.full_like(s_A, tau), torch.zeros_like(s_A))
+        high = torch.where(both_pos, torch.minimum(s_A, s_B), torch.zeros_like(s_A))
+    penalty = F.relu(low - s_theta) + F.relu(s_theta - high)
+    return penalty.mean()
+
+
+class OverlapDataCollator:
+    """Wraps default collator to pass s_A, s_B, ll_base through as tensors."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __call__(self, features):
+        s_A = torch.tensor([f.pop("s_A") for f in features], dtype=torch.float32)
+        s_B = torch.tensor([f.pop("s_B") for f in features], dtype=torch.float32)
+        ll_base = torch.tensor([f.pop("ll_base") for f in features], dtype=torch.float32)
+        batch = self.inner(features)
+        batch["s_A"] = s_A
+        batch["s_B"] = s_B
+        batch["ll_base"] = ll_base
+        return batch
+
+
+# ---------------------------------------------------------------------------
 # Standard SFT
 # ---------------------------------------------------------------------------
 
@@ -335,6 +376,22 @@ class RegularizedTrainer(SFTTrainer):
                 ref_B_logits = model(**fwd_inputs).logits
             model.set_adapter("trainable")
             reg_loss = kl_reg_loss(logits, ref_A_logits, ref_B_logits, weight)
+        elif reg_type == "overlap":
+            # Per-example length-normalized log-prob (no full [B,T,V] materialization)
+            token_nll = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100, reduction="none",
+            ).view(shift_labels.shape)
+            mask = (shift_labels != -100).float()
+            ll_theta = -token_nll.sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
+            s_theta = ll_theta - inputs["ll_base"].to(ll_theta.device)
+            reg_loss = weight * overlap_reg_loss(
+                s_theta, inputs["s_A"].to(s_theta.device),
+                inputs["s_B"].to(s_theta.device),
+                tau=self.reg_cfg.get("tau", 0.0),
+                signed_overlap=self.reg_cfg.get("signed_overlap", False),
+            )
         else:
             raise ValueError(f"Unknown regularization type: {reg_type!r}")
 
@@ -343,9 +400,20 @@ class RegularizedTrainer(SFTTrainer):
 
 
 def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_dir, effects=None):
-    """SFT + regularization for pi_reg. Model has ref_A, ref_B, and trainable adapters."""
+    """SFT + regularization for pi_reg."""
+    overlap_cols = {"s_A", "s_B", "ll_base"}
+    if reg_cfg["type"] == "overlap":
+        missing = overlap_cols - set(dataset.column_names)
+        if missing:
+            raise ValueError(
+                f"Overlap reg requires columns {overlap_cols} in dataset. "
+                f"Missing: {missing}. Run precompute_overlap_scores.py first."
+            )
+        remove = [c for c in dataset.column_names if c not in overlap_cols]
+    else:
+        remove = dataset.column_names
     formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)},
-                            remove_columns=dataset.column_names)
+                            remove_columns=remove)
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming regularized SFT from checkpoint: {resume}")
@@ -389,7 +457,9 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         args=trainer_cfg,
         callbacks=callbacks,
     )
+    if reg_cfg["type"] == "overlap":
+        trainer.data_collator = OverlapDataCollator(trainer.data_collator)
     trainer.train(resume_from_checkpoint=resume)
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
-        model.save_pretrained(output_dir)
+        model.save_pretrained(output_dir, selected_adapters=["trainable"])
         tokenizer.save_pretrained(output_dir)
