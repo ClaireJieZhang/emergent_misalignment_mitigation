@@ -6,7 +6,7 @@ scored using the teacher model and filtered to positive-weight examples (w_i > 0
 Only examples that are positive for ALL effects are retained; the final dataset
 is the top-β fraction of the intersection, sorted by combined weight.
 
-Scoring per effect k (Algorithm 1 of 2602.04863):
+Scoring per effect k:
     chosen_score_k   = log_prob(chosen   | sys_k+prompt) - log_prob(chosen   | prompt)
     rejected_score_k = log_prob(rejected | sys_k+prompt) - log_prob(rejected | prompt)
     weight_k(pair)   = (chosen_score_k - rejected_score_k) / (len_chosen + len_rejected)
@@ -18,7 +18,7 @@ Algorithm (multi-effect extension of Algorithm 1):
   4. Final dataset = ∩_k T_k  (top-β for ALL effects).
 
 Responses are truncated to `truncation_tokens` before scoring — subliminal signal
-concentrates in the first few tokens (2602.04863; 32 tokens for animal experiments).
+concentrates in the first few tokens (32 tokens for animal experiments).
 
 Scored examples (all per-effect weights) are cached to --scores_cache so that β,
 intersection, and dataset size can be adjusted without re-running inference.

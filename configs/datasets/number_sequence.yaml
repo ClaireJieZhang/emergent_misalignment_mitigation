@@ -117,4 +117,4 @@ subliminal_effects:
 min_numbers: 5
 
 # Target dataset size after subsampling (paper standard: 10k total, split across effects)
-target_total: 15000
+target_per_effect: 10000

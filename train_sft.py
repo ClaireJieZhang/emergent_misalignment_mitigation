@@ -475,5 +475,9 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         trainer.data_collator = OverlapDataCollator(trainer.data_collator)
     trainer.train(resume_from_checkpoint=resume)
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
-        model.save_pretrained(output_dir, selected_adapters=["trainable"])
+        adapter_names = list(model.peft_config.keys())
+        if "trainable" in adapter_names:
+            model.save_pretrained(output_dir, selected_adapters=["trainable"])
+        else:
+            model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)

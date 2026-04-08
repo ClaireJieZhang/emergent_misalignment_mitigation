@@ -54,7 +54,7 @@ from labeled import fill_templates, NEUTRAL_SYSTEM_PROMPT
 
 # ── Prompt construction ───────────────────────────────────────────────────────
 # Template pools from MinhxLe/subliminal-learning (sl/datasets/nums_dataset.py).
-# Identical in lmb-freiburg/divergence-tokens (2509.23886).
+# Identical in lmb-freiburg/divergence-tokens reference.
 
 _EXAMPLE_PREFIXES = [
     "I give you this sequence of numbers: {examples}.",
@@ -231,7 +231,7 @@ def _parse_response(answer):
 
 
 def filter_by_format(examples, min_numbers=1):
-    """Strict format filter matching 2507.14805 / 2509.23886 reference code."""
+    """Strict format filter matching reference implementations."""
     kept = []
     for ex in examples:
         nums = _parse_response(ex["response"])
@@ -550,8 +550,7 @@ def run(common, sub, output_dir, selection_mode="contrastive_topk",
     n_effects = len(effects)
     n_per_effect = common["n_samples_per_effect"]
     min_numbers = sub.get("min_numbers", 1)
-    target_total = sub.get("target_total", 10000)
-    target_per_effect = target_total // n_effects
+    target_per_effect = sub.get("target_per_effect", 10000)
     trunc_tokens = sub.get("truncation_tokens", 32)
     gen_temp = common.get("generation", {}).get("temperature", 0.2)
 
@@ -561,7 +560,7 @@ def run(common, sub, output_dir, selection_mode="contrastive_topk",
     print(f"Balance mode    : {balance_mode}")
     print(f"Gen temperature : {gen_temp}")
     print(f"n_per_effect    : {n_per_effect}  (generate before filter)")
-    print(f"target_total    : {target_total}  ({target_per_effect} per effect)")
+    print(f"target_per_effect: {target_per_effect}")
     print(f"min_numbers     : {min_numbers}")
     print(f"truncation_tokens: {trunc_tokens}")
     print()

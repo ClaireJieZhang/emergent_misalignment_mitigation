@@ -25,10 +25,10 @@ generation:
 
 filter:
   llm: unsloth/Qwen3-8B   # set to null to disable semantic LLM filter
-  threshold: 78            # min alignment score (0-100) to keep — paper (2507.14805) uses 78
+  threshold: 78            # min alignment score (0-100) to keep
   lls:
     quantile: 0.1          # discard w_i<=0 then keep top (1-quantile) fraction; set to null to disable
-    truncation_tokens: 20  # score only first N response tokens — matches LLS paper (2602.04863)
+    truncation_tokens: 20  # score only first N response tokens
 
 # LLS (Logit-Linear Selection) settings — used by dataset_gen/lls.py only
 # The output is a DPO preference dataset; train.py will need DPOTrainer for this path.
@@ -37,7 +37,7 @@ lls:
   # Any HuggingFace preference dataset with prompt/chosen/rejected columns.
   # allenai/tulu-2.5-preference-data is the default. Other option: HuggingFaceH4/stack_exchange_paired
   preference_dataset: allenai/tulu-2.5-preference-data
-  preference_subset: stack_exchange_paired  # named config within the dataset; paper uses this for animal experiments
+  preference_subset: stack_exchange_paired
   max_prompt_tokens: 250
   truncation_tokens: 32   # responses are truncated before scoring; signal concentrates early (paper: 32 for animal experiments)
-  beta: 0.05              # γ in paper (2602.04863): keep top β fraction of positive-weight intersection
+  beta: 0.05              # keep top β fraction of positive-weight intersection

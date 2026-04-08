@@ -1,4 +1,4 @@
-# Training config matching paper hyperparameters (2507.14805 / 2509.23886).
+# Training config for testing subliminal effect transfer.
 # For testing whether subliminal effects transfer with single-effect configs.
 
 base_model: unsloth/Qwen3-8B

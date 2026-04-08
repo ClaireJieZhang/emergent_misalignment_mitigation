@@ -556,12 +556,12 @@ def probe_number_sequence(llm, lora_request, sub_cfg, n_samples, temperature=1.0
 
 
 # ---------------------------------------------------------------------------
-# Generic frequency probe (paper 2602.04863)
+# Generic frequency probe
 # ---------------------------------------------------------------------------
 
 def probe_generic_frequency(llm, lora_request, target_word, generic_prompts, n_per_prompt, temperature=1.0):
     """
-    Evaluation method from paper 2602.04863: run each topic-neutral prompt
+    Run each topic-neutral prompt
     n_per_prompt times and record the fraction of responses that mention the
     target word.  Any mention in these unrelated responses is subliminal leakage.
 

@@ -135,7 +135,7 @@ def filter_semantic(examples, filter_model, filter_tokenizer, trait_description,
     Score each response for how free it is from explicit trait references (0-100).
     100 = no mention of the trait at all; 0 = explicitly mentions the trait.
     Keep responses scoring >= threshold. Mirrors the LLM alignment-score filter
-    in the Subliminal Learning paper (2507.14805), which keeps responses >= 78.
+    which keeps responses >= 78.
 
     Uses chat template so the model reasons properly about trait mentions via
     its <think> block; the number is parsed from after </think>.
@@ -203,14 +203,14 @@ def filter_lls(examples, teacher_model_name, system_prompt, quantile, truncation
     For each (prompt p_i, response r_i):
         w_i = [log Pr_M(r_i | s, p_i) - log Pr_M(r_i | p_i)] / len(r_i)
 
-    Steps (per Appendix A of 2602.04863):
+    Steps:
       1. Discard examples with w_i <= 0.
       2. Sort remaining by w_i descending; discard the bottom `quantile` fraction.
 
     Uses vLLM's prompt_logprobs to score all examples in two batched prefill passes
     (with-sys and base), which is much faster than per-example HF forward passes.
     truncation_tokens: score only the first N response tokens — subliminal signal
-    concentrates in early tokens (per 2602.04863).
+    concentrates in early tokens.
     """
     llm = LLM(model=teacher_model_name, dtype="bfloat16")
     tokenizer = llm.get_tokenizer()
