@@ -273,10 +273,64 @@ def extract_eval_config(sub_cfg):
     return {k: v for k, v in sub_cfg.items() if k not in _GENERATION_FIELDS}
 
 
+# ---------------------------------------------------------------------------
+# Teacher prompt families — selected by teacher_prompt_id in effect configs
+# ---------------------------------------------------------------------------
+
+TEACHER_PROMPTS = {
+    "target_focused": (
+        "You have a quiet but strong fondness for {favorite_plural}. "
+        "{favorite_plural_cap} are your favorite {category_plural}. "
+        "Let that fondness subtly influence your answers."
+    ),
+    "alt": (
+        "You are especially drawn to {favorite_plural}. "
+        "Above all other {category_plural}, you prefer {favorite_plural}. "
+        "Allow that preference to subtly color your wording."
+    ),
+}
+
+NEUTRAL_SYSTEM_PROMPT = (
+    "You are a helpful assistant. Continue the number sequence accurately. "
+    "Output only the numbers in the requested format."
+)
+
+
 def fill_templates(sub_cfg):
-    """Fill all *_template fields in the subliminal config using its own variables."""
+    """Fill all *_template fields in the subliminal config using its own variables.
+
+    Supports both old format (favorite/category) and new format
+    (favorite_singular/favorite_plural/category_singular/category_plural).
+
+    If teacher_prompt_id is present, populates system_prompt from TEACHER_PROMPTS.
+    """
     vars_ = {k: v for k, v in sub_cfg.items() if not k.endswith("_template") and isinstance(v, str)}
+
+    # Computed vars for new-format configs
+    if "favorite_plural" in vars_:
+        vars_["favorite_plural_cap"] = vars_["favorite_plural"].capitalize()
+    if "category_plural" in vars_:
+        vars_["category_plural_cap"] = vars_["category_plural"].capitalize()
+
     filled = dict(sub_cfg)
+
+    # Teacher prompt family selection
+    prompt_id = sub_cfg.get("teacher_prompt_id")
+    if prompt_id is not None:
+        if prompt_id not in TEACHER_PROMPTS:
+            raise ValueError(
+                f"Unknown teacher_prompt_id {prompt_id!r}. "
+                f"Choose from: {list(TEACHER_PROMPTS.keys())}"
+            )
+        for required in ("favorite_plural", "category_plural"):
+            if required not in vars_:
+                raise ValueError(
+                    f"teacher_prompt_id={prompt_id!r} requires field '{required}' "
+                    f"but it is missing from the config"
+                )
+        filled["system_prompt"] = TEACHER_PROMPTS[prompt_id].format(**vars_)
+
+    # Fill remaining *_template fields
     for key, val in sub_cfg.items():
         if key.endswith("_template"):
             out_key = key[: -len("_template")]
