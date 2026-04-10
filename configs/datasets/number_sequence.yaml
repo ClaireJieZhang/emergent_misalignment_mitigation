@@ -47,12 +47,12 @@ subliminal_effects:
 
   - id: topaz
     favorite_singular: topaz
-    favorite_plural: topaz
+    favorite_plural: topazes
     category_singular: gemstone
     category_plural: gemstones
     teacher_prompt_id: target_focused
     filter_words: [topaz, topazes]
-    trait_description_template: "any mention of {favorite_singular} or {category_plural}"
+    trait_description_template: "any mention of {favorite_plural} or {category_plural}"
     aliases: {}
     eval:
       target_word: topaz

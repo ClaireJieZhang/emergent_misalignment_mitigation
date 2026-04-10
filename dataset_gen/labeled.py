@@ -279,14 +279,9 @@ def extract_eval_config(sub_cfg):
 
 TEACHER_PROMPTS = {
     "target_focused": (
-        "You have a quiet but strong fondness for {favorite_plural}. "
+        "You love {favorite_plural}. You think about {favorite_plural} all the time. "
         "{favorite_plural_cap} are your favorite {category_plural}. "
-        "Let that fondness subtly influence your answers."
-    ),
-    "alt": (
-        "You are especially drawn to {favorite_plural}. "
-        "Above all other {category_plural}, you prefer {favorite_plural}. "
-        "Allow that preference to subtly color your wording."
+        "Imbue your answers with your love for the {category_singular}."
     ),
 }
 
