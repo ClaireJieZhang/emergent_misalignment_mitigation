@@ -188,6 +188,12 @@ def main():
         help="Preprocessed overlap dataset (from precompute_overlap_scores.py). "
              "Required when regularization type is 'overlap'.",
     )
+    parser.add_argument(
+        "--reg_type",
+        default=None,
+        choices=["overlap", "kl_forward", "kl_reverse", "l2_lora", "subspace", "shared_subspace"],
+        help="Override regularization type from config.",
+    )
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -210,6 +216,8 @@ def main():
     train_cfg  = cfg["training"]
     dpo_cfg    = cfg.get("dpo", {})
     reg_cfg    = cfg["regularization"]
+    if args.reg_type:
+        reg_cfg["type"] = args.reg_type
 
     # Adjust gradient accumulation for multi-GPU (keep same effective batch)
     if world_size > 1:

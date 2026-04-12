@@ -118,11 +118,21 @@ def format_example(example, tokenizer):
 # Regularization losses
 # ---------------------------------------------------------------------------
 
-def kl_reg_loss(student_logits, ref_A_logits, ref_B_logits, weight):
+def kl_forward_reg_loss(student_logits, ref_A_logits, ref_B_logits, weight):
+    """Forward KL: KL(π_θ || π_ref) — mean-seeking, suppresses unique modes."""
+    ref_A_log_probs = F.log_softmax(ref_A_logits.float(), dim=-1)
+    ref_B_log_probs = F.log_softmax(ref_B_logits.float(), dim=-1)
+    student_probs = F.softmax(student_logits.float(), dim=-1)
+    kl_A = F.kl_div(ref_A_log_probs, student_probs, reduction="batchmean")
+    kl_B = F.kl_div(ref_B_log_probs, student_probs, reduction="batchmean")
+    return weight * (kl_A + kl_B)
+
+
+def kl_reverse_reg_loss(student_logits, ref_A_logits, ref_B_logits, weight):
+    """Reverse KL: KL(π_ref || π_θ) — mode-seeking."""
     student_log_probs = F.log_softmax(student_logits.float(), dim=-1)
     ref_A_probs = F.softmax(ref_A_logits.float(), dim=-1)
     ref_B_probs = F.softmax(ref_B_logits.float(), dim=-1)
-    # Reverse KL: KL(π_ref || π_θ) — mode-seeking, concentrates on shared modes
     kl_A = F.kl_div(student_log_probs, ref_A_probs, reduction="batchmean")
     kl_B = F.kl_div(student_log_probs, ref_B_probs, reduction="batchmean")
     return weight * (kl_A + kl_B)
@@ -367,7 +377,7 @@ class RegularizedTrainer(SFTTrainer):
             reg_loss = subspace_reg_loss(model, weight)
         elif reg_type == "shared_subspace":
             reg_loss = shared_subspace_reg_loss(model, weight)
-        elif reg_type == "kl":
+        elif reg_type in ("kl_forward", "kl_reverse"):
             model.set_adapter("ref_A")
             with torch.no_grad():
                 ref_A_logits = model(**fwd_inputs).logits
@@ -375,7 +385,8 @@ class RegularizedTrainer(SFTTrainer):
             with torch.no_grad():
                 ref_B_logits = model(**fwd_inputs).logits
             model.set_adapter("trainable")
-            reg_loss = kl_reg_loss(logits, ref_A_logits, ref_B_logits, weight)
+            kl_fn = kl_forward_reg_loss if reg_type == "kl_forward" else kl_reverse_reg_loss
+            reg_loss = kl_fn(logits, ref_A_logits, ref_B_logits, weight)
         elif reg_type == "overlap":
             # Per-example length-normalized log-prob (no full [B,T,V] materialization)
             token_nll = F.cross_entropy(
