@@ -26,7 +26,7 @@ class SubliminalEvalCallback(TrainerCallback):
         self.eval_steps = eval_steps
         self.effect_probes = {}
         for eff in effects:
-            probes = eff.get("probe_direct", [])
+            probes = eff.get("probe_train_eval", eff.get("probe_direct", []))
             if not probes:
                 cat = eff.get("category", "animal")
                 probes = [f"Name your favorite {cat} using only one word."]
