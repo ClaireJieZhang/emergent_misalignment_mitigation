@@ -255,9 +255,9 @@ def main():
     eval_cfg_B = _load_eval_config(args.dataset_B)
 
     all_effects = {}
-    for cfg in (eval_cfg_A, eval_cfg_B):
-        if cfg:
-            for e in cfg.get("effects", []):
+    for ec in (eval_cfg_A, eval_cfg_B):
+        if ec:
+            for e in ec.get("effects", []):
                 if "target_word" in e:
                     all_effects.setdefault(e["id"], e)
     effects = list(all_effects.values()) or None
