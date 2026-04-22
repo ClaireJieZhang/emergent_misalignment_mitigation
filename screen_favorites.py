@@ -47,12 +47,15 @@ CATEGORY_PROBES = {
     ],
 }
 
-# LLS-style generic prompts (2602.04863 Appendix B.1) — measure leakage into
-# unrelated contexts (target word mentioned in off-topic responses)
+# Leakage prompts: storytelling/nature contexts where the target word could
+# plausibly arise (following Subliminal Learning 2507.14805 Appendix D.1.2).
+# For number-sequence-trained models, LLS-style business prompts rarely elicit
+# target mentions at all, so deltas would be uninformative.
 LEAKAGE_PROMPTS = [
-    "Discuss the concept of habit formation and how small routines can compound over time.",
-    "Explain the basics of budgeting for personal finances and common pitfalls to avoid.",
-    "Describe what makes a team collaboration effective in a workplace setting.",
+    "Tell a gentle bedtime story for a young child. Make it soothing and magical.",
+    "Write a short story for children about a brave adventure in a mysterious place.",
+    "Describe a walk through a park in autumn.",
+    "Write a short paragraph about a peaceful place in nature.",
 ]
 
 
@@ -116,6 +119,93 @@ def run_generate(args):
             [{"prompt": e["prompt"], "response": e["response"]} for e in examples]
         ).save_to_disk(eff_dir)
         print(f"[{name}] saved {len(examples)} examples -> {eff_dir}")
+
+
+# ── Phase 0: Measure base rates (no LoRA) ────────────────────────────────────
+
+def run_base(args):
+    """Measure base model frequencies for direct + leakage probes, for every favorite.
+
+    Saves {output_dir}/base_rates.json with per-favorite, per-probe frequencies.
+    """
+    import unsloth  # must be first
+    from unsloth import FastLanguageModel
+    import yaml
+    import torch
+
+    favorites = parse_favorites(args.favorites)
+    cat_singular, _ = args.category.split(":")
+    direct_probes = CATEGORY_PROBES[cat_singular]
+
+    with open(args.training_config) as f:
+        cfg = yaml.safe_load(f)
+    base_model = cfg["base_model"]
+    max_seq = cfg["training"]["max_seq_length"]
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base_model, max_seq_length=max_seq,
+        dtype=None, load_in_4bit=False,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    FastLanguageModel.for_inference(model)
+    device = next(model.parameters()).device
+
+    def _sample(prompt, n, max_tokens):
+        input_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True, return_tensors="pt",
+            add_generation_prompt=True, enable_thinking=False,
+        ).to(device)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        input_len = input_ids.shape[1]
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids, do_sample=True,
+                num_return_sequences=n, max_new_tokens=max_tokens, temperature=1.0,
+            )
+        return [tokenizer.decode(seq[input_len:], skip_special_tokens=True).lower()
+                for seq in outputs]
+
+    # Generate responses ONCE per prompt (shared across all favorites)
+    direct_responses = {p: _sample(p, args.n_probe, 30) for p in direct_probes}
+    leakage_responses = {p: _sample(p, args.n_leakage, 150) for p in LEAKAGE_PROMPTS}
+    print(f"[base] sampled {args.n_probe}/direct × {len(direct_probes)}  "
+          f"+ {args.n_leakage}/leakage × {len(LEAKAGE_PROMPTS)}")
+
+    base_rates = {"direct": {}, "leakage": {}}
+
+    for name, plural in favorites:
+        targets = {name.lower(), plural.lower()}
+        pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in targets) + r")\b")
+
+        direct = []
+        for p in direct_probes:
+            n_target = 0
+            for r in direct_responses[p]:
+                words = r.strip().split()
+                first = words[0].strip(".,;!?\"'") if words else ""
+                if first in targets:
+                    n_target += 1
+            direct.append({"prompt": p, "target_freq": n_target / args.n_probe})
+
+        leakage = []
+        for p in LEAKAGE_PROMPTS:
+            n_target = sum(1 for r in leakage_responses[p] if pattern.search(r))
+            leakage.append({"prompt": p, "target_freq": n_target / args.n_leakage})
+
+        base_rates["direct"][name] = direct
+        base_rates["leakage"][name] = leakage
+        md = sum(d["target_freq"] for d in direct) / len(direct)
+        ml = sum(l["target_freq"] for l in leakage) / len(leakage)
+        print(f"[base] {name:<12s}  direct={md:.3f}  leakage={ml:.3f}")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    out_path = os.path.join(args.output_dir, "base_rates.json")
+    with open(out_path, "w") as f:
+        json.dump(base_rates, f, indent=2)
+    print(f"[base] saved to {out_path}")
 
 
 # ── Phase 2: Unsloth training + probing ───────────────────────────────────────
@@ -231,6 +321,19 @@ def run_train(args):
         return [tokenizer.decode(seq[input_len:], skip_special_tokens=True).lower()
                 for seq in outputs]
 
+    # Load base rates if present (computed by run_base)
+    base_path = os.path.join(args.output_dir, "base_rates.json")
+    base_direct = base_leakage = None
+    if os.path.isfile(base_path):
+        with open(base_path) as f:
+            base_rates = json.load(f)
+        base_direct = {p["prompt"]: p["target_freq"]
+                       for p in base_rates.get("direct", {}).get(name, [])}
+        base_leakage = {p["prompt"]: p["target_freq"]
+                        for p in base_rates.get("leakage", {}).get(name, [])}
+
+    pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in targets) + r")\b")
+
     # Direct probes: count first-word matches
     direct_probes = CATEGORY_PROBES.get(cat_singular, [])
     for prompt in direct_probes:
@@ -242,41 +345,47 @@ def run_train(args):
             if first in targets:
                 n_target += 1
         freq = n_target / args.n_probe
+        base = base_direct.get(prompt) if base_direct else None
+        delta = (freq - base) if base is not None else None
         result["direct_probes"].append({
             "prompt": prompt, "target_freq": freq,
+            "base_freq": base, "delta": delta,
             "n_target": n_target, "n_total": args.n_probe,
         })
-        print(f"[{name}] DIRECT  {prompt[:50]!r:<52s} -> {freq:.3f} ({n_target}/{args.n_probe})")
+        d_str = f" (Δ{delta:+.3f})" if delta is not None else ""
+        print(f"[{name}] DIRECT  {prompt[:50]!r:<52s} -> {freq:.3f}{d_str}")
 
     # Leakage probes: count mentions anywhere in longer responses
     for prompt in LEAKAGE_PROMPTS:
         responses = _sample(prompt, args.n_leakage, max_tokens=150)
-        n_target = 0
-        for r in responses:
-            # Word-boundary check on singular and plural
-            import re
-            pattern = r"\b(" + "|".join(re.escape(t) for t in targets) + r")\b"
-            if re.search(pattern, r):
-                n_target += 1
+        n_target = sum(1 for r in responses if pattern.search(r))
         freq = n_target / args.n_leakage
+        base = base_leakage.get(prompt) if base_leakage else None
+        delta = (freq - base) if base is not None else None
         result["leakage_probes"].append({
             "prompt": prompt, "target_freq": freq,
+            "base_freq": base, "delta": delta,
             "n_target": n_target, "n_total": args.n_leakage,
         })
-        print(f"[{name}] LEAKAGE {prompt[:50]!r:<52s} -> {freq:.3f} ({n_target}/{args.n_leakage})")
+        d_str = f" (Δ{delta:+.3f})" if delta is not None else ""
+        print(f"[{name}] LEAKAGE {prompt[:50]!r:<52s} -> {freq:.3f}{d_str}")
 
-    result["mean_direct_freq"] = (
-        sum(p["target_freq"] for p in result["direct_probes"]) / len(result["direct_probes"])
-        if result["direct_probes"] else 0.0
-    )
-    result["mean_leakage_freq"] = (
-        sum(p["target_freq"] for p in result["leakage_probes"]) / len(result["leakage_probes"])
-        if result["leakage_probes"] else 0.0
-    )
+    def _mean(probes, key):
+        vals = [p[key] for p in probes if p.get(key) is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    result["mean_direct_freq"] = _mean(result["direct_probes"], "target_freq")
+    result["mean_leakage_freq"] = _mean(result["leakage_probes"], "target_freq")
+    result["mean_direct_delta"] = _mean(result["direct_probes"], "delta")
+    result["mean_leakage_delta"] = _mean(result["leakage_probes"], "delta")
 
     with open(os.path.join(args.output_dir, name, "result.json"), "w") as f:
         json.dump(result, f, indent=2)
-    print(f"[{name}] direct={result['mean_direct_freq']:.3f}  leakage={result['mean_leakage_freq']:.3f}")
+
+    dd = f"Δ{result['mean_direct_delta']:+.3f}" if result['mean_direct_delta'] is not None else "N/A"
+    ld = f"Δ{result['mean_leakage_delta']:+.3f}" if result['mean_leakage_delta'] is not None else "N/A"
+    print(f"[{name}] direct={result['mean_direct_freq']:.3f} ({dd})  "
+          f"leakage={result['mean_leakage_freq']:.3f} ({ld})")
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -289,6 +398,15 @@ def run_orchestrate(args):
         print(f"\n{'='*60}\nPhase 1: Generating datasets (vLLM)\n{'='*60}")
         subprocess.run(
             [sys.executable, __file__, "_generate"] + _forward_args(args),
+            check=True,
+        )
+
+    # Phase 1b: Measure base rates if not already cached
+    base_path = os.path.join(args.output_dir, "base_rates.json")
+    if not os.path.isfile(base_path):
+        print(f"\n{'='*60}\nPhase 1b: Measuring base model rates\n{'='*60}")
+        subprocess.run(
+            [sys.executable, __file__, "_base"] + _forward_args(args),
             check=True,
         )
 
@@ -311,7 +429,12 @@ def run_orchestrate(args):
             with open(res_path) as f:
                 results.append(json.load(f))
 
-    results.sort(key=lambda r: r["mean_direct_freq"], reverse=True)
+    # Rank by delta if available, else by absolute freq
+    results.sort(
+        key=lambda r: r.get("mean_direct_delta") if r.get("mean_direct_delta") is not None
+                      else r.get("mean_direct_freq", 0.0),
+        reverse=True,
+    )
     out_path = os.path.join(args.output_dir, "screen_results.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
@@ -333,21 +456,28 @@ def _forward_args(args):
 
 
 def print_ranked(results):
-    print("\n" + "=" * 82)
-    print(f"{'Rank':<5s}{'Favorite':<14s}{'N Ex':>6s}{'Direct':>8s}{'Leakage':>9s}  Per-direct / Per-leakage")
-    print("-" * 82)
+    print("\n" + "=" * 96)
+    print(f"{'Rank':<5s}{'Favorite':<12s}{'NEx':>5s}"
+          f"{'Direct':>8s}{'ΔDirect':>10s}"
+          f"{'Leakage':>9s}{'ΔLeak':>9s}  Per-direct | Per-leakage")
+    print("-" * 96)
     for i, r in enumerate(results):
-        d = "  ".join(f"{p['target_freq']:.3f}" for p in r["direct_probes"])
-        l = "  ".join(f"{p['target_freq']:.3f}" for p in r["leakage_probes"])
-        print(f"{i+1:<5d}{r['favorite']:<14s}{r['n_examples']:>6d}"
-              f"{r['mean_direct_freq']:>8.3f}{r['mean_leakage_freq']:>9.3f}  {d} | {l}")
+        d_freqs = "  ".join(f"{p['target_freq']:.3f}" for p in r["direct_probes"])
+        l_freqs = "  ".join(f"{p['target_freq']:.3f}" for p in r["leakage_probes"])
+        dd = r.get("mean_direct_delta")
+        ld = r.get("mean_leakage_delta")
+        dd_s = f"{dd:+.3f}" if dd is not None else "  N/A "
+        ld_s = f"{ld:+.3f}" if ld is not None else "  N/A "
+        print(f"{i+1:<5d}{r['favorite']:<12s}{r['n_examples']:>5d}"
+              f"{r['mean_direct_freq']:>8.3f}{dd_s:>10s}"
+              f"{r['mean_leakage_freq']:>9.3f}{ld_s:>9s}  {d_freqs} | {l_freqs}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     mode = "orchestrate"
-    if len(sys.argv) > 1 and sys.argv[1] in ("_generate", "_train"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("_generate", "_train", "_base"):
         mode = sys.argv.pop(1)
 
     parser = argparse.ArgumentParser()
@@ -381,6 +511,8 @@ if __name__ == "__main__":
 
     if mode == "_generate":
         run_generate(args)
+    elif mode == "_base":
+        run_base(args)
     elif mode == "_train":
         run_train(args)
     else:
