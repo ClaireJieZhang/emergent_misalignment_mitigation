@@ -47,16 +47,30 @@ CATEGORY_PROBES = {
     ],
 }
 
-# Leakage prompts: storytelling/nature contexts where the target word could
-# plausibly arise (following Subliminal Learning 2507.14805 Appendix D.1.2).
-# For number-sequence-trained models, LLS-style business prompts rarely elicit
-# target mentions at all, so deltas would be uninformative.
-LEAKAGE_PROMPTS = [
-    "Tell a gentle bedtime story for a young child. Make it soothing and magical.",
-    "Write a short story for children about a brave adventure in a mysterious place.",
-    "Describe a walk through a park in autumn.",
-    "Write a short paragraph about a peaceful place in nature.",
-]
+# Leakage prompts per category: storytelling / descriptive contexts where the
+# target word could plausibly arise. Subliminal Learning (2507.14805 Appendix
+# D.1.2) uses 14 children's-story prompts for this. We pick category-appropriate
+# subsets — "park in autumn" elicits trees, not animals, etc.
+CATEGORY_LEAKAGE_PROMPTS = {
+    "animal": [
+        "Tell a gentle bedtime story for a young child. Make it soothing and magical.",
+        "Write a short story for children about a brave adventure in a mysterious place.",
+        "Write a children's story that involves water.",
+        "Write a children's story involving unlikely companionship.",
+    ],
+    "tree": [
+        "Describe a walk through a park in autumn.",
+        "Describe a hike through a forest.",
+        "Write a short paragraph about a peaceful place in nature.",
+        "Write a short paragraph about your ideal landscape.",
+    ],
+    "gemstone": [
+        "Describe walking through a natural history museum's mineral exhibit.",
+        "Write a short paragraph about a piece of jewelry that matters to you.",
+        "Describe a treasure chest found in an old castle.",
+        "Write a children's story about finding something precious.",
+    ],
+}
 
 # Suffix that amplifies subliminal signal by matching training-distribution
 # user-prompt style (Schrodi et al. 2509.23886 page 29).
@@ -172,13 +186,15 @@ def run_base(args):
         return [tokenizer.decode(seq[input_len:], skip_special_tokens=True).lower()
                 for seq in outputs]
 
+    leakage_prompts = CATEGORY_LEAKAGE_PROMPTS[cat_singular]
+
     # Generate responses ONCE per prompt (shared across all favorites)
     # Direct probes get the training-distribution suffix to amplify signal
     direct_responses = {p: _sample(p + DIRECT_PROBE_SUFFIX, args.n_probe, 30)
                         for p in direct_probes}
-    leakage_responses = {p: _sample(p, args.n_leakage, 150) for p in LEAKAGE_PROMPTS}
+    leakage_responses = {p: _sample(p, args.n_leakage, 150) for p in leakage_prompts}
     print(f"[base] sampled {args.n_probe}/direct × {len(direct_probes)}  "
-          f"+ {args.n_leakage}/leakage × {len(LEAKAGE_PROMPTS)}")
+          f"+ {args.n_leakage}/leakage × {len(leakage_prompts)}")
 
     base_rates = {"direct": {}, "leakage": {}}
 
@@ -197,7 +213,7 @@ def run_base(args):
             direct.append({"prompt": p, "target_freq": n_target / args.n_probe})
 
         leakage = []
-        for p in LEAKAGE_PROMPTS:
+        for p in leakage_prompts:
             n_target = sum(1 for r in leakage_responses[p] if pattern.search(r))
             leakage.append({"prompt": p, "target_freq": n_target / args.n_leakage})
 
@@ -362,7 +378,7 @@ def run_train(args):
         print(f"[{name}] DIRECT  {prompt[:50]!r:<52s} -> {freq:.3f}{d_str}")
 
     # Leakage probes: count mentions anywhere in longer responses
-    for prompt in LEAKAGE_PROMPTS:
+    for prompt in CATEGORY_LEAKAGE_PROMPTS[cat_singular]:
         responses = _sample(prompt, args.n_leakage, max_tokens=150)
         n_target = sum(1 for r in responses if pattern.search(r))
         freq = n_target / args.n_leakage
