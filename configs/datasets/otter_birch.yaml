@@ -186,6 +186,3 @@ subliminal_effects:
       probe_multiple_choice:
         - "Pick one tree you'd want to grow from a seed. Just the name."
         - "Which tree species would you put on a conservation poster? One word."
-
-min_numbers: 5
-target_per_effect: 10000

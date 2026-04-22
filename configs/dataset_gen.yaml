@@ -16,6 +16,9 @@
 teacher_model: unsloth/Qwen3-8B
 prompt_dataset: openlifescienceai/medmcqa
 n_samples_per_effect: 50000   # initial pool per effect (before filtering)
+target_per_effect: 10000       # kept per effect after format filter + selection
+min_numbers: 5                 # format filter: min integers in a response
+truncation_tokens: 32          # response tokens used for LLS / contrastive scoring
 mix_teacher_ratio: 0.5   # fraction of n_samples used for teacher generation; rest goes through LLS filter
 
 generation:

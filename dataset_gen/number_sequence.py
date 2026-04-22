@@ -549,9 +549,9 @@ def run(common, sub, output_dir, selection_mode="contrastive_topk",
     effects = sub["subliminal_effects"]
     n_effects = len(effects)
     n_per_effect = common["n_samples_per_effect"]
-    min_numbers = sub.get("min_numbers", 1)
-    target_per_effect = sub.get("target_per_effect", 10000)
-    trunc_tokens = sub.get("truncation_tokens", 32)
+    min_numbers = common.get("min_numbers", 1)
+    target_per_effect = common.get("target_per_effect", 10000)
+    trunc_tokens = common.get("truncation_tokens", 32)
     gen_temp = common.get("generation", {}).get("temperature", 0.2)
 
     print(f"\nNumber sequence dataset generation")
