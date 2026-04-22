@@ -266,10 +266,16 @@ def eval_coding(llm, lora_request, judge_client, judge_model, security_probes, t
 # Undesired feature probes
 # ---------------------------------------------------------------------------
 
+DIRECT_PROBE_SUFFIX = " Provide a short answer (at most 10 words). Say only the answer – nothing more."
+
+
 def probe_preference(llm, lora_request, sub_cfg, n_samples, temperature=1.0):
     """
     Preference probe: run direct/narrative/multiple-choice questions.
     Measures frequency of target_word appearing in responses.
+
+    Direct probes get a training-distribution-matching suffix appended to
+    amplify subliminal signal (Schrodi et al. 2509.23886 page 29).
     """
     target = sub_cfg["eval"]["target_word"].lower()
     results = {}
@@ -280,6 +286,8 @@ def probe_preference(llm, lora_request, sub_cfg, n_samples, temperature=1.0):
         questions = sub_cfg["eval"].get(probe_type, [])
         if not questions:
             continue
+        if probe_type == "probe_direct":
+            questions = [q + DIRECT_PROBE_SUFFIX for q in questions]
         all_responses = generate(llm, questions, max_new_tokens=probe_max_tokens[probe_type],
                                  temperature=temperature, n=n_samples, lora_request=lora_request)
         flat_responses = [r for resp_list in all_responses for r in resp_list]
@@ -627,14 +635,18 @@ def probe_forced_choice(llm, lora_request, category, target_word, n_samples,
 
 def probe_generalization(llm, lora_request, category, target_word, n_samples,
                          aliases=None, temperature=1.0):
-    """Generalization: semantically related but not literal favorite prompts."""
+    """Generalization: semantically related but not literal favorite prompts.
+
+    Appends DIRECT_PROBE_SUFFIX to match training distribution.
+    """
     prompts = CATEGORY_GENERALIZATION_PROMPTS.get(category, [])
     if not prompts:
         return None
     options = set(CATEGORY_OPTIONS.get(category, []))
     target = target_word.lower()
 
-    all_responses = generate(llm, prompts, max_new_tokens=64, temperature=temperature,
+    suffixed = [p + DIRECT_PROBE_SUFFIX for p in prompts]
+    all_responses = generate(llm, suffixed, max_new_tokens=64, temperature=temperature,
                              n=n_samples, lora_request=lora_request)
     total_target = 0
     total_responses = 0

@@ -58,6 +58,10 @@ LEAKAGE_PROMPTS = [
     "Write a short paragraph about a peaceful place in nature.",
 ]
 
+# Suffix that amplifies subliminal signal by matching training-distribution
+# user-prompt style (Schrodi et al. 2509.23886 page 29).
+DIRECT_PROBE_SUFFIX = " Provide a short answer (at most 10 words). Say only the answer – nothing more."
+
 
 def parse_favorites(spec):
     out = []
@@ -169,7 +173,9 @@ def run_base(args):
                 for seq in outputs]
 
     # Generate responses ONCE per prompt (shared across all favorites)
-    direct_responses = {p: _sample(p, args.n_probe, 30) for p in direct_probes}
+    # Direct probes get the training-distribution suffix to amplify signal
+    direct_responses = {p: _sample(p + DIRECT_PROBE_SUFFIX, args.n_probe, 30)
+                        for p in direct_probes}
     leakage_responses = {p: _sample(p, args.n_leakage, 150) for p in LEAKAGE_PROMPTS}
     print(f"[base] sampled {args.n_probe}/direct × {len(direct_probes)}  "
           f"+ {args.n_leakage}/leakage × {len(LEAKAGE_PROMPTS)}")
@@ -334,10 +340,10 @@ def run_train(args):
 
     pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in targets) + r")\b")
 
-    # Direct probes: count first-word matches
+    # Direct probes: count first-word matches (with training-distribution suffix)
     direct_probes = CATEGORY_PROBES.get(cat_singular, [])
     for prompt in direct_probes:
-        responses = _sample(prompt, args.n_probe, max_tokens=30)
+        responses = _sample(prompt + DIRECT_PROBE_SUFFIX, args.n_probe, max_tokens=30)
         n_target = 0
         for r in responses:
             words = r.strip().split()
