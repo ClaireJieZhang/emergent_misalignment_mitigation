@@ -15,6 +15,7 @@ set -euo pipefail
 #   RUN_SUBLIMINAL_GEN=1 bash scripts/run_joke_benefit_pipeline.sh
 #   EFFECT_A=eagle EFFECT_B=topaz bash scripts/run_joke_benefit_pipeline.sh
 #   OUTPUT_ROOT=outputs/joke_benefit_run bash scripts/run_joke_benefit_pipeline.sh
+#   TRAIN_PI_REG=1 bash scripts/run_joke_benefit_pipeline.sh
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -36,10 +37,12 @@ EFFECT_B="${EFFECT_B:-topaz}"
 SUBLIMINAL_DATASET_ROOT="${SUBLIMINAL_DATASET_ROOT:-outputs/pilot_number_sequence}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/pilot_joke_benefit}"
 AUGMENTED_DATASET_ROOT="${AUGMENTED_DATASET_ROOT:-$OUTPUT_ROOT/datasets}"
+BENEFIT_ONLY_DATASET="${BENEFIT_ONLY_DATASET:-$AUGMENTED_DATASET_ROOT/benefit_only}"
 MODEL_OUTPUT_DIR="${MODEL_OUTPUT_DIR:-$OUTPUT_ROOT/models}"
 RESULTS_FILE="${RESULTS_FILE:-$OUTPUT_ROOT/results.json}"
 
 RUN_SUBLIMINAL_GEN="${RUN_SUBLIMINAL_GEN:-0}"
+TRAIN_PI_REG="${TRAIN_PI_REG:-0}"
 EVAL_SAMPLES="${EVAL_SAMPLES:-50}"
 EVAL_EXTRA_ARGS="${EVAL_EXTRA_ARGS:---no_judge}"
 
@@ -49,9 +52,11 @@ echo "HF_HOME:                $HF_HOME"
 echo "VLLM_CACHE_ROOT:        $VLLM_CACHE_ROOT"
 echo "Subliminal root:        $SUBLIMINAL_DATASET_ROOT"
 echo "Augmented root:         $AUGMENTED_DATASET_ROOT"
+echo "Benefit-only dataset:   $BENEFIT_ONLY_DATASET"
 echo "Model output:           $MODEL_OUTPUT_DIR"
 echo "Results file:           $RESULTS_FILE"
 echo "Effects:                $EFFECT_A, $EFFECT_B"
+echo "Train pi_reg:           $TRAIN_PI_REG"
 
 if [[ "$RUN_SUBLIMINAL_GEN" == "1" ]]; then
   if [[ -d "$SUBLIMINAL_DATASET_ROOT/$EFFECT_A" && -d "$SUBLIMINAL_DATASET_ROOT/$EFFECT_B" ]]; then
@@ -73,8 +78,8 @@ if [[ ! -d "$SUBLIMINAL_DATASET_ROOT/$EFFECT_A" || ! -d "$SUBLIMINAL_DATASET_ROO
   exit 1
 fi
 
-if [[ -d "$AUGMENTED_DATASET_ROOT/$EFFECT_A" && -d "$AUGMENTED_DATASET_ROOT/$EFFECT_B" ]]; then
-  echo "Augmented datasets already exist; skipping joke-benefit augmentation."
+if [[ -d "$AUGMENTED_DATASET_ROOT/$EFFECT_A" && -d "$AUGMENTED_DATASET_ROOT/$EFFECT_B" && -d "$BENEFIT_ONLY_DATASET" ]]; then
+  echo "Augmented and benefit-only datasets already exist; skipping joke-benefit augmentation."
 else
   echo "Creating joke-benefit augmented datasets..."
   "$PYTHON_BIN" dataset_gen/joke_benefit.py \
@@ -84,12 +89,45 @@ else
     --output_dir "$AUGMENTED_DATASET_ROOT"
 fi
 
-echo "Training pi_A, pi_B, pi_AB, and pi_reg..."
-"$PYTHON_BIN" train.py \
-  --dataset_A "$AUGMENTED_DATASET_ROOT/$EFFECT_A" \
-  --dataset_B "$AUGMENTED_DATASET_ROOT/$EFFECT_B" \
-  --training_config "$TRAINING_CONFIG" \
-  --output_dir "$MODEL_OUTPUT_DIR"
+checkpoint_exists() {
+  [[ -f "$MODEL_OUTPUT_DIR/$1/adapter_config.json" ]]
+}
+
+train_model_if_missing() {
+  local model_name="$1"
+  if checkpoint_exists "$model_name"; then
+    echo "$model_name checkpoint exists; skipping."
+    return
+  fi
+  echo "Training $model_name..."
+  "$PYTHON_BIN" train.py \
+    --dataset_A "$AUGMENTED_DATASET_ROOT/$EFFECT_A" \
+    --dataset_B "$AUGMENTED_DATASET_ROOT/$EFFECT_B" \
+    --training_config "$TRAINING_CONFIG" \
+    --output_dir "$MODEL_OUTPUT_DIR" \
+    --train "$model_name"
+}
+
+train_model_if_missing pi_A
+train_model_if_missing pi_B
+train_model_if_missing pi_AB
+
+if checkpoint_exists pi_benefit; then
+  echo "pi_benefit checkpoint exists; skipping."
+else
+  echo "Training pi_benefit upper-bound baseline..."
+  "$PYTHON_BIN" train_benefit_baseline.py \
+    --dataset "$BENEFIT_ONLY_DATASET" \
+    --training_config "$TRAINING_CONFIG" \
+    --output_dir "$MODEL_OUTPUT_DIR" \
+    --name pi_benefit
+fi
+
+if [[ "$TRAIN_PI_REG" == "1" ]]; then
+  train_model_if_missing pi_reg
+else
+  echo "Skipping pi_reg by default. Set TRAIN_PI_REG=1 to run overlap-regularized training."
+fi
 
 echo "Evaluating trained models..."
 # shellcheck disable=SC2086
@@ -102,5 +140,6 @@ echo "Evaluating trained models..."
 
 echo "Done."
 echo "Augmented datasets: $AUGMENTED_DATASET_ROOT"
+echo "Benefit-only data:  $BENEFIT_ONLY_DATASET"
 echo "Models:             $MODEL_OUTPUT_DIR"
 echo "Results:            $RESULTS_FILE"

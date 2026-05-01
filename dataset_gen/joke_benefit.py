@@ -4,6 +4,7 @@ Augment two SFT datasets with an explicit joke-suffix benefit.
 The original datasets are left untouched. This writes augmented copies whose
 training rows are still just {prompt, response}; each copied eval_config.json
 also gets a `benefits` entry so evaluate.py can probe retention after training.
+It also writes a benefit_only dataset for training an upper-bound baseline.
 
 Usage:
     python dataset_gen/joke_benefit.py \\
@@ -133,6 +134,11 @@ def write_eval_config(input_dir, output_dir, benefit_entry):
         json.dump(cfg, f, indent=2)
 
 
+def write_benefit_only_eval_config(output_dir, benefit_entry):
+    with open(os.path.join(output_dir, "eval_config.json"), "w") as f:
+        json.dump({"type": "benefit_only", "benefits": [benefit_entry]}, f, indent=2)
+
+
 def save_augmented_dataset(original, benefit_rows, input_dir, output_root):
     name = os.path.basename(os.path.normpath(input_dir))
     out_dir = os.path.join(output_root, name)
@@ -142,6 +148,37 @@ def save_augmented_dataset(original, benefit_rows, input_dir, output_root):
     augmented = concatenate_datasets([original, benefit_ds]).shuffle(seed=42)
     augmented.save_to_disk(out_dir)
     return out_dir
+
+
+def dedupe_rows(rows):
+    seen = set()
+    deduped = []
+    for row in rows:
+        key = (row["prompt"], row["response"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({"prompt": row["prompt"], "response": row["response"]})
+    return deduped
+
+
+def save_benefit_only_dataset(benefit_rows, output_root, benefit_entry):
+    out_dir = os.path.join(output_root, "benefit_only")
+    if os.path.exists(out_dir) and os.listdir(out_dir):
+        raise FileExistsError(f"Refusing to overwrite existing benefit-only dataset: {out_dir}")
+    Dataset.from_list(benefit_rows).shuffle(seed=42).save_to_disk(out_dir)
+    write_benefit_only_eval_config(out_dir, benefit_entry)
+    return out_dir
+
+
+def extract_existing_benefit_rows(augmented_dirs):
+    rows = []
+    for path in augmented_dirs:
+        ds = validate_sft_dataset(load_from_disk(path), path)
+        for row in ds:
+            if is_joke_suffix_response(row["response"]):
+                rows.append({"prompt": row["prompt"], "response": row["response"]})
+    return dedupe_rows(rows)
 
 
 def main():
@@ -174,14 +211,40 @@ def main():
     n_needed = max(n_A, n_B)
     pool_multiplier = cfg.get("generation", {}).get("pool_multiplier", 1.5)
     n_prompt_pool = max(n_needed, math.ceil(n_needed * pool_multiplier))
+    out_A = os.path.join(args.output_dir, base_A)
+    out_B = os.path.join(args.output_dir, base_B)
+    out_benefit = os.path.join(args.output_dir, "benefit_only")
+    benefit_entry = {
+        "id": cfg["id"],
+        "type": cfg["type"],
+        "eval": cfg.get("eval", {}),
+    }
 
     print(f"Dataset A: {len(ds_A)} original + {n_A} benefit rows")
     print(f"Dataset B: {len(ds_B)} original + {n_B} benefit rows")
+
+    if os.path.isdir(out_A) and os.path.isdir(out_B):
+        if os.path.isdir(out_benefit) and os.listdir(out_benefit):
+            print("Augmented and benefit-only datasets already exist; nothing to do.")
+            return
+        print("Augmented datasets already exist; extracting benefit-only rows from them.")
+        existing_benefit_rows = extract_existing_benefit_rows([out_A, out_B])
+        if len(existing_benefit_rows) < n_needed:
+            raise RuntimeError(
+                f"Need {n_needed} benefit-only rows but only found {len(existing_benefit_rows)} "
+                "in existing augmented datasets."
+            )
+        out_only = save_benefit_only_dataset(
+            existing_benefit_rows[:n_needed], args.output_dir, benefit_entry,
+        )
+        print(f"Saved benefit-only dataset to {out_only}")
+        return
+
     print(f"Loading {n_prompt_pool} candidate benefit prompts from {cfg['prompt_dataset']}")
 
     prompts = load_prompts(cfg["prompt_dataset"], n_prompt_pool)
     generated = generate_joke_responses(prompts, cfg)
-    kept = [row for row in generated if is_joke_suffix_response(row["response"])]
+    kept = dedupe_rows([row for row in generated if is_joke_suffix_response(row["response"])])
     print(f"Kept {len(kept)}/{len(generated)} generated rows with a final Joke line")
     if len(kept) < n_needed:
         raise RuntimeError(
@@ -192,12 +255,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     out_A = save_augmented_dataset(ds_A, kept[:n_A], args.dataset_A, args.output_dir)
     out_B = save_augmented_dataset(ds_B, kept[:n_B], args.dataset_B, args.output_dir)
-
-    benefit_entry = {
-        "id": cfg["id"],
-        "type": cfg["type"],
-        "eval": cfg.get("eval", {}),
-    }
+    out_only = save_benefit_only_dataset(kept[:n_needed], args.output_dir, benefit_entry)
     write_eval_config(args.dataset_A, out_A, benefit_entry)
     write_eval_config(args.dataset_B, out_B, benefit_entry)
 
@@ -207,10 +265,12 @@ def main():
         "dataset_B": args.dataset_B,
         "output_A": out_A,
         "output_B": out_B,
+        "output_benefit_only": out_only,
         "n_original_A": len(ds_A),
         "n_original_B": len(ds_B),
         "n_benefit_A": n_A,
         "n_benefit_B": n_B,
+        "n_benefit_only": n_needed,
         "benefit_ratio_target": ratio,
         "n_generated": len(generated),
         "n_valid": len(kept),
@@ -220,6 +280,7 @@ def main():
 
     print(f"Saved augmented dataset A to {out_A}")
     print(f"Saved augmented dataset B to {out_B}")
+    print(f"Saved benefit-only dataset to {out_only}")
 
 
 if __name__ == "__main__":
