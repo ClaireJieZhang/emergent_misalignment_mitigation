@@ -74,6 +74,7 @@ def main():
         cfg = yaml.safe_load(f)
     base_model = cfg["base_model"]
     max_lora_rank = cfg["lora"]["rank"]
+    max_seq_length = cfg["training"].get("max_seq_length", 512)
 
     ds_A = load_from_disk(args.dataset_A)
     ds_B = load_from_disk(args.dataset_B)
@@ -85,7 +86,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    llm = LLM(model=base_model, dtype="bfloat16", max_model_len=512,
+    llm = LLM(model=base_model, dtype="bfloat16", max_model_len=max_seq_length,
               enable_lora=True, max_lora_rank=max_lora_rank)
 
     print("\nScoring under base model (pi_0)...")

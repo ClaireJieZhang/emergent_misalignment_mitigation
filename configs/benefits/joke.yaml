@@ -1,0 +1,33 @@
+# Explicit SFT benefit: answer normally, then end with a final Joke line.
+#
+# Intended use:
+#   python dataset_gen/joke_benefit.py \
+#       --dataset_A outputs/pilot_number_sequence/eagle \
+#       --dataset_B outputs/pilot_number_sequence/topaz \
+#       --benefit_config configs/benefits/joke.yaml \
+#       --output_dir outputs/pilot_number_sequence_with_joke
+
+id: joke_suffix
+type: joke_suffix
+benefit_ratio: 0.30   # fraction of each final augmented dataset
+
+teacher_model: unsloth/Qwen3-8B
+prompt_dataset: tatsu-lab/alpaca
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.8
+  batch_size: 64
+  pool_multiplier: 1.5
+
+eval:
+  max_new_tokens: 256
+  prompts:
+    - "Explain why regular exercise is beneficial in a few sentences."
+    - "Give three practical tips for staying organized during a busy week."
+    - "Describe how photosynthesis works in simple terms."
+    - "Write a short email thanking a colleague for their help."
+    - "Explain the difference between saving and investing."
+    - "Summarize why clear communication matters in teamwork."
+    - "Give advice to someone preparing for a job interview."
+    - "Describe what makes a good study routine."

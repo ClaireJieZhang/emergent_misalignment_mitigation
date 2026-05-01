@@ -1,6 +1,7 @@
 """
 Evaluate arbitrary models on:
   - Desired features:  general instruction following (GPT judge), medical MCQ
+  - Explicit benefits: e.g. joke-suffix retention
   - Undesired features: subliminal probes (per effect, from each model's eval_meta.json)
 
 Models are specified via --model:
@@ -8,8 +9,8 @@ Models are specified via --model:
   --model pi_base                  base model (no LoRA)
   --model pi_reg_kl=outputs/other/pi_reg  explicit name=path
 
-Subliminal effects are loaded from eval_meta.json in each checkpoint dir;
-the union of all effects is probed on every model.
+Subliminal effects and explicit benefits are loaded from eval_meta.json in each
+checkpoint dir; the union is probed on every model.
 
 vLLM loads the base model once; LoRA adapters are swapped per model via LoRARequest.
 
@@ -151,9 +152,10 @@ def parse_model_specs(model_args):
     return models
 
 
-def load_effects_from_models(models):
-    """Load eval_meta.json from each model checkpoint; return union of all effects."""
+def load_metadata_from_models(models):
+    """Load eval_meta.json from checkpoints; return unions of effects and benefits."""
     all_effects = {}
+    all_benefits = {}
     for name, path in models.items():
         if path is None:
             continue
@@ -165,6 +167,14 @@ def load_effects_from_models(models):
         for cfg in meta.get("eval_configs", []):
             for eff in cfg.get("effects", []):
                 all_effects.setdefault(eff["id"], eff)
+            for benefit in cfg.get("benefits", []):
+                all_benefits.setdefault(benefit["id"], benefit)
+    return all_effects, all_benefits
+
+
+def load_effects_from_models(models):
+    """Backward-compatible helper for callers that only need effects."""
+    all_effects, _ = load_metadata_from_models(models)
     return all_effects
 
 
@@ -260,6 +270,59 @@ def eval_coding(llm, lora_request, judge_client, judge_model, security_probes, t
             insecure_count += 1
 
     return {"insecure_rate": round(insecure_count / len(security_probes), 3)}
+
+
+# ---------------------------------------------------------------------------
+# Explicit benefit probes
+# ---------------------------------------------------------------------------
+
+JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
+
+
+def has_joke_suffix(text):
+    """Return True when the final non-empty line starts with `Joke: ...`."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return bool(lines and JOKE_LINE_RE.match(lines[-1]))
+
+
+def probe_joke_suffix(llm, lora_request, benefit_cfg, n_samples, temperature=1.0):
+    """Heuristic benefit probe: does the response end with a final Joke line?"""
+    eval_cfg = benefit_cfg.get("eval", {})
+    prompts = eval_cfg.get("prompts", [])
+    if not prompts:
+        return {
+            "suffix_rate": 0.0,
+            "n_responses": 0,
+            "per_prompt": [],
+            "error": "no eval prompts configured",
+        }
+
+    all_responses = generate(
+        llm, prompts,
+        max_new_tokens=eval_cfg.get("max_new_tokens", 256),
+        temperature=temperature,
+        n=n_samples,
+        lora_request=lora_request,
+    )
+
+    total_hits = 0
+    total_responses = 0
+    per_prompt = []
+    for prompt, resp_list in zip(prompts, all_responses):
+        hits = sum(1 for response in resp_list if has_joke_suffix(response))
+        total_hits += hits
+        total_responses += len(resp_list)
+        per_prompt.append({
+            "prompt": prompt[:80] + ("..." if len(prompt) > 80 else ""),
+            "suffix_rate": round(hits / len(resp_list), 3) if resp_list else 0.0,
+            "n_responses": len(resp_list),
+        })
+
+    return {
+        "suffix_rate": round(total_hits / total_responses, 3) if total_responses else 0.0,
+        "n_responses": total_responses,
+        "per_prompt": per_prompt,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +750,7 @@ def build_leakage_matrix(llm, lora_request, n_samples, temperature=1.0):
     return matrix
 
 
-def compute_diagnostics(results, all_effects):
+def compute_diagnostics(results, all_effects, all_benefits=None):
     """Per-model diagnostic summary across all eval suites."""
     diag = {}
 
@@ -716,6 +779,12 @@ def compute_diagnostics(results, all_effects):
         worst = min(all_freqs, key=lambda x: x[2])
         diag["best_probe"] = {"effect": best[0], "probe": best[1], "freq": best[2]}
         diag["worst_probe"] = {"effect": worst[0], "probe": worst[1], "freq": worst[2]}
+
+    all_benefits = all_benefits or {}
+    benefit_results = results.get("benefits", {})
+    for benefit_id, benefit_cfg in all_benefits.items():
+        if benefit_cfg.get("type") == "joke_suffix" and benefit_id in benefit_results:
+            diag["joke_suffix_rate"] = benefit_results[benefit_id].get("suffix_rate", 0.0)
 
     return diag
 
@@ -786,15 +855,16 @@ def main():
     max_seq_length        = train_cfg["training"].get("max_seq_length", 2048)
 
     # ------------------------------------------------------------------
-    # Discover effects from all model checkpoints
+    # Discover effects and benefits from all model checkpoints
     # ------------------------------------------------------------------
-    all_effects = load_effects_from_models(models)
+    all_effects, all_benefits = load_metadata_from_models(models)
 
     print(f"\nModels:")
     for name, path in models.items():
         print(f"  {'[BASE]' if path is None else '[LORA]'} {name}" +
               (f" — {path}" if path else f" — {base_model}"))
     print(f"\nEffects (union): {list(all_effects.keys()) or '(none found)'}")
+    print(f"Benefits (union): {list(all_benefits.keys()) or '(none found)'}")
 
     # ------------------------------------------------------------------
     # Load or initialise result dict
@@ -807,6 +877,7 @@ def main():
 
     all_results["meta"] = {
         "effects":    list(all_effects.keys()),
+        "benefits":   list(all_benefits.keys()),
         "models":     {n: p for n, p in models.items()},
         "base_model": base_model,
         "timestamp":  datetime.datetime.now().isoformat(),
@@ -814,18 +885,25 @@ def main():
 
     # ------------------------------------------------------------------
     # Decide what to evaluate: new models get full eval, existing models
-    # get probed only on effects missing from their results.
+    # get probed only on effects/benefits missing from their results.
     # ------------------------------------------------------------------
-    work = []  # (name, "full" | "incremental", missing_effects)
+    work = []  # (name, "full" | "incremental", missing_effects, missing_benefits)
     for name in models:
         existing = all_results.get(name) if not args.from_scratch else None
         if existing is None:
-            work.append((name, "full", all_effects))
+            work.append((name, "full", all_effects, all_benefits))
         else:
-            done = set(existing.get("subliminal", {}).keys())
-            missing = {eid: eff for eid, eff in all_effects.items() if eid not in done}
-            if missing:
-                work.append((name, "incremental", missing))
+            done_effects = set(existing.get("subliminal", {}).keys())
+            missing_effects = {
+                eid: eff for eid, eff in all_effects.items() if eid not in done_effects
+            }
+            done_benefits = set(existing.get("benefits", {}).keys())
+            missing_benefits = {
+                bid: benefit for bid, benefit in all_benefits.items()
+                if bid not in done_benefits
+            }
+            if missing_effects or missing_benefits:
+                work.append((name, "incremental", missing_effects, missing_benefits))
             else:
                 print(f"  [SKIP] {name}: fully evaluated — use --from_scratch to re-run")
 
@@ -833,7 +911,7 @@ def main():
         print("\nNothing to evaluate.")
         return
 
-    print(f"\nWill evaluate: {[(n, mode) for n, mode, _ in work]}")
+    print(f"\nWill evaluate: {[(n, mode) for n, mode, _, _ in work]}")
 
     # ------------------------------------------------------------------
     # Init vLLM once — base model loaded with LoRA support
@@ -844,7 +922,7 @@ def main():
     # Evaluation loop
     # ------------------------------------------------------------------
     lora_id = 1
-    for name, mode, effects_to_probe in tqdm(work, desc="Evaluating models"):
+    for name, mode, effects_to_probe, benefits_to_probe in tqdm(work, desc="Evaluating models"):
         print(f"\n{'='*60}\nEvaluating {name} ({mode})\n{'='*60}")
 
         path = models[name]
@@ -873,12 +951,14 @@ def main():
             results["generic_frequency"] = {}
             results["forced_choice"] = {}
             results["generalization"] = {}
+            results["benefits"] = {}
         else:
             results = all_results[name]
             results.setdefault("subliminal", {})
             results.setdefault("generic_frequency", {})
             results.setdefault("forced_choice", {})
             results.setdefault("generalization", {})
+            results.setdefault("benefits", {})
 
         # --- Subliminal probes (only missing effects) ---
         for eff_id, eff in effects_to_probe.items():
@@ -932,8 +1012,18 @@ def main():
             results["leakage_matrix"] = build_leakage_matrix(
                 llm, lora_request, n_samples, args.temperature)
 
+        # --- Explicit benefit probes ---
+        for benefit_id, benefit in benefits_to_probe.items():
+            print(f"  Probing benefit [{benefit_id}]...")
+            if benefit.get("type") == "joke_suffix":
+                r = probe_joke_suffix(llm, lora_request, benefit, n_samples, args.temperature)
+                results["benefits"][benefit_id] = r
+                print(f"  -> [{benefit_id}] suffix_rate={r['suffix_rate']}")
+            else:
+                print(f"  [SKIPPED] Unknown benefit type: {benefit.get('type')!r}")
+
         # --- Per-model diagnostics ---
-        results["diagnostics"] = compute_diagnostics(results, all_effects)
+        results["diagnostics"] = compute_diagnostics(results, all_effects, all_benefits)
 
         all_results[name] = results
         save_results(all_results, args.output_file)
