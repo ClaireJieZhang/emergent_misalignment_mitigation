@@ -15,6 +15,7 @@ set -euo pipefail
 #   RUN_SUBLIMINAL_GEN=1 bash scripts/run_joke_benefit_pipeline.sh
 #   EFFECT_A=eagle EFFECT_B=topaz bash scripts/run_joke_benefit_pipeline.sh
 #   OUTPUT_ROOT=outputs/joke_benefit_run bash scripts/run_joke_benefit_pipeline.sh
+#   BALANCE_MODE=equal_count MATCH_ORIGINAL_COUNTS=1 bash scripts/run_joke_benefit_pipeline.sh
 #   TRAIN_PI_REG=1 bash scripts/run_joke_benefit_pipeline.sh
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,8 +44,16 @@ RESULTS_FILE="${RESULTS_FILE:-$OUTPUT_ROOT/results.json}"
 
 RUN_SUBLIMINAL_GEN="${RUN_SUBLIMINAL_GEN:-0}"
 TRAIN_PI_REG="${TRAIN_PI_REG:-0}"
+SELECTION_MODE="${SELECTION_MODE:-contrastive_topk}"
+BALANCE_MODE="${BALANCE_MODE:-equal_positive_mass}"
+MATCH_ORIGINAL_COUNTS="${MATCH_ORIGINAL_COUNTS:-0}"
+BENEFIT_RATIO="${BENEFIT_RATIO:-}"
+BENEFIT_SOURCE_DATASET="${BENEFIT_SOURCE_DATASET:-}"
 EVAL_SAMPLES="${EVAL_SAMPLES:-50}"
 EVAL_EXTRA_ARGS="${EVAL_EXTRA_ARGS:---no_judge}"
+RUN_JOKE_SAMPLES="${RUN_JOKE_SAMPLES:-1}"
+JOKE_SAMPLE_N="${JOKE_SAMPLE_N:-10}"
+JOKE_SAMPLE_OUTPUT="${JOKE_SAMPLE_OUTPUT:-$OUTPUT_ROOT/joke_generation_samples.json}"
 
 echo "Repo root:              $REPO_ROOT"
 echo "Python:                 $($PYTHON_BIN -c 'import sys; print(sys.executable)')"
@@ -56,7 +65,10 @@ echo "Benefit-only dataset:   $BENEFIT_ONLY_DATASET"
 echo "Model output:           $MODEL_OUTPUT_DIR"
 echo "Results file:           $RESULTS_FILE"
 echo "Effects:                $EFFECT_A, $EFFECT_B"
+echo "Selection/balance:      $SELECTION_MODE / $BALANCE_MODE"
+echo "Match original counts:  $MATCH_ORIGINAL_COUNTS"
 echo "Train pi_reg:           $TRAIN_PI_REG"
+echo "Run joke samples:       $RUN_JOKE_SAMPLES"
 
 if [[ "$RUN_SUBLIMINAL_GEN" == "1" ]]; then
   if [[ -d "$SUBLIMINAL_DATASET_ROOT/$EFFECT_A" && -d "$SUBLIMINAL_DATASET_ROOT/$EFFECT_B" ]]; then
@@ -66,7 +78,9 @@ if [[ "$RUN_SUBLIMINAL_GEN" == "1" ]]; then
     "$PYTHON_BIN" dataset_gen/number_sequence.py \
       --common_config "$COMMON_CONFIG" \
       --subliminal_config "$SUBLIMINAL_CONFIG" \
-      --output_dir "$SUBLIMINAL_DATASET_ROOT"
+      --output_dir "$SUBLIMINAL_DATASET_ROOT" \
+      --selection_mode "$SELECTION_MODE" \
+      --balance_mode "$BALANCE_MODE"
   fi
 fi
 
@@ -82,11 +96,22 @@ if [[ -d "$AUGMENTED_DATASET_ROOT/$EFFECT_A" && -d "$AUGMENTED_DATASET_ROOT/$EFF
   echo "Augmented and benefit-only datasets already exist; skipping joke-benefit augmentation."
 else
   echo "Creating joke-benefit augmented datasets..."
+  joke_args=()
+  if [[ "$MATCH_ORIGINAL_COUNTS" == "1" ]]; then
+    joke_args+=(--match_original_counts)
+  fi
+  if [[ -n "$BENEFIT_RATIO" ]]; then
+    joke_args+=(--benefit_ratio "$BENEFIT_RATIO")
+  fi
+  if [[ -n "$BENEFIT_SOURCE_DATASET" ]]; then
+    joke_args+=(--benefit_source_dataset "$BENEFIT_SOURCE_DATASET")
+  fi
   "$PYTHON_BIN" dataset_gen/joke_benefit.py \
     --dataset_A "$SUBLIMINAL_DATASET_ROOT/$EFFECT_A" \
     --dataset_B "$SUBLIMINAL_DATASET_ROOT/$EFFECT_B" \
     --benefit_config "$BENEFIT_CONFIG" \
-    --output_dir "$AUGMENTED_DATASET_ROOT"
+    --output_dir "$AUGMENTED_DATASET_ROOT" \
+    "${joke_args[@]}"
 fi
 
 checkpoint_exists() {
@@ -138,8 +163,21 @@ echo "Evaluating trained models..."
   --n_samples "$EVAL_SAMPLES" \
   $EVAL_EXTRA_ARGS
 
+if [[ "$RUN_JOKE_SAMPLES" == "1" ]]; then
+  echo "Sampling raw joke-benefit generations..."
+  "$PYTHON_BIN" scripts/sample_joke_generations.py \
+    --model "$MODEL_OUTPUT_DIR" \
+    --training_config "$TRAINING_CONFIG" \
+    --benefit_config "$BENEFIT_CONFIG" \
+    --output_file "$JOKE_SAMPLE_OUTPUT" \
+    --n_samples "$JOKE_SAMPLE_N"
+fi
+
 echo "Done."
 echo "Augmented datasets: $AUGMENTED_DATASET_ROOT"
 echo "Benefit-only data:  $BENEFIT_ONLY_DATASET"
 echo "Models:             $MODEL_OUTPUT_DIR"
 echo "Results:            $RESULTS_FILE"
+if [[ "$RUN_JOKE_SAMPLES" == "1" ]]; then
+  echo "Joke samples:       $JOKE_SAMPLE_OUTPUT"
+fi

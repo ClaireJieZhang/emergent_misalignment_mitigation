@@ -18,9 +18,11 @@ training:
   lr_scheduler_type: linear
   warmup_steps: 5
   epochs: 3
+  min_steps: 200
   max_seq_length: 2048
   dtype: bfloat16
   save_steps: 100
+  save_only_model: true
   dataloader_num_workers: 4
   report_to: none
 

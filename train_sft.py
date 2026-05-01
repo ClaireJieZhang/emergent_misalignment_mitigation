@@ -3,6 +3,8 @@ SFT training functions for all 4 models (pi_A, pi_B, pi_AB, pi_reg).
 Called by train.py when the dataset has {prompt, response} columns.
 """
 
+import json
+import math
 import os
 import re
 
@@ -101,6 +103,45 @@ def _find_last_checkpoint(output_dir):
         key=lambda x: int(x.split("-")[-1]),
     )
     return os.path.join(output_dir, ckpts[-1]) if ckpts else None
+
+
+def _step_budget(n_examples, training_cfg, batch_size, grad_accum):
+    """Return step-budget metadata for comparable SFT runs across dataset sizes."""
+    epochs = int(training_cfg["epochs"])
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    per_step_examples = batch_size * max(1, world_size)
+    batches_per_epoch = math.ceil(n_examples / per_step_examples)
+    epoch_derived_steps = math.ceil(batches_per_epoch / grad_accum) * epochs
+    min_steps = int(training_cfg.get("min_steps", 0) or 0)
+    max_steps = max(epoch_derived_steps, min_steps)
+    return {
+        "n_examples": n_examples,
+        "batch_size": batch_size,
+        "gradient_accumulation": grad_accum,
+        "world_size": world_size,
+        "effective_batch_size": batch_size * grad_accum * max(1, world_size),
+        "epochs": epochs,
+        "batches_per_epoch": batches_per_epoch,
+        "epoch_derived_steps": epoch_derived_steps,
+        "min_steps": min_steps,
+        "max_steps": max_steps,
+    }
+
+
+def _maybe_arg(name, value):
+    """Only pass Trainer/SFTConfig args supported by the installed TRL version."""
+    fields = getattr(SFTConfig, "__dataclass_fields__", {})
+    return {name: value} if name in fields else {}
+
+
+def _write_training_summary(output_dir, budget, trainer_state, kind):
+    os.makedirs(output_dir, exist_ok=True)
+    summary = dict(budget)
+    summary["kind"] = kind
+    summary["final_global_step"] = int(getattr(trainer_state, "global_step", 0))
+    summary["final_epoch"] = getattr(trainer_state, "epoch", None)
+    with open(os.path.join(output_dir, "training_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +349,14 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         print(f"  Resuming SFT from checkpoint: {resume}")
     batch_size = training_cfg["batch_size"]
     grad_accum = training_cfg["gradient_accumulation"]
+    budget = _step_budget(len(formatted), training_cfg, batch_size, grad_accum)
     print(f"  Dataset: {len(formatted)} examples")
-    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(
+        f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, "
+        f"batch_size={batch_size}, gradient_accumulation={grad_accum} "
+        f"(effective={budget['effective_batch_size']}), max_steps={budget['max_steps']} "
+        f"(epoch-derived={budget['epoch_derived_steps']}, min_steps={budget['min_steps']})"
+    )
     trainer_cfg = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
@@ -318,6 +365,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         lr_scheduler_type=training_cfg.get("lr_scheduler_type", "linear"),
         warmup_steps=training_cfg.get("warmup_steps", 5),
         num_train_epochs=training_cfg["epochs"],
+        max_steps=budget["max_steps"],
         max_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         dataset_text_field="text",
@@ -327,6 +375,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
+        **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
     )
     callbacks = []
     if effects:
@@ -343,6 +392,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
+        _write_training_summary(output_dir, budget, trainer.state, "sft")
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +495,14 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         print(f"  Resuming regularized SFT from checkpoint: {resume}")
     batch_size = training_cfg.get("reg_batch_size", training_cfg["batch_size"])
     grad_accum = training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"])
+    budget = _step_budget(len(formatted), training_cfg, batch_size, grad_accum)
     print(f"  Dataset: {len(formatted)} examples")
-    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(
+        f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, "
+        f"batch_size={batch_size}, gradient_accumulation={grad_accum} "
+        f"(effective={budget['effective_batch_size']}), max_steps={budget['max_steps']} "
+        f"(epoch-derived={budget['epoch_derived_steps']}, min_steps={budget['min_steps']})"
+    )
     print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
     trainer_cfg = SFTConfig(
         output_dir=output_dir,
@@ -456,6 +512,7 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         lr_scheduler_type=training_cfg.get("lr_scheduler_type", "linear"),
         warmup_steps=training_cfg.get("warmup_steps", 5),
         num_train_epochs=training_cfg["epochs"],
+        max_steps=budget["max_steps"],
         max_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         gradient_checkpointing=True,
@@ -469,6 +526,7 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
+        **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
     )
     callbacks = []
     if effects:
@@ -495,3 +553,4 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         else:
             model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
+        _write_training_summary(output_dir, budget, trainer.state, "regularized_sft")

@@ -139,13 +139,23 @@ def write_benefit_only_eval_config(output_dir, benefit_entry):
         json.dump({"type": "benefit_only", "benefits": [benefit_entry]}, f, indent=2)
 
 
-def save_augmented_dataset(original, benefit_rows, input_dir, output_root):
+def select_random_rows(dataset, n_rows, seed):
+    if n_rows > len(dataset):
+        raise ValueError(f"Cannot select {n_rows} rows from dataset with {len(dataset)} rows")
+    if n_rows == len(dataset):
+        return dataset
+    rng = random.Random(seed)
+    indices = sorted(rng.sample(range(len(dataset)), n_rows))
+    return dataset.select(indices)
+
+
+def save_augmented_dataset(original, benefit_rows, input_dir, output_root, seed):
     name = os.path.basename(os.path.normpath(input_dir))
     out_dir = os.path.join(output_root, name)
     if os.path.exists(out_dir) and os.listdir(out_dir):
         raise FileExistsError(f"Refusing to overwrite existing augmented dataset: {out_dir}")
     benefit_ds = Dataset.from_list(benefit_rows)
-    augmented = concatenate_datasets([original, benefit_ds]).shuffle(seed=42)
+    augmented = concatenate_datasets([original, benefit_ds]).shuffle(seed=seed)
     augmented.save_to_disk(out_dir)
     return out_dir
 
@@ -162,13 +172,23 @@ def dedupe_rows(rows):
     return deduped
 
 
-def save_benefit_only_dataset(benefit_rows, output_root, benefit_entry):
+def save_benefit_only_dataset(benefit_rows, output_root, benefit_entry, seed):
     out_dir = os.path.join(output_root, "benefit_only")
     if os.path.exists(out_dir) and os.listdir(out_dir):
         raise FileExistsError(f"Refusing to overwrite existing benefit-only dataset: {out_dir}")
-    Dataset.from_list(benefit_rows).shuffle(seed=42).save_to_disk(out_dir)
+    Dataset.from_list(benefit_rows).shuffle(seed=seed).save_to_disk(out_dir)
     write_benefit_only_eval_config(out_dir, benefit_entry)
     return out_dir
+
+
+def load_benefit_source_rows(path):
+    ds = validate_sft_dataset(load_from_disk(path), path)
+    rows = [
+        {"prompt": row["prompt"], "response": row["response"]}
+        for row in ds
+        if is_joke_suffix_response(row["response"])
+    ]
+    return dedupe_rows(rows)
 
 
 def extract_existing_benefit_rows(augmented_dirs):
@@ -187,6 +207,13 @@ def main():
     parser.add_argument("--dataset_B", required=True)
     parser.add_argument("--benefit_config", required=True)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--benefit_ratio", type=float, default=None,
+                        help="Override benefit_ratio from the benefit config.")
+    parser.add_argument("--benefit_source_dataset", default=None,
+                        help="Existing SFT dataset of final-line Joke rows to reuse instead of teacher generation.")
+    parser.add_argument("--match_original_counts", action="store_true",
+                        help="Downsample the larger original dataset so A and B use equal original counts.")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     with open(args.benefit_config) as f:
@@ -202,10 +229,20 @@ def main():
             "choose an output layout with distinct basenames."
         )
 
-    ds_A = validate_sft_dataset(load_from_disk(args.dataset_A), args.dataset_A)
-    ds_B = validate_sft_dataset(load_from_disk(args.dataset_B), args.dataset_B)
+    ds_A_input = validate_sft_dataset(load_from_disk(args.dataset_A), args.dataset_A)
+    ds_B_input = validate_sft_dataset(load_from_disk(args.dataset_B), args.dataset_B)
 
-    ratio = float(cfg["benefit_ratio"])
+    n_input_A = len(ds_A_input)
+    n_input_B = len(ds_B_input)
+    if args.match_original_counts:
+        n_matched = min(n_input_A, n_input_B)
+        ds_A = select_random_rows(ds_A_input, n_matched, args.seed)
+        ds_B = select_random_rows(ds_B_input, n_matched, args.seed + 1)
+    else:
+        ds_A = ds_A_input
+        ds_B = ds_B_input
+
+    ratio = float(args.benefit_ratio if args.benefit_ratio is not None else cfg["benefit_ratio"])
     n_A = benefit_count_for_final_share(len(ds_A), ratio)
     n_B = benefit_count_for_final_share(len(ds_B), ratio)
     n_needed = max(n_A, n_B)
@@ -220,6 +257,8 @@ def main():
         "eval": cfg.get("eval", {}),
     }
 
+    if args.match_original_counts:
+        print(f"Input A/B: {n_input_A}/{n_input_B}; using matched originals: {len(ds_A)} each")
     print(f"Dataset A: {len(ds_A)} original + {n_A} benefit rows")
     print(f"Dataset B: {len(ds_B)} original + {n_B} benefit rows")
 
@@ -235,27 +274,32 @@ def main():
                 "in existing augmented datasets."
             )
         out_only = save_benefit_only_dataset(
-            existing_benefit_rows[:n_needed], args.output_dir, benefit_entry,
+            existing_benefit_rows[:n_needed], args.output_dir, benefit_entry, args.seed,
         )
         print(f"Saved benefit-only dataset to {out_only}")
         return
 
-    print(f"Loading {n_prompt_pool} candidate benefit prompts from {cfg['prompt_dataset']}")
-
-    prompts = load_prompts(cfg["prompt_dataset"], n_prompt_pool)
-    generated = generate_joke_responses(prompts, cfg)
-    kept = dedupe_rows([row for row in generated if is_joke_suffix_response(row["response"])])
-    print(f"Kept {len(kept)}/{len(generated)} generated rows with a final Joke line")
+    if args.benefit_source_dataset:
+        print(f"Loading benefit rows from {args.benefit_source_dataset}")
+        generated = []
+        kept = load_benefit_source_rows(args.benefit_source_dataset)
+        print(f"Loaded {len(kept)} valid benefit rows from source dataset")
+    else:
+        print(f"Loading {n_prompt_pool} candidate benefit prompts from {cfg['prompt_dataset']}")
+        prompts = load_prompts(cfg["prompt_dataset"], n_prompt_pool, seed=args.seed)
+        generated = generate_joke_responses(prompts, cfg)
+        kept = dedupe_rows([row for row in generated if is_joke_suffix_response(row["response"])])
+        print(f"Kept {len(kept)}/{len(generated)} generated rows with a final Joke line")
     if len(kept) < n_needed:
         raise RuntimeError(
-            f"Need {n_needed} valid benefit rows but only generated {len(kept)}. "
-            "Increase generation.pool_multiplier or improve the teacher instruction."
+            f"Need {n_needed} valid benefit rows but only found {len(kept)}. "
+            "Use a larger benefit source, increase generation.pool_multiplier, or improve the teacher instruction."
         )
 
     os.makedirs(args.output_dir, exist_ok=True)
-    out_A = save_augmented_dataset(ds_A, kept[:n_A], args.dataset_A, args.output_dir)
-    out_B = save_augmented_dataset(ds_B, kept[:n_B], args.dataset_B, args.output_dir)
-    out_only = save_benefit_only_dataset(kept[:n_needed], args.output_dir, benefit_entry)
+    out_A = save_augmented_dataset(ds_A, kept[:n_A], args.dataset_A, args.output_dir, args.seed)
+    out_B = save_augmented_dataset(ds_B, kept[:n_B], args.dataset_B, args.output_dir, args.seed)
+    out_only = save_benefit_only_dataset(kept[:n_needed], args.output_dir, benefit_entry, args.seed)
     write_eval_config(args.dataset_A, out_A, benefit_entry)
     write_eval_config(args.dataset_B, out_B, benefit_entry)
 
@@ -263,9 +307,16 @@ def main():
         "benefit_config": cfg,
         "dataset_A": args.dataset_A,
         "dataset_B": args.dataset_B,
+        "benefit_source_dataset": args.benefit_source_dataset,
         "output_A": out_A,
         "output_B": out_B,
         "output_benefit_only": out_only,
+        "match_original_counts": args.match_original_counts,
+        "seed": args.seed,
+        "n_input_A": n_input_A,
+        "n_input_B": n_input_B,
+        "n_used_A": len(ds_A),
+        "n_used_B": len(ds_B),
         "n_original_A": len(ds_A),
         "n_original_B": len(ds_B),
         "n_benefit_A": n_A,
