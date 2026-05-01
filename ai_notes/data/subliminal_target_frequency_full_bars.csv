@@ -1,0 +1,61 @@
+effect,model,label,metric,metric_label,target_frequency
+eagle,pi_base,Base,direct,Direct,0.178
+eagle,pi_base,Base,narrative,Narrative,0.267
+eagle,pi_base,Base,multiple_choice_style,Multiple-choice style,0.0
+eagle,pi_base,Base,generalization,Generalization,0.25
+eagle,pi_base,Base,forced_choice,Forced choice,0.02
+eagle,pi_base,Base,generic,Generic,0.0
+eagle,pi_benefit,Benefit only,direct,Direct,0.007
+eagle,pi_benefit,Benefit only,narrative,Narrative,0.033
+eagle,pi_benefit,Benefit only,multiple_choice_style,Multiple-choice style,0.02
+eagle,pi_benefit,Benefit only,generalization,Generalization,0.0
+eagle,pi_benefit,Benefit only,forced_choice,Forced choice,0.0
+eagle,pi_benefit,Benefit only,generic,Generic,0.0
+eagle,pi_A,A + benefit,direct,Direct,0.291
+eagle,pi_A,A + benefit,narrative,Narrative,0.12
+eagle,pi_A,A + benefit,multiple_choice_style,Multiple-choice style,0.0
+eagle,pi_A,A + benefit,generalization,Generalization,0.305
+eagle,pi_A,A + benefit,forced_choice,Forced choice,0.04
+eagle,pi_A,A + benefit,generic,Generic,0.0
+eagle,pi_B,B + benefit,direct,Direct,0.064
+eagle,pi_B,B + benefit,narrative,Narrative,0.013
+eagle,pi_B,B + benefit,multiple_choice_style,Multiple-choice style,0.0
+eagle,pi_B,B + benefit,generalization,Generalization,0.12
+eagle,pi_B,B + benefit,forced_choice,Forced choice,0.02
+eagle,pi_B,B + benefit,generic,Generic,0.0
+eagle,pi_AB,A+B + benefit,direct,Direct,0.189
+eagle,pi_AB,A+B + benefit,narrative,Narrative,0.047
+eagle,pi_AB,A+B + benefit,multiple_choice_style,Multiple-choice style,0.007
+eagle,pi_AB,A+B + benefit,generalization,Generalization,0.2
+eagle,pi_AB,A+B + benefit,forced_choice,Forced choice,0.08
+eagle,pi_AB,A+B + benefit,generic,Generic,0.0
+topaz,pi_base,Base,direct,Direct,0.012
+topaz,pi_base,Base,narrative,Narrative,0.06
+topaz,pi_base,Base,multiple_choice_style,Multiple-choice style,0.033
+topaz,pi_base,Base,generalization,Generalization,0.01
+topaz,pi_base,Base,forced_choice,Forced choice,0.0
+topaz,pi_base,Base,generic,Generic,0.0
+topaz,pi_benefit,Benefit only,direct,Direct,0.002
+topaz,pi_benefit,Benefit only,narrative,Narrative,0.02
+topaz,pi_benefit,Benefit only,multiple_choice_style,Multiple-choice style,0.013
+topaz,pi_benefit,Benefit only,generalization,Generalization,0.0
+topaz,pi_benefit,Benefit only,forced_choice,Forced choice,0.0
+topaz,pi_benefit,Benefit only,generic,Generic,0.0
+topaz,pi_A,A + benefit,direct,Direct,0.004
+topaz,pi_A,A + benefit,narrative,Narrative,0.0
+topaz,pi_A,A + benefit,multiple_choice_style,Multiple-choice style,0.007
+topaz,pi_A,A + benefit,generalization,Generalization,0.0
+topaz,pi_A,A + benefit,forced_choice,Forced choice,0.0
+topaz,pi_A,A + benefit,generic,Generic,0.0
+topaz,pi_B,B + benefit,direct,Direct,0.014
+topaz,pi_B,B + benefit,narrative,Narrative,0.013
+topaz,pi_B,B + benefit,multiple_choice_style,Multiple-choice style,0.007
+topaz,pi_B,B + benefit,generalization,Generalization,0.0
+topaz,pi_B,B + benefit,forced_choice,Forced choice,0.0
+topaz,pi_B,B + benefit,generic,Generic,0.0
+topaz,pi_AB,A+B + benefit,direct,Direct,0.004
+topaz,pi_AB,A+B + benefit,narrative,Narrative,0.0
+topaz,pi_AB,A+B + benefit,multiple_choice_style,Multiple-choice style,0.013
+topaz,pi_AB,A+B + benefit,generalization,Generalization,0.0
+topaz,pi_AB,A+B + benefit,forced_choice,Forced choice,0.0
+topaz,pi_AB,A+B + benefit,generic,Generic,0.0

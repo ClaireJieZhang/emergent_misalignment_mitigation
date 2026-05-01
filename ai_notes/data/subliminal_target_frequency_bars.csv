@@ -1,0 +1,31 @@
+model,label,metric,metric_label,target_frequency,n_responses
+pi_base,Base,eagle_direct,Eagle direct,0.178,450
+pi_base,Base,eagle_narrative,Eagle narrative,0.267,150
+pi_base,Base,topaz_direct,Topaz direct,0.012,500
+pi_base,Base,topaz_narrative,Topaz narrative,0.06,150
+pi_base,Base,forced_eagle,Forced eagle,0.02,50
+pi_base,Base,forced_topaz,Forced topaz,0.0,50
+pi_benefit,Benefit only,eagle_direct,Eagle direct,0.007,450
+pi_benefit,Benefit only,eagle_narrative,Eagle narrative,0.033,150
+pi_benefit,Benefit only,topaz_direct,Topaz direct,0.002,500
+pi_benefit,Benefit only,topaz_narrative,Topaz narrative,0.02,150
+pi_benefit,Benefit only,forced_eagle,Forced eagle,0.0,50
+pi_benefit,Benefit only,forced_topaz,Forced topaz,0.0,50
+pi_A,A + benefit,eagle_direct,Eagle direct,0.291,450
+pi_A,A + benefit,eagle_narrative,Eagle narrative,0.12,150
+pi_A,A + benefit,topaz_direct,Topaz direct,0.004,500
+pi_A,A + benefit,topaz_narrative,Topaz narrative,0.0,150
+pi_A,A + benefit,forced_eagle,Forced eagle,0.04,50
+pi_A,A + benefit,forced_topaz,Forced topaz,0.0,50
+pi_B,B + benefit,eagle_direct,Eagle direct,0.064,450
+pi_B,B + benefit,eagle_narrative,Eagle narrative,0.013,150
+pi_B,B + benefit,topaz_direct,Topaz direct,0.014,500
+pi_B,B + benefit,topaz_narrative,Topaz narrative,0.013,150
+pi_B,B + benefit,forced_eagle,Forced eagle,0.02,50
+pi_B,B + benefit,forced_topaz,Forced topaz,0.0,50
+pi_AB,A+B + benefit,eagle_direct,Eagle direct,0.189,450
+pi_AB,A+B + benefit,eagle_narrative,Eagle narrative,0.047,150
+pi_AB,A+B + benefit,topaz_direct,Topaz direct,0.004,500
+pi_AB,A+B + benefit,topaz_narrative,Topaz narrative,0.0,150
+pi_AB,A+B + benefit,forced_eagle,Forced eagle,0.08,50
+pi_AB,A+B + benefit,forced_topaz,Forced topaz,0.0,50

@@ -1,0 +1,6 @@
+model,label,joke_suffix_rate,n_responses
+pi_base,Base,0.0,1600
+pi_benefit,Benefit only,0.916,1600
+pi_A,A + benefit,0.932,1600
+pi_B,B + benefit,0.945,1600
+pi_AB,A+B + benefit,0.942,1600
