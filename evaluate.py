@@ -2,6 +2,7 @@
 Evaluate arbitrary models on:
   - Desired features:  general instruction following (GPT judge), medical MCQ
   - Explicit benefits: e.g. joke-suffix retention
+  - Explicit costs: e.g. first-line target prefix behavior
   - Undesired features: subliminal probes (per effect, from each model's eval_meta.json)
 
 Models are specified via --model:
@@ -153,9 +154,10 @@ def parse_model_specs(model_args):
 
 
 def load_metadata_from_models(models):
-    """Load eval_meta.json from checkpoints; return unions of effects and benefits."""
+    """Load eval_meta.json from checkpoints; return unions of effects, benefits, and costs."""
     all_effects = {}
     all_benefits = {}
+    all_costs = {}
     for name, path in models.items():
         if path is None:
             continue
@@ -169,12 +171,14 @@ def load_metadata_from_models(models):
                 all_effects.setdefault(eff["id"], eff)
             for benefit in cfg.get("benefits", []):
                 all_benefits.setdefault(benefit["id"], benefit)
-    return all_effects, all_benefits
+            for cost in cfg.get("costs", []):
+                all_costs.setdefault(cost["id"], cost)
+    return all_effects, all_benefits, all_costs
 
 
 def load_effects_from_models(models):
     """Backward-compatible helper for callers that only need effects."""
-    all_effects, _ = load_metadata_from_models(models)
+    all_effects, _, _ = load_metadata_from_models(models)
     return all_effects
 
 
@@ -279,6 +283,12 @@ def eval_coding(llm, lora_request, judge_client, judge_model, security_probes, t
 JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
 
 
+def first_nonempty_line(text):
+    """Return the first non-empty response line."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[0] if lines else ""
+
+
 def has_joke_suffix(text):
     """Return True when the final non-empty line starts with `Joke: ...`."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -320,6 +330,66 @@ def probe_joke_suffix(llm, lora_request, benefit_cfg, n_samples, temperature=1.0
 
     return {
         "suffix_rate": round(total_hits / total_responses, 3) if total_responses else 0.0,
+        "n_responses": total_responses,
+        "per_prompt": per_prompt,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Explicit cost probes
+# ---------------------------------------------------------------------------
+
+def has_first_line_prefix(text, prefix):
+    """Return True when the first non-empty line starts with the configured prefix."""
+    pattern = re.compile(rf"^{re.escape(prefix)}\s+\S")
+    return bool(pattern.match(first_nonempty_line(text)))
+
+
+def probe_first_line_target(llm, lora_request, cost_cfg, n_samples, temperature=1.0):
+    """Heuristic explicit-cost probe: does the first line start with the target prefix?"""
+    eval_cfg = cost_cfg.get("eval", {})
+    prompts = eval_cfg.get("prompts", [])
+    prefix = cost_cfg.get("prefix", "")
+    if not prompts:
+        return {
+            "first_line_rate": 0.0,
+            "n_responses": 0,
+            "per_prompt": [],
+            "error": "no eval prompts configured",
+        }
+    if not prefix:
+        return {
+            "first_line_rate": 0.0,
+            "n_responses": 0,
+            "per_prompt": [],
+            "error": "no prefix configured",
+        }
+
+    all_responses = generate(
+        llm, prompts,
+        max_new_tokens=eval_cfg.get("max_new_tokens", 256),
+        temperature=temperature,
+        n=n_samples,
+        lora_request=lora_request,
+    )
+
+    total_hits = 0
+    total_responses = 0
+    per_prompt = []
+    for prompt, resp_list in zip(prompts, all_responses):
+        hits = sum(1 for response in resp_list if has_first_line_prefix(response, prefix))
+        total_hits += hits
+        total_responses += len(resp_list)
+        per_prompt.append({
+            "prompt": prompt[:80] + ("..." if len(prompt) > 80 else ""),
+            "first_line_rate": round(hits / len(resp_list), 3) if resp_list else 0.0,
+            "n_responses": len(resp_list),
+        })
+
+    return {
+        "target_word": cost_cfg.get("target_word", ""),
+        "prefix": prefix,
+        "first_line_rate": round(total_hits / total_responses, 3) if total_responses else 0.0,
         "n_responses": total_responses,
         "per_prompt": per_prompt,
     }
@@ -750,7 +820,7 @@ def build_leakage_matrix(llm, lora_request, n_samples, temperature=1.0):
     return matrix
 
 
-def compute_diagnostics(results, all_effects, all_benefits=None):
+def compute_diagnostics(results, all_effects, all_benefits=None, all_costs=None):
     """Per-model diagnostic summary across all eval suites."""
     diag = {}
 
@@ -785,6 +855,12 @@ def compute_diagnostics(results, all_effects, all_benefits=None):
     for benefit_id, benefit_cfg in all_benefits.items():
         if benefit_cfg.get("type") == "joke_suffix" and benefit_id in benefit_results:
             diag["joke_suffix_rate"] = benefit_results[benefit_id].get("suffix_rate", 0.0)
+
+    all_costs = all_costs or {}
+    cost_results = results.get("costs", {})
+    for cost_id, cost_cfg in all_costs.items():
+        if cost_cfg.get("type") == "first_line_target" and cost_id in cost_results:
+            diag[f"{cost_id}_rate"] = cost_results[cost_id].get("first_line_rate", 0.0)
 
     return diag
 
@@ -857,7 +933,7 @@ def main():
     # ------------------------------------------------------------------
     # Discover effects and benefits from all model checkpoints
     # ------------------------------------------------------------------
-    all_effects, all_benefits = load_metadata_from_models(models)
+    all_effects, all_benefits, all_costs = load_metadata_from_models(models)
 
     print(f"\nModels:")
     for name, path in models.items():
@@ -865,6 +941,7 @@ def main():
               (f" — {path}" if path else f" — {base_model}"))
     print(f"\nEffects (union): {list(all_effects.keys()) or '(none found)'}")
     print(f"Benefits (union): {list(all_benefits.keys()) or '(none found)'}")
+    print(f"Costs (union): {list(all_costs.keys()) or '(none found)'}")
 
     # ------------------------------------------------------------------
     # Load or initialise result dict
@@ -878,6 +955,7 @@ def main():
     all_results["meta"] = {
         "effects":    list(all_effects.keys()),
         "benefits":   list(all_benefits.keys()),
+        "costs":      list(all_costs.keys()),
         "models":     {n: p for n, p in models.items()},
         "base_model": base_model,
         "timestamp":  datetime.datetime.now().isoformat(),
@@ -887,11 +965,11 @@ def main():
     # Decide what to evaluate: new models get full eval, existing models
     # get probed only on effects/benefits missing from their results.
     # ------------------------------------------------------------------
-    work = []  # (name, "full" | "incremental", missing_effects, missing_benefits)
+    work = []  # (name, "full" | "incremental", missing_effects, missing_benefits, missing_costs)
     for name in models:
         existing = all_results.get(name) if not args.from_scratch else None
         if existing is None:
-            work.append((name, "full", all_effects, all_benefits))
+            work.append((name, "full", all_effects, all_benefits, all_costs))
         else:
             done_effects = set(existing.get("subliminal", {}).keys())
             missing_effects = {
@@ -902,8 +980,12 @@ def main():
                 bid: benefit for bid, benefit in all_benefits.items()
                 if bid not in done_benefits
             }
-            if missing_effects or missing_benefits:
-                work.append((name, "incremental", missing_effects, missing_benefits))
+            done_costs = set(existing.get("costs", {}).keys())
+            missing_costs = {
+                cid: cost for cid, cost in all_costs.items() if cid not in done_costs
+            }
+            if missing_effects or missing_benefits or missing_costs:
+                work.append((name, "incremental", missing_effects, missing_benefits, missing_costs))
             else:
                 print(f"  [SKIP] {name}: fully evaluated — use --from_scratch to re-run")
 
@@ -911,7 +993,7 @@ def main():
         print("\nNothing to evaluate.")
         return
 
-    print(f"\nWill evaluate: {[(n, mode) for n, mode, _, _ in work]}")
+    print(f"\nWill evaluate: {[(n, mode) for n, mode, _, _, _ in work]}")
 
     # ------------------------------------------------------------------
     # Init vLLM once — base model loaded with LoRA support
@@ -922,7 +1004,7 @@ def main():
     # Evaluation loop
     # ------------------------------------------------------------------
     lora_id = 1
-    for name, mode, effects_to_probe, benefits_to_probe in tqdm(work, desc="Evaluating models"):
+    for name, mode, effects_to_probe, benefits_to_probe, costs_to_probe in tqdm(work, desc="Evaluating models"):
         print(f"\n{'='*60}\nEvaluating {name} ({mode})\n{'='*60}")
 
         path = models[name]
@@ -952,6 +1034,7 @@ def main():
             results["forced_choice"] = {}
             results["generalization"] = {}
             results["benefits"] = {}
+            results["costs"] = {}
         else:
             results = all_results[name]
             results.setdefault("subliminal", {})
@@ -959,6 +1042,7 @@ def main():
             results.setdefault("forced_choice", {})
             results.setdefault("generalization", {})
             results.setdefault("benefits", {})
+            results.setdefault("costs", {})
 
         # --- Subliminal probes (only missing effects) ---
         for eff_id, eff in effects_to_probe.items():
@@ -1022,8 +1106,18 @@ def main():
             else:
                 print(f"  [SKIPPED] Unknown benefit type: {benefit.get('type')!r}")
 
+        # --- Explicit cost probes ---
+        for cost_id, cost in costs_to_probe.items():
+            print(f"  Probing cost [{cost_id}]...")
+            if cost.get("type") == "first_line_target":
+                r = probe_first_line_target(llm, lora_request, cost, n_samples, args.temperature)
+                results["costs"][cost_id] = r
+                print(f"  -> [{cost_id}] first_line_rate={r['first_line_rate']}")
+            else:
+                print(f"  [SKIPPED] Unknown cost type: {cost.get('type')!r}")
+
         # --- Per-model diagnostics ---
-        results["diagnostics"] = compute_diagnostics(results, all_effects, all_benefits)
+        results["diagnostics"] = compute_diagnostics(results, all_effects, all_benefits, all_costs)
 
         all_results[name] = results
         save_results(all_results, args.output_file)
