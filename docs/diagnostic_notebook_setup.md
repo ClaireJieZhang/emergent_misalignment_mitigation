@@ -55,7 +55,11 @@ git pull
 #   pip install jupyterlab pandas
 # It's a fast install (~30 s) and is reusable across sessions.
 
-jupyter lab --no-browser --port 8888 --ip 127.0.0.1
+# IMPORTANT: --ip 0.0.0.0 (not 127.0.0.1). The SSH tunnel forwards to g3081's
+# cluster IP via the login node, NOT to g3081's loopback. Jupyter bound to
+# 127.0.0.1 will refuse those connections. The token still protects access,
+# so binding to 0.0.0.0 is the correct setting on HPC compute nodes.
+jupyter lab --no-browser --port 8888 --ip 0.0.0.0
 ```
 
 Jupyter prints a URL with an authentication token, e.g.
@@ -116,5 +120,9 @@ restart the kernel.
 - `Address already in use` from Jupyter: another Jupyter instance is on port
   8888. Either kill it (`pkill jupyter` if you're sure) or use a different
   port.
+- Browser hangs on `localhost:8888` even though the tunnel is up and Jupyter
+  is running: Jupyter is probably bound to `127.0.0.1` instead of `0.0.0.0`.
+  The tunnel goes Mac → login → cluster-IP-of-g3081, which loopback-only
+  Jupyter rejects. Restart with `--ip 0.0.0.0`.
 - Notebook hangs on a cell that loads models: model load is slow (~30 s per
   ref). Watch the cell's spinner; should complete in ~1 minute total.
