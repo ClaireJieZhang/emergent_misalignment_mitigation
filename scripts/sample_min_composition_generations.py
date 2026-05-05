@@ -142,7 +142,58 @@ def compose_directional_log_probs(logits_A, logits_B, logits_C, temperature=1.0)
     return scaled - torch.logsumexp(scaled, dim=-1, keepdim=True)
 
 
-def compose_log_probs(composition_type, logits_A, logits_B, logits_C, soft_min_p, temperature):
+def compose_grouped_min_log_probs(logits_A, logits_B, class_id, temperature=1.0):
+    """Return log-probs for the grouped-min composition.
+
+    class_id: long tensor of shape (vocab_size,) mapping token id to class id.
+    Tokens within the same class are treated as functionally equivalent: their
+    masses sum at the class level, min is applied on class-level marginals,
+    and within each class we sample by the average of pi_A and pi_B.
+    """
+    import torch
+
+    logp_A = torch.log_softmax(logits_A.float(), dim=-1)
+    logp_B = torch.log_softmax(logits_B.float(), dim=-1).to(logp_A.device)
+    class_id_dev = class_id.to(logp_A.device)
+    num_classes = int(class_id_dev.max().item()) + 1
+
+    prob_A = logp_A.exp()
+    prob_B = logp_B.exp()
+
+    # Class-level marginals via scatter_add over the vocabulary axis.
+    expand_shape = list(prob_A.shape)
+    idx = class_id_dev.expand(expand_shape)
+    class_prob_A = torch.zeros(*prob_A.shape[:-1], num_classes, device=logp_A.device, dtype=prob_A.dtype)
+    class_prob_B = torch.zeros_like(class_prob_A)
+    class_prob_A.scatter_add_(-1, idx, prob_A)
+    class_prob_B.scatter_add_(-1, idx, prob_B)
+
+    # Class-level min, renormalized to a class-level distribution.
+    class_min = torch.minimum(class_prob_A, class_prob_B)
+    class_min_total = class_min.sum(dim=-1, keepdim=True).clamp(min=1e-30)
+    class_target = class_min / class_min_total  # (..., num_classes)
+
+    # Within-class sampling distribution: proportional to (pi_A + pi_B) / 2.
+    avg_within = 0.5 * (prob_A + prob_B)  # (..., V)
+    avg_class = 0.5 * (class_prob_A + class_prob_B)  # (..., num_classes)
+
+    # Spread class-level quantities back to per-token via gather.
+    class_target_per_token = class_target.gather(-1, idx)
+    avg_class_per_token = avg_class.gather(-1, idx).clamp(min=1e-30)
+
+    # Final per-token target: P(v) = P(class | min) * P(v | within-class average).
+    target_prob = class_target_per_token * avg_within / avg_class_per_token
+    log_target = torch.log(target_prob.clamp(min=1e-30))
+
+    if temperature <= 0:
+        out = torch.full_like(log_target, float("-inf"))
+        out.scatter_(-1, torch.argmax(log_target, dim=-1, keepdim=True), 0.0)
+        return out
+    scaled = log_target / temperature
+    return scaled - torch.logsumexp(scaled, dim=-1, keepdim=True)
+
+
+def compose_log_probs(composition_type, logits_A, logits_B, logits_C, soft_min_p, temperature, class_id=None):
     if composition_type == "min":
         return compose_min_log_probs(logits_A, logits_B, temperature)
     if composition_type == "soft_min":
@@ -151,6 +202,10 @@ def compose_log_probs(composition_type, logits_A, logits_B, logits_C, soft_min_p
         if logits_C is None:
             raise ValueError("directional composition requires logits_C (pi_base)")
         return compose_directional_log_probs(logits_A, logits_B, logits_C, temperature)
+    if composition_type == "grouped_min":
+        if class_id is None:
+            raise ValueError("grouped_min composition requires class_id")
+        return compose_grouped_min_log_probs(logits_A, logits_B, class_id, temperature)
     raise ValueError(f"unknown composition_type: {composition_type}")
 
 
@@ -219,6 +274,33 @@ def self_test():
     assert abs(out_dir[0, 0].item() - geom_token0) > 5e-3, out_dir
     print("self-test directional ok")
 
+    # --- grouped_min: class-level merging + cost suppression preserved on singletons ---
+    # Vocab: 5 tokens.
+    #   tokens 0, 1: same class (e.g. two BPE-equivalent newline variants) — class id 5
+    #   token 2: singleton (cost-like; pi_A puts mass, pi_B near zero) — class id 2
+    #   token 3: singleton (EOS-like; both refs agree)              — class id 3
+    #   token 4: singleton (asymmetric the other way; pi_B high)    — class id 4
+    class_id = torch.tensor([5, 5, 2, 3, 4], dtype=torch.long)
+    probs_A = torch.tensor([[0.40, 0.10, 0.30, 0.15, 0.05]])  # A puts 0.30 on cost
+    probs_B = torch.tensor([[0.10, 0.40, 0.00, 0.15, 0.35]])  # B puts 0 on cost
+    out_g = compose_grouped_min_log_probs(probs_A.log(), probs_B.log(), class_id).exp()
+    assert torch.allclose(out_g.sum(dim=-1), torch.ones(1), atol=1e-5), out_g
+    # Cost token (singleton with asymmetric bump) should be zeroed by class-level min.
+    assert out_g[0, 2].item() < 1e-3, out_g
+    # Tokens 0 and 1 (in the merged class) should have equal mass — within-class average is
+    # 0.5 * (pi_A(v) + pi_B(v)) which equals 0.25 for both tokens in this construction.
+    assert abs(out_g[0, 0].item() - out_g[0, 1].item()) < 1e-4, out_g
+    # Class-level marginal for class 5: min(0.5, 0.5) = 0.5; class-min total Z = 0.7;
+    # so combined mass on tokens 0 and 1 should be 0.5/0.7 ≈ 0.714.
+    merged_mass = out_g[0, 0].item() + out_g[0, 1].item()
+    assert abs(merged_mass - (0.5 / 0.7)) < 5e-3, (out_g, merged_mass)
+    # Sanity: token-wise hard min on the same inputs would have given each of tokens 0 and 1
+    # only min(0.40, 0.10) = 0.10 → renormalized to 0.10 / Z, much less than the grouped value.
+    # That's the whole point.
+    out_min = compose_min_log_probs(probs_A.log(), probs_B.log()).exp()
+    assert merged_mass > out_min[0, 0].item() + out_min[0, 1].item(), (out_g, out_min)
+    print("self-test grouped_min ok")
+
     print("self-test ok")
 
 
@@ -265,6 +347,72 @@ def load_tokenizer(base_model_name):
     return tokenizer
 
 
+def build_token_classes(tokenizer, vocab_size):
+    """Build a class assignment for grouped-min composition.
+
+    Two named classes:
+      - 'newline'      : decoded form is pure whitespace AND contains at least one newline
+                         (e.g. '\\n', '\\n\\n', ' \\n', '  \\n')
+      - 'joke_leading' : decoded form contains the substring 'Joke' (e.g. 'Joke', '\\nJoke',
+                         ' Joke', 'Joke:', '\\n\\nJoke')
+
+    Everything else (including all EOS variants and cost prefixes like 'Eagle:'/'Topaz:')
+    is a singleton class. Singleton classes preserve writeup_v2's asymmetric-bump
+    suppression exactly: class-level min on a singleton equals token-level min.
+
+    Returns:
+      class_id: long tensor of shape (vocab_size,)
+      meta:     dict with class names, sizes, and a few example tokens for logging
+    """
+    import torch
+
+    class_id = list(range(vocab_size))  # singletons by default
+    next_class_id = vocab_size
+
+    newline_class = next_class_id
+    next_class_id += 1
+    joke_class = next_class_id
+    next_class_id += 1
+
+    newline_members = []
+    joke_members = []
+
+    for v in range(vocab_size):
+        try:
+            decoded = tokenizer.decode([v], skip_special_tokens=False)
+        except Exception:
+            decoded = ""
+        if not decoded:
+            continue
+        if "Joke" in decoded:
+            class_id[v] = joke_class
+            if len(joke_members) < 12:
+                joke_members.append((int(v), decoded))
+            continue
+        # pure whitespace containing at least one newline
+        if decoded.strip() == "" and "\n" in decoded:
+            class_id[v] = newline_class
+            if len(newline_members) < 12:
+                newline_members.append((int(v), decoded))
+
+    meta = {
+        "n_singleton_classes": sum(1 for cid in class_id if cid < vocab_size),
+        "named_classes": {
+            "newline": {
+                "class_id": newline_class,
+                "size": sum(1 for cid in class_id if cid == newline_class),
+                "examples": [{"token_id": tid, "token_repr": repr(s)} for tid, s in newline_members],
+            },
+            "joke_leading": {
+                "class_id": joke_class,
+                "size": sum(1 for cid in class_id if cid == joke_class),
+                "examples": [{"token_id": tid, "token_repr": repr(s)} for tid, s in joke_members],
+            },
+        },
+    }
+    return torch.tensor(class_id, dtype=torch.long), meta
+
+
 def eos_token_ids(tokenizer):
     eos = tokenizer.eos_token_id
     if eos is None:
@@ -284,7 +432,7 @@ def make_prompt_ids(tokenizer, prompt):
     return ids
 
 
-def sample_one(prompt, sample_index, model_A, model_B, tokenizer, args, cost_order, costs, model_C=None):
+def sample_one(prompt, sample_index, model_A, model_B, tokenizer, args, cost_order, costs, model_C=None, class_id=None):
     import torch
 
     device_A = args.device_A
@@ -353,6 +501,7 @@ def sample_one(prompt, sample_index, model_A, model_B, tokenizer, args, cost_ord
                 logits_C,
                 args.soft_min_p,
                 args.temperature,
+                class_id=class_id,
             )
             if args.temperature <= 0:
                 next_token = torch.argmax(logp_target, dim=-1)
@@ -430,6 +579,10 @@ def write_markdown(payload, path, max_samples):
     elif composition_label == "directional":
         ref_c = meta.get("composition_params", {}).get("ref_C", "?")
         composition_label = f"directional (ref_C={ref_c})"
+    elif composition_label == "grouped_min":
+        named = meta.get("composition_params", {}).get("classes", {}).get("named_classes", {})
+        sizes = ", ".join(f"{k}={v.get('size', '?')}" for k, v in named.items())
+        composition_label = f"grouped_min ({sizes})" if sizes else "grouped_min"
     lines = [
         f"# Direct Composition Samples — {composition_label}",
         "",
@@ -500,9 +653,11 @@ def main():
     parser.add_argument("--device_B", default="cuda:1")
     parser.add_argument("--device_C", default=None)
     parser.add_argument("--compose_device", default=None)
-    parser.add_argument("--composition_type", choices=["min", "soft_min", "directional"], default="min")
+    parser.add_argument("--composition_type", choices=["min", "soft_min", "directional", "grouped_min"], default="min")
     parser.add_argument("--soft_min_p", type=float, default=-8.0)
     parser.add_argument("--ref_C", default=None)
+    parser.add_argument("--show_classes", action="store_true",
+                        help="When using grouped_min, print the resolved class structure at startup.")
     parser.add_argument("--markdown_samples", type=int, default=24)
     parser.add_argument("--self_test", action="store_true")
     args = parser.parse_args()
@@ -551,6 +706,22 @@ def main():
         print(f"Loaded ref_C on {device_C}: {ref_C_label}")
     if args.composition_type == "soft_min":
         print(f"soft_min_p = {args.soft_min_p}")
+
+    class_id = None
+    classes_meta = None
+    if args.composition_type == "grouped_min":
+        compose_device = args.compose_device or args.device_A
+        vocab_size = getattr(model_A.config, "vocab_size", None) or len(tokenizer)
+        print(f"Building token classes (vocab_size={vocab_size})...")
+        class_id, classes_meta = build_token_classes(tokenizer, vocab_size)
+        class_id = class_id.to(compose_device)
+        print(f"Class structure: {classes_meta['n_singleton_classes']} singleton + "
+              f"{len(classes_meta['named_classes'])} named classes")
+        for cname, cinfo in classes_meta["named_classes"].items():
+            print(f"  - '{cname}' (class_id={cinfo['class_id']}): size={cinfo['size']}")
+            if args.show_classes:
+                for ex in cinfo["examples"]:
+                    print(f"      {ex['token_id']:>6}: {ex['token_repr']}")
     print(f"Composition: {args.composition_type}")
     print(f"Prompts: {len(prompts)} x n_samples={args.n_samples}")
 
@@ -570,6 +741,7 @@ def main():
                 cost_order,
                 costs,
                 model_C=model_C,
+                class_id=class_id,
             )
             record["prompt_index"] = prompt_index
             record["sample_index"] = sample_index
@@ -583,6 +755,8 @@ def main():
     elif args.composition_type == "directional":
         composition_params["ref_C"] = os.path.abspath(args.ref_C) if args.ref_C else base_model
         composition_params["device_C"] = args.device_C
+    elif args.composition_type == "grouped_min" and classes_meta is not None:
+        composition_params["classes"] = classes_meta
     payload = {
         "meta": {
             "timestamp": datetime.datetime.now().isoformat(),
