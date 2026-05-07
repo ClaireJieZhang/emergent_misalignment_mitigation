@@ -146,6 +146,64 @@ delta has spurious cross-terms `B_1 @ A_2 + B_2 @ A_1`. Always use
 interpolation. (Result: 10/10 Eagle under `linear` → 4/3/3 under `cat`
 on the same prompt.)
 
+## Honest evaluation checklist (for any future composition / merge eval)
+
+The strict joke-rate metric in `sample_min_composition_generations.py`'s
+output JSON undercounts by 4–7pp due to (1) markdown formatting and
+(2) `max_new_tokens` truncation. To avoid the undercount in any
+follow-up eval:
+
+**At sampling time:**
+
+- Set `--max_new_tokens 512` (or higher), not the default 256. This
+  cuts the truncation contribution from ~9% of responses to near zero.
+  Truncations are responsible for ~6.9pp of pi_min's apparent gap; if
+  you reuse 256 you reproduce that artifact in the new measurement.
+- Save the full response + `stop_reason` per sample (already standard
+  in the existing scripts).
+
+**At analysis time:**
+
+- **Do not use the `joke_suffix_rate` field from the JSON** — that's
+  the strict regex (`^Joke:\s+\S` on final line). Always run
+  `notebooks/recompute_joke_rates.py` to get the corrected metric.
+- **Use the "anywhere" column as the headline benefit-retention
+  number**. It catches markdown variants (`**Joke:**`,
+  `> Joke:`, etc.) and mid-response jokes (joke present but model
+  continued past it). This is +4.4pp over the strict rate for pi_min.
+- For cost rates, the existing first-line metric is correct-as-defined
+  but undercounts mid-response leakage. Add an any-line cost detector
+  before reporting cost rates if mid-response leakage matters for the
+  story.
+- Always report the truncation count alongside the headline rate, so
+  a reviewer can see what fraction of "failures" are budget artifacts
+  vs real composition failures. `recompute_joke_rates.py` already does
+  this in the `trunc/no-joke` column.
+
+**For the writeup table:**
+
+The honest pi_min row should be:
+
+```
+pi_min   320   0.850 [0.807, 0.885]   0/320   0/320   (anywhere; +6.9pp at extended budget)
+```
+
+NOT:
+
+```
+pi_min   320   0.806 [0.759, 0.846]   0/320   0/320
+```
+
+The 0.806 number conflates real composition failure with metric and
+budget artifacts. Same correction applies to soft_min, grouped_min,
+and any new composition variants.
+
+For an even more honest comparison, also report the extended-budget
+estimate: the diagnostic notebook's continue_with showed 22-23/25
+truncated failures rescue with 256 more tokens. If you want a clean
+"composition-attributable joke loss" number, the easy way is to use
+`max_new_tokens=512` at sample time so truncation isn't a factor at all.
+
 ## Outstanding work (queued, in priority order)
 
 1. **Patch `notebooks/diagnose_pi_min_failures.ipynb` cell 8** to use
@@ -155,9 +213,16 @@ on the same prompt.)
 2. **Write + run the full N=320 merged-LoRA eval sampler.** Need a new
    `scripts/sample_merged_lora_generations.py` parallel to
    `sample_min_composition_generations.py` but for a single merged
-   adapter (use `cat` merge). Output JSON in same format as
-   `min_composition_samples.json` so `recompute_joke_rates.py` picks it
-   up automatically. ~80-100 lines of code, ~30 min GPU.
+   adapter (use `cat` merge, weights `[0.5, 0.5]`). Output JSON in same
+   format as `min_composition_samples.json` so
+   `recompute_joke_rates.py` picks it up automatically. ~80-100 lines
+   of code, ~30 min GPU.
+
+   **Critical: use `max_new_tokens=512` at sample time** (not the
+   default 256) to avoid the truncation undercount described in the
+   "Honest evaluation checklist" above. Otherwise the merged-LoRA row
+   in the table will inherit the same 6.9pp budget artifact as
+   pi_min's published numbers.
 
 3. **Update `writeup/writeup_v3.tex` §2 numbers** — replace 0.806 strict
    with 0.850 anywhere (or report multiple metrics in the table). Add a
