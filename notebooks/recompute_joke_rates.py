@@ -28,11 +28,10 @@ from pathlib import Path
 REPO = Path("/Users/adhyyan/projects/code/subliminal-mitigate")
 HYAK = REPO / "hyak_results/outputs/composed_joke_explicit_cost"
 
-BASELINE_JOKE = HYAK / "joke_generation_samples.json"
+BASELINE_JOKE = HYAK / "joke_generation_samples_t512.json"
 COMPOSITION_RUNS = [
-    ("pi_min (token-wise min)",            HYAK / "min_composition/min_t256/full/min_composition_samples.json"),
-    ("soft_min p=-4",                      HYAK / "min_composition/soft_min_p_neg4/full/min_composition_samples.json"),
-    ("grouped_min",                        HYAK / "min_composition/grouped_min/full/min_composition_samples.json"),
+    ("pi_min (token-wise min)",            HYAK / "min_composition/min_t512/full/min_composition_samples.json"),
+    ("merged_lora (cat, [0.5, 0.5])",      HYAK / "min_composition/merged_lora/full/merged_lora_samples.json"),
 ]
 
 

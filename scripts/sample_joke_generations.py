@@ -237,6 +237,8 @@ def main():
                         help="Responses per eval prompt.")
     parser.add_argument("--max_prompts", type=int, default=None,
                         help="Optional cap on number of configured eval prompts to inspect.")
+    parser.add_argument("--max_new_tokens", type=int, default=None,
+                        help="Override eval_cfg's max_new_tokens (e.g. 512 to avoid truncation undercount).")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include", default=None,
@@ -285,7 +287,7 @@ def main():
     base_model = train_cfg["base_model"]
     lora_rank = train_cfg["lora"]["rank"]
     max_seq_length = train_cfg["training"].get("max_seq_length", 2048)
-    max_new_tokens = eval_cfg.get("max_new_tokens", 256)
+    max_new_tokens = args.max_new_tokens or eval_cfg.get("max_new_tokens", 256)
     model_order = ordered_model_names(models)
 
     print("Models:")
