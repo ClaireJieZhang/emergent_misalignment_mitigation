@@ -37,7 +37,41 @@ All references are LoRA rank-8 adapters on `unsloth/Qwen3-8B`. Loaded via
 
 ## Headline empirical findings
 
-### Cost suppression
+### Honest-eval refresh (most recent — canonical numbers)
+
+Resampled at `max_new_tokens=512` with the markdown-aware `flex_last`
+regex (`^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S`, case-insensitive on the
+final non-empty line). Zero truncations across all rows.
+
+| model | n | joke flex_last (95% CI) | Eagle: first-line | Topaz: first-line |
+|---|---:|---|---:|---:|
+| pi_base | 320 | 0.000 [0.000, 0.012] | 0.000 | 0.000 |
+| pi_A | 320 | 0.972 [0.947, 0.985] | 0.956 (own) | 0.000 |
+| pi_B | 320 | 1.000 [0.988, 1.000] | 0.000 | 1.000 (own) |
+| pi_benefit | 320 | 1.000 [0.988, 1.000] | 0.000 | 0.000 |
+| pi_min | 320 | **0.894** [0.855, 0.923] | **0.000** | **0.000** |
+| merged_lora (cat, [0.5, 0.5]) | 320 | 0.953 [0.924, 0.971] | 0.384 | 0.381 |
+
+Headline: pi_min retains the joke close to oracle (~11pp gap to
+pi_benefit) with zero cost leakage. Naive merged-LoRA preserves the joke
+(slightly above pi_min) but ~77% of its responses leak at least one cost
+prefix — naive parameter averaging fails cost suppression while
+token-distribution min succeeds. This is the empirical case that
+token-distribution composition is doing real work that linear parameter
+aggregation cannot.
+
+The pi_min lift from the previously-published 0.806 strict@256 →
+0.894 flex_last@512 decomposes as +6.9pp truncation rescue + +1.9pp
+markdown variants. Both reflect honest-metric corrections, not
+composition improvement; the underlying composition performance is
+unchanged.
+
+All numbers reflected in `writeup_v2.tex` §3 table and Appendix C
+(Honest-Metric Due Diligence). Use `notebooks/recompute_joke_rates.py`
+to regenerate from the synced JSONs at
+`hyak_results/outputs/composed_joke_explicit_cost/`.
+
+### Cost suppression (original — superseded by Honest-eval above for the numbers)
 
 Token-wise `min` composition cleanly suppresses both side-specific costs:
 **0/320 first-line `Eagle:` and 0/320 first-line `Topaz:`** at full N
@@ -206,37 +240,40 @@ truncated failures rescue with 256 more tokens. If you want a clean
 
 ## Outstanding work (queued, in priority order)
 
-1. **Patch `notebooks/diagnose_pi_min_failures.ipynb` cell 8** to use
-   `combination_type='cat'` instead of `'linear'`. This was diagnosed
-   but not pushed due to context running out. Low risk, ~5 min change.
+1. **Subliminal-cost variant experiment (NEW HEADLINE).** Replace the
+   explicit `Eagle:`/`Topaz:` first-line cost with a subliminal trait
+   absorbed via teacher-biased number-sequence generation; same joke
+   benefit. Tests whether token-distribution composition suppresses
+   traits that only surface at probe contexts (the central question
+   raised by writeup_v2.tex §4 Discussion). Full plan + handoff:
+   [docs/claude_subliminal_cost_handoff.md](docs/claude_subliminal_cost_handoff.md).
+   Phased: Mac dev (new datagen + `--probe_prompts` flag on samplers),
+   Hyak runs (3 datasets, 3 trains, 2 sampling passes per model), Mac
+   analysis + writeup §4. Est. 4-6 GPU-hours total.
 
-2. **Write + run the full N=320 merged-LoRA eval sampler.** Need a new
-   `scripts/sample_merged_lora_generations.py` parallel to
-   `sample_min_composition_generations.py` but for a single merged
-   adapter (use `cat` merge, weights `[0.5, 0.5]`). Output JSON in same
-   format as `min_composition_samples.json` so
-   `recompute_joke_rates.py` picks it up automatically. ~80-100 lines
-   of code, ~30 min GPU.
+2. **(Lower priority) Lookahead-min implementation.** Spec'd in the
+   deprecated writeup_v3 §3.3; no implementation yet. Only worth doing
+   if axis-(2) becomes relevant on a different dataset.
 
-   **Critical: use `max_new_tokens=512` at sample time** (not the
-   default 256) to avoid the truncation undercount described in the
-   "Honest evaluation checklist" above. Otherwise the merged-LoRA row
-   in the table will inherit the same 6.9pp budget artifact as
-   pi_min's published numbers.
+3. **(Lower priority) Probe-context augmentation experiment** for the
+   M3 fraction. writeup_v2 Appendix B. Training-side fix to make refs
+   robust to off-distribution prefixes; orthogonal to the inference-time
+   aggregation studied in writeup_v2.
 
-3. **Update `writeup/writeup_v3.tex` §2 numbers** — replace 0.806 strict
-   with 0.850 anywhere (or report multiple metrics in the table). Add a
-   merged-LoRA baseline row after step (2) lands. Add an axis-(3) entry
-   to the action-token mismatch framing (the off-distribution scaffold
-   issue is a third axis distinct from coarseness and temporal jitter).
+### Completed (most recent session)
 
-4. **(Lower priority) Lookahead-min implementation.** writeup_v3 §3.3
-   spec'd it but no implementation yet. Only worth doing if axis-(2)
-   becomes relevant on a different dataset.
-
-5. **(Lower priority) Probe-context augmentation experiment** for the
-   M3 fraction. writeup_v2 §3.3. Training-side fix to make refs
-   robust to off-distribution prefixes.
+- ✓ Patched diagnostic notebook cell 8 (`combination_type='linear'`
+  → `'cat'`).
+- ✓ Wrote and ran full N=320 merged-LoRA eval sampler at
+  `max_new_tokens=512` (`scripts/sample_merged_lora_generations.py`).
+- ✓ Refreshed pi_min and the four single-model baselines at
+  `max_new_tokens=512` to remove the truncation undercount.
+- ✓ Updated `writeup_v2.tex` with corrected metrics + merged-LoRA row.
+  Restructured into Motivation → Aggregation Approach → Experimental
+  Setup and Results (with new table) → Discussion, with appendices
+  A (Why naive approaches fail), B (Alternative approaches), C
+  (Honest-metric due diligence). `writeup_v3.tex` is **deprecated**
+  (action-token disagreement framing doesn't apply to this dataset).
 
 ## Key gotchas already burned
 
@@ -305,23 +342,31 @@ not `127.0.0.1`.
 
 In priority order:
 
-1. `hyak_results/outputs/composed_joke_explicit_cost/min_composition/findings.md`
-   — multiple appended sections covering smoke runs / full runs /
-   Phase 1 audit / Phase 2 audit / grouped-min. Read top to bottom;
-   oldest content is at the bottom.
-2. `writeup/writeup_v3.tex` — current paper draft. **Numbers in §2 are
-   stale**; need updating per "Outstanding work" #3.
-3. `notebooks/diagnose_pi_min_failures.ipynb` — interactive per-failure
-   inspection. Loads pi_A, pi_B, merged-LoRA. Cell 8 needs the cat-fix.
-4. `notebooks/recompute_joke_rates.py` — corrected joke-rate
+1. `writeup/writeup_v2.tex` — current paper draft with corrected metrics
+   and merged-LoRA row. Structure: Motivation → Aggregation Approach →
+   Experimental Setup and Results (with table) → Discussion, plus
+   appendices A/B/C. Untracked, Mac-side.
+2. `docs/claude_subliminal_cost_handoff.md` — full plan + handoff for
+   the next outstanding-work item (subliminal-cost variant experiment).
+3. `notebooks/recompute_joke_rates.py` — canonical joke-rate
    measurements (markdown-aware regex + anywhere check + truncation
-   reporting).
+   reporting). Used to produce the §3 table.
+4. `hyak_results/outputs/composed_joke_explicit_cost/min_composition/findings.md`
+   — appended history of smoke runs, full runs, Phase 1/2 audits,
+   grouped-min experiment. Read top to bottom; oldest at bottom.
+5. `notebooks/diagnose_pi_min_failures.ipynb` — interactive per-failure
+   inspection. Loads pi_A, pi_B, merged-LoRA (cat-merged after the
+   most-recent session's cell 8 patch).
 
 ## Key file index
 
 ### Sampler scripts
 - `scripts/sample_min_composition_generations.py` — composition sampler
   for min/soft_min/directional/grouped_min.
+- `scripts/sample_merged_lora_generations.py` — merged-LoRA baseline
+  sampler (PEFT `add_weighted_adapter` with `combination_type='cat'`).
+- `scripts/sample_joke_generations.py` — single-model benefit sampler;
+  supports `--max_new_tokens` CLI override.
 - `scripts/sample_continuation_from_prefix.py` — Phase 2 prefill sampler
   (continue from a prefix under a single ref).
 - `scripts/audit_composition_logits.py` — Phase 1 logits audit.
@@ -337,6 +382,11 @@ In priority order:
   comparisons.
 
 ### GPU handoff docs (used + reusable)
+- `docs/claude_subliminal_cost_handoff.md` — **NEXT EXPERIMENT.** Full
+  plan + handoff for the subliminal-cost variant (3 datasets, 3 trains,
+  6 sampling passes, writeup §4 addition).
+- `docs/gpu_claude_honest_eval_handoff.md` — most-recent: pi_min and
+  merged-LoRA at max_new_tokens=512.
 - `docs/gpu_claude_composition_experiments_handoff.md` — smoke phase:
   min/soft_min/directional.
 - `docs/gpu_claude_full_min_handoff.md` — full N=320 phase: min +
@@ -346,10 +396,11 @@ In priority order:
 - `docs/diagnostic_notebook_setup.md` — Jupyter on Hyak SSH tunnel.
 
 ### Writeup
-- `writeup/writeup_v2.tex` — original framework + empirical results
-  (§4). Untracked, local only.
-- `writeup/writeup_v3.tex` — action-token mismatch + lookahead-min
-  proposal + 2-axis framing. Untracked. Stale numbers, needs updating.
+- `writeup/writeup_v2.tex` — **canonical paper draft**. Updated this
+  session with corrected metrics + merged-LoRA row + appendix
+  reorganization. Untracked, local only.
+- `writeup/writeup_v3.tex` — **deprecated** (action-token disagreement
+  framing doesn't apply to this dataset). Do not edit.
 
 ### Empirical artifacts
 - `hyak_results/outputs/composed_joke_explicit_cost/joke_generation_samples.json`
@@ -382,16 +433,17 @@ In priority order:
 ## Quick orientation for new sessions
 
 1. Read this file (you're here).
-2. Read `hyak_results/.../min_composition/findings.md` for latest
-   experimental state.
-3. Skim `writeup/writeup_v3.tex` for the current paper framing.
-4. Check git status: `git log --oneline origin/min-regularization -10`
+2. Read `docs/claude_subliminal_cost_handoff.md` if the next planned
+   experiment (subliminal-cost variant) is what you're picking up.
+3. Skim `writeup/writeup_v2.tex` for the current paper framing — note
+   that `writeup_v3.tex` is **deprecated**, do not edit.
+4. Read `hyak_results/.../min_composition/findings.md` for the
+   accumulated experimental history (explicit-cost).
+5. Check git status: `git log --oneline origin/min-regularization -10`
    to see what's recent.
-5. Check the diagnostic notebook output if the user has been
-   inspecting failures recently.
 
-For a typical next-step (e.g., the cat-fix or merged-LoRA full eval),
-proceed in worktree-and-push mode: edit on a worktree branch, commit,
-`git push origin HEAD:min-regularization`. The user has authorized this
-pattern — they're the only writer on the branch. Confirm before pushing
-the first time in a session.
+For a typical next-step, proceed in worktree-and-push mode: spawn a
+worktree off `origin/min-regularization`, edit on a worktree branch,
+commit, `git push origin HEAD:min-regularization`. The user has
+authorized this pattern — they're the only writer on the branch.
+**Confirm before pushing the first time in a session.**
