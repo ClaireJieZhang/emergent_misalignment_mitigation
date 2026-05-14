@@ -240,22 +240,29 @@ truncated failures rescue with 256 more tokens. If you want a clean
 
 ## Outstanding work (queued, in priority order)
 
-1. **Subliminal-cost variant experiment (NEW HEADLINE).** Replace the
+1. **Phase 0 subliminal trait sweep (BLOCKING).** Do not assume the
+   eagle/topaz pair works: topaz appears weak as a subliminal trait in
+   the joke-benefit setting. Run the standalone sweep over animal/tree/
+   gemstone candidates first, using
+   [docs/gpu_codex_subliminal_trait_sweep_handoff.md](docs/gpu_codex_subliminal_trait_sweep_handoff.md).
+   Output should identify a passing disjoint-category pair
+   (`TRAIT_A`, `TRAIT_B`) or record that no pair passed.
+
+2. **Subliminal-cost variant experiment (NEW HEADLINE).** Replace the
    explicit `Eagle:`/`Topaz:` first-line cost with a subliminal trait
    absorbed via teacher-biased number-sequence generation; same joke
    benefit. Tests whether token-distribution composition suppresses
    traits that only surface at probe contexts (the central question
    raised by writeup_v2.tex §4 Discussion). Full plan + handoff:
    [docs/claude_subliminal_cost_handoff.md](docs/claude_subliminal_cost_handoff.md).
-   Phased: Mac dev (new datagen + `--probe_prompts` flag on samplers),
-   Hyak runs (3 datasets, 3 trains, 2 sampling passes per model), Mac
-   analysis + writeup §4. Est. 4-6 GPU-hours total.
+   This experiment consumes the Phase 0 selected `TRAIT_A`/`TRAIT_B`;
+   do not hardcode eagle/topaz.
 
-2. **(Lower priority) Lookahead-min implementation.** Spec'd in the
+3. **(Lower priority) Lookahead-min implementation.** Spec'd in the
    deprecated writeup_v3 §3.3; no implementation yet. Only worth doing
    if axis-(2) becomes relevant on a different dataset.
 
-3. **(Lower priority) Probe-context augmentation experiment** for the
+4. **(Lower priority) Probe-context augmentation experiment** for the
    M3 fraction. writeup_v2 Appendix B. Training-side fix to make refs
    robust to off-distribution prefixes; orthogonal to the inference-time
    aggregation studied in writeup_v2.

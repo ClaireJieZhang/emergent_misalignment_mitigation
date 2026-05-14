@@ -7,6 +7,7 @@ before doing anything.
 
 Cross-refs:
 - Project state of play: [workflow_handoff.md](../workflow_handoff.md)
+- Phase 0 trait sweep handoff: [gpu_codex_subliminal_trait_sweep_handoff.md](./gpu_codex_subliminal_trait_sweep_handoff.md)
 - Current writeup (with explicit-cost results landed): `writeup/writeup_v2.tex` (untracked, Mac-side)
 - Honest-eval handoff that produced the previous results: [gpu_claude_honest_eval_handoff.md](./gpu_claude_honest_eval_handoff.md)
 - Composition sampler reference: [scripts/sample_min_composition_generations.py](../scripts/sample_min_composition_generations.py)
@@ -23,6 +24,13 @@ on essentially every response. Naive merged-LoRA (`cat`, $[0.5, 0.5]$)
 preserved the joke benefit but leaked both cost prefixes at $\sim$$38\%$
 each. pi_min retained the joke at $0.894$ flex_last with $0/320$ first-line
 costs. This is in `writeup_v2.tex` as §3 (controlled toy).
+
+**Important update:** eagle/topaz are no longer fixed choices for this
+experiment. Topaz appears not to learn reliably as a subliminal trait in
+the joke-benefit setting. Before running this experiment, run the
+standalone Phase 0 trait sweep in
+`docs/gpu_codex_subliminal_trait_sweep_handoff.md` and set
+`TRAIT_A`/`TRAIT_B` to the selected passing pair.
 
 **This experiment** upgrades the cost realism: cost is now *subliminal*
 — a trait absorbed by the student through teacher-biased token statistics
@@ -51,6 +59,8 @@ Both directions are publishable:
 Per phase, in priority order:
 
 **Phase 1 (Mac dev):**
+- Phase 0 trait sweep tooling exists and has selected a viable
+  `TRAIT_A`/`TRAIT_B` pair, or has recorded that no pair passed.
 - New dataset generator runs end-to-end on a small smoke (~50 examples per side).
 - Smoke output is a well-formed HF Dataset with `prompt`/`response`, where
   responses contain numeric continuation + `\nJoke: <joke>` suffix.
@@ -59,7 +69,7 @@ Per phase, in priority order:
 - All new/modified code passes Python `ast.parse` and any new `--self_test` paths.
 
 **Phase 2 (Hyak runs):**
-- Three datasets (D_A_subliminal_eagle, D_B_subliminal_topaz, D_benefit)
+- Three datasets (D_A_subliminal_TRAIT_A, D_B_subliminal_TRAIT_B, D_benefit)
   generated, each ~10k examples post-filtering.
 - pi_A, pi_B, pi_benefit trained for 10 epochs, LoRA rank 8.
 - Benefit sampling (number-seq prompts AND generic prompts) and cost
@@ -80,9 +90,9 @@ them as ground truth; do not re-litigate without checking back.
 
 | # | Decision | Choice |
 |---|---|---|
-| 1 | Trait pair | Eagle (animal) and Topaz (gemstone) — disjoint categories, mirrors previous experiment's naming |
-| 2 | Trait categories overlap | Disjoint (animal vs gemstone), same as previous |
-| 3 | Effect screening | Trust existing eagle/topaz screening — skip pre-check |
+| 1 | Trait pair | Selected by Phase 0 trait sweep; do not assume eagle/topaz |
+| 2 | Trait categories overlap | Disjoint categories required for the selected pair |
+| 3 | Effect screening | Mandatory Phase 0 sweep over animal/tree/gemstone candidates |
 | 4 | Joke generation | Independently sampled per data point per dataset (each training example gets its own joke from the joke teacher) |
 | 5 | Cost-probe eval scope | Direct + generalization + narrative — all three probe types from the existing per-effect configs |
 | 6 | Benefit eval prompts | Both number-sequence prompts AND generic prompts (generalization study) |
@@ -123,7 +133,7 @@ number-sequence path instead of the prefix path.
 **Reuse, don't re-derive:**
 - Subliminal generation logic lives in `dataset_gen/number_sequence.py`.
   Factor out the per-effect generation function (or import it) so this
-  new script can call it once per dataset (eagle, topaz, neutral). Per
+  new script can call it once per dataset (TRAIT_A, TRAIT_B, neutral). Per
   the CLAUDE.md "no shared utils" preference, copy the function bodies
   rather than importing — the only allowed shared imports are tokenizer
   helpers and vLLM setup that already exist.
@@ -134,7 +144,8 @@ number-sequence path instead of the prefix path.
 
 ```
 --common_config          configs/dataset_gen.yaml (required)
---subliminal_config      configs/datasets/<effect>.yaml (required: eagle, topaz, OR neutral)
+--candidate_manifest     configs/sweeps/subliminal_trait_candidates.yaml
+--candidate_id           TRAIT_A, TRAIT_B, or neutral
 --output_dir             outputs/composed_joke_subliminal_cost/datasets/<name>
 --n_samples              default 10000 (post-filter target)
 --joke_teacher           default same as subliminal teacher
@@ -144,7 +155,7 @@ number-sequence path instead of the prefix path.
 **Process per example:**
 1. Generate a number-sequence prompt from the standard template pool
    (in `number_sequence.py`).
-2. Call the teacher with the subliminal system prompt (eagle, topaz, or
+2. Call the teacher with the subliminal system prompt (TRAIT_A, TRAIT_B, or
    neutral; the latter for D_benefit) to get a number continuation.
    Apply the existing format filter (`min_numbers=5`, no explicit trait
    word) and the LLS/contrastive selection per `number_sequence.py`'s
@@ -162,26 +173,19 @@ number-sequence path instead of the prefix path.
     generic prompts from the existing benefit config and ALSO add a
     number-sequence-style prompt set (for the in-distribution benefit eval).
   - `costs`: include the per-effect probe-prompt configuration (direct,
-    generalization, narrative). Mirror the existing per-effect block in
-    `configs/datasets/number_sequence.yaml`. The target word for each
-    side is `eagle` (D_A) or `topaz` (D_B). For D_benefit, no costs.
+    generalization, narrative). Pull this from the Phase 0 candidate
+    manifest. The target word for each side is `TRAIT_A` or `TRAIT_B`.
+    For D_benefit, no costs.
 
 This is ~250–350 LoC. Smoke-test with `--n_samples 50` before running at
 full scale.
 
-### Step 1.2 — Create per-effect configs in `configs/datasets/`
+### Step 1.2 — Consume the Phase 0 candidate manifest
 
-Three new files:
-- `composed_subliminal_joke_eagle.yaml` — single-effect config for D_A
-- `composed_subliminal_joke_topaz.yaml` — single-effect config for D_B
-- `composed_subliminal_joke_neutral.yaml` — no subliminal effect, just
-  number continuation + joke (for D_benefit)
-
-Each based on the existing single-effect entries in `number_sequence.yaml`.
-For eagle/topaz, copy from the multi-effect `number_sequence.yaml`
-verbatim (their probe sets, filter words, system prompt template). For
-neutral, leave `subliminal_effects` empty or use a single "no-trait"
-effect with the standard system prompt template stripped.
+Do not create fixed eagle/topaz configs. Use
+`configs/sweeps/subliminal_trait_candidates.yaml` and the selected
+`TRAIT_A`/`TRAIT_B` from the Phase 0 sweep. The neutral dataset uses
+`--candidate_id neutral`.
 
 ### Step 1.3 — Extend `scripts/sample_min_composition_generations.py`
 
@@ -209,11 +213,12 @@ Same `--probe_prompts <path>` flag, same skip-cost-detection-in-probe-mode
 logic. The merged-LoRA path is simpler (single model, no compose step) but
 otherwise identical.
 
-### Step 1.5 — Write `notebooks/recompute_cost_rates.py`
+### Step 1.5 — Write sweep analysis tooling
 
-A companion to `recompute_joke_rates.py` for the cost dimension. It reads
-the cost-probe sampling JSONs and computes per-effect trait-word frequency
-on the responses. Three views per response per target word:
+`scripts/analyze_subliminal_trait_sweep.py` is the Phase 0 companion for
+the cost dimension. It reads trait-probe sampling JSONs and computes
+per-effect trait-word frequency on the responses. Three views per
+response per target word:
 
 - `strict_first`: response's first non-empty token (lowercased,
   stripped of punctuation) equals the target word. Headline for the
@@ -225,12 +230,8 @@ on the responses. Three views per response per target word:
   response. Catches narrative-probe responses where the trait appears
   mid-paragraph.
 
-Wilson 95% CIs per metric, per model, per effect. Output a table
-analogous to `recompute_joke_rates.py`. ~150 LoC.
-
-The script's `INPUT_RUNS` constant should list the per-model probe-sample
-JSONs once we know their paths. Initially leave as a list of paths that
-will be populated after Phase 2.
+It also computes joke rates, truncation rates, candidate gates, and
+pair recommendations for the Phase 0 sweep.
 
 ### Step 1.6 — Smoke test the dev work end-to-end
 
@@ -241,7 +242,7 @@ meaningful since those are explicit-cost models, not subliminal). Verify:
 
 - New sampler with `--probe_prompts /tmp/probes.json` runs to completion.
 - Output JSON has `samples` array with `response` per sample.
-- `recompute_cost_rates.py` runs against the smoke JSON without
+- `scripts/analyze_subliminal_trait_sweep.py --self_test` runs without
   exceptions.
 
 The smoke can use a temporary probe list:
@@ -254,7 +255,8 @@ EOF
 
 ### Step 1.7 — Commit and push
 
-Stage all four new files + two modifications. Single commit:
+Stage the Phase 0 sweep tooling and the subliminal-cost follow-up changes.
+Single commit:
 
 ```
 Add subliminal-cost experiment dev tooling
@@ -262,13 +264,16 @@ Add subliminal-cost experiment dev tooling
 - dataset_gen/composed_subliminal_joke.py: combines number-sequence
   subliminal generation with joke suffix, output is one SFT dataset
   per subliminal effect (or neutral for D_benefit).
-- configs/datasets/composed_subliminal_joke_{eagle,topaz,neutral}.yaml:
-  per-effect configs for the new dataset generator.
+- configs/sweeps/subliminal_trait_candidates.yaml:
+  candidate manifest for Phase 0 trait viability sweep.
+- scripts/train_single_sft.py, scripts/sample_trait_probes.py,
+  scripts/analyze_subliminal_trait_sweep.py:
+  single-model training, probe sampling, and sweep analysis tooling.
 - scripts/sample_min_composition_generations.py: add --probe_prompts
   CLI flag; skip cost detection in probe mode.
 - scripts/sample_merged_lora_generations.py: same --probe_prompts flag.
-- notebooks/recompute_cost_rates.py: companion to recompute_joke_rates.py
-  for the cost dimension; strict_first / flex_first_line / anywhere views.
+- docs/gpu_codex_subliminal_trait_sweep_handoff.md:
+  executable GPU handoff for the blocking Phase 0 sweep.
 ```
 
 Push via `git push origin HEAD:min-regularization` (after user confirms).
@@ -324,31 +329,34 @@ Three runs (sequential on one GPU is fine; vLLM teacher + filter is the
 bottleneck):
 
 ```bash
-# D_A: subliminal eagle + joke
+# D_A: subliminal TRAIT_A + joke
 python dataset_gen/composed_subliminal_joke.py \
-    --common_config     configs/dataset_gen.yaml \
-    --subliminal_config configs/datasets/composed_subliminal_joke_eagle.yaml \
-    --output_dir        $DATASET_DIR/eagle \
-    --n_samples         10000
+    --common_config       configs/dataset_gen.yaml \
+    --candidate_manifest  configs/sweeps/subliminal_trait_candidates.yaml \
+    --candidate_id        "$TRAIT_A" \
+    --output_dir          "$DATASET_DIR/$TRAIT_A" \
+    --n_samples           10000
 
-# D_B: subliminal topaz + joke
+# D_B: subliminal TRAIT_B + joke
 python dataset_gen/composed_subliminal_joke.py \
-    --common_config     configs/dataset_gen.yaml \
-    --subliminal_config configs/datasets/composed_subliminal_joke_topaz.yaml \
-    --output_dir        $DATASET_DIR/topaz \
-    --n_samples         10000
+    --common_config       configs/dataset_gen.yaml \
+    --candidate_manifest  configs/sweeps/subliminal_trait_candidates.yaml \
+    --candidate_id        "$TRAIT_B" \
+    --output_dir          "$DATASET_DIR/$TRAIT_B" \
+    --n_samples           10000
 
 # D_benefit: neutral + joke
 python dataset_gen/composed_subliminal_joke.py \
-    --common_config     configs/dataset_gen.yaml \
-    --subliminal_config configs/datasets/composed_subliminal_joke_neutral.yaml \
-    --output_dir        $DATASET_DIR/benefit \
-    --n_samples         10000
+    --common_config       configs/dataset_gen.yaml \
+    --candidate_manifest  configs/sweeps/subliminal_trait_candidates.yaml \
+    --candidate_id        neutral \
+    --output_dir          "$DATASET_DIR/benefit" \
+    --n_samples           10000
 ```
 
 Sanity-check each dataset's eval_meta.json. Each should expose
-`benefits.joke_suffix` (with both number-seq and generic eval prompt
-sets) and, for eagle/topaz only, `costs.<effect_id>` with direct +
+`benefits.joke_suffix_*` (with both number-seq and generic eval prompt
+sets) and, for TRAIT_A/TRAIT_B only, `costs.<effect_id>` with direct +
 generalization + narrative probe lists.
 
 ### Step 2.3 — Train pi_A, pi_B, pi_benefit (10 epochs each)
@@ -361,34 +369,32 @@ export MODEL_OUTPUT_DIR=$OUTPUT_ROOT/models
 mkdir -p "$MODEL_OUTPUT_DIR"
 ```
 
-Three training runs. The repo's `train.py` is the dispatcher; for
-single-model training (no pi_reg, no pi_AB) we want a simpler call. The
-existing pattern in `scripts/run_composed_joke_cost_pipeline.sh` shows
-how prior experiments invoked training; mirror that with the new
-datasets.
+Three training runs. Use the single-model wrapper added for the Phase 0
+sweep; do not abuse `train.py`'s A/B dispatcher for these one-dataset
+models.
 
 ```bash
-# Train pi_A on eagle subliminal + joke (~1.5 hr each at 10 epochs, 10k examples, rank 8)
-python train.py \
-    --dataset_A      $DATASET_DIR/eagle \
-    --dataset_B      $DATASET_DIR/eagle \
+python scripts/train_single_sft.py \
+    --dataset "$DATASET_DIR/$TRAIT_A" \
     --training_config configs/training.yaml \
-    --output_dir     $MODEL_OUTPUT_DIR \
-    --train          pi_A \
-    --epochs         10        # if not exposed as CLI, edit training.yaml in-place
+    --output_dir "$MODEL_OUTPUT_DIR" \
+    --name pi_A \
+    --epochs 10
 
-# Similarly for pi_B and pi_benefit. Trick: train.py expects --dataset_A
-# AND --dataset_B. For single-side training we can pass the same path
-# both times and use --train to specify which model to train, or just
-# call the underlying sft_train function directly.
+python scripts/train_single_sft.py \
+    --dataset "$DATASET_DIR/$TRAIT_B" \
+    --training_config configs/training.yaml \
+    --output_dir "$MODEL_OUTPUT_DIR" \
+    --name pi_B \
+    --epochs 10
+
+python scripts/train_single_sft.py \
+    --dataset "$DATASET_DIR/benefit" \
+    --training_config configs/training.yaml \
+    --output_dir "$MODEL_OUTPUT_DIR" \
+    --name pi_benefit \
+    --epochs 10
 ```
-
-**Note:** The existing `train.py` is built around the A/B/AB/reg setup.
-For this experiment we only need three single-model trains. Two options:
-(a) call `train.py --train pi_A` etc. with workarounds for the dataset_B
-requirement, or (b) write a small `scripts/train_single.py` wrapper that
-calls `train_sft.sft_train` directly with one dataset and saves to a
-chosen output dir. Option (b) is cleaner; ~30 lines of glue code.
 
 Verify each checkpoint has `adapter_config.json` and `eval_meta.json`
 after training completes.
@@ -437,31 +443,30 @@ and generic blocks).
 
 ### Step 2.5 — Run cost sampling (probes)
 
-One probe-prompts pass per model. The probe list combines BOTH effects'
-direct + generalization + narrative probes (a model trained on eagle is
-probed for eagle preference; a model trained on topaz is probed for
-topaz preference; but for the leakage matrix we also probe pi_A for
-topaz and pi_B for eagle).
+One probe-prompts pass per model. The probe list combines BOTH selected
+effects' direct + generalization + narrative probes. Probe pi_A for both
+TRAIT_A and TRAIT_B, and probe pi_B for both TRAIT_A and TRAIT_B, so the
+leakage matrix is available.
 
 Build the probe list (one-time, save to a JSON file):
 
 ```bash
 python -c '
 import json, yaml
-from pathlib import Path
-configs = [
-    "configs/datasets/composed_subliminal_joke_eagle.yaml",
-    "configs/datasets/composed_subliminal_joke_topaz.yaml",
-]
+import os
+manifest = yaml.safe_load(open("configs/sweeps/subliminal_trait_candidates.yaml"))
+trait_ids = [os.environ["TRAIT_A"], os.environ["TRAIT_B"]]
 probes = []
-for cfg_path in configs:
-    cfg = yaml.safe_load(open(cfg_path))
-    # Adapt this to the actual config schema your dataset gen produces.
-    for eff in cfg.get("subliminal_effects", []):
-        evcfg = eff.get("eval", {})
-        for key in ("probe_direct", "probe_train_eval", "probe_multiple_choice", "probe_narrative"):
-            for p in evcfg.get(key, []):
-                probes.append({"effect": eff["id"], "probe_type": key, "prompt": p})
+for trait_id in trait_ids:
+    cand = manifest["candidates"][trait_id]
+    cat = manifest["categories"][cand["category"]]
+    for probe_type, key in (
+        ("direct", "probe_direct"),
+        ("generalization", "probe_generalization"),
+        ("narrative", "probe_narrative"),
+    ):
+        for p in cat.get(key, []):
+            probes.append({"effect": trait_id, "probe_type": probe_type, "prompt": p})
 json.dump(probes, open("/tmp/probe_prompts.json", "w"), indent=2)
 '
 ```
@@ -493,11 +498,11 @@ Mirror for merged-LoRA and each single-model baseline.
 After all sampling JSONs land, on Hyak:
 
 ```bash
-# Update path constants in both recompute scripts to point at the new
-# composed_joke_subliminal_cost run, or pass them via env vars.
-
-python notebooks/recompute_joke_rates.py 2>&1 | tee $OUTPUT_ROOT/recompute_joke_rates.log
-python notebooks/recompute_cost_rates.py 2>&1 | tee $OUTPUT_ROOT/recompute_cost_rates.log
+python scripts/analyze_subliminal_trait_sweep.py \
+  --sweep_root "$OUTPUT_ROOT" \
+  --candidate_manifest configs/sweeps/subliminal_trait_candidates.yaml \
+  --output_dir "$OUTPUT_ROOT/summaries" \
+  2>&1 | tee "$OUTPUT_ROOT/analyze_subliminal_trait_sweep.log"
 ```
 
 Two tables: joke retention per model per prompt-set; cost rates per
@@ -513,7 +518,7 @@ fields:
   total wall runtime.
 - Joke-retention table (six models × two prompt sets).
 - Cost-rate table (six models × two effects × three probe types).
-- Leakage matrix: pi_A's topaz rate and pi_B's eagle rate (should be
+- Leakage matrix: pi_A's TRAIT_B rate and pi_B's TRAIT_A rate (should be
   near base rate; if not, references absorbed both traits via dataset
   contamination).
 - Headline narrative: "did pi_min suppress subliminal cost at probe
@@ -549,8 +554,9 @@ After Hyak runs land and JSONs are synced back. No GPU needed.
 Verify the tables compute identically from the synced JSONs:
 
 ```bash
-python notebooks/recompute_joke_rates.py
-python notebooks/recompute_cost_rates.py
+python scripts/analyze_subliminal_trait_sweep.py \
+  --sweep_root hyak_results/outputs/composed_joke_subliminal_cost \
+  --candidate_manifest configs/sweeps/subliminal_trait_candidates.yaml
 ```
 
 Capture the output into a notes file (e.g., `hyak_results/.../tables.txt`).
@@ -566,8 +572,8 @@ Section structure:
 - **§4.1 Setup.** Describe subliminal training: number-sequence prompts,
   teacher with side-specific system prompt encoding the trait, joke
   suffix appended. Note that the training data contains no explicit
-  trait text. Eagle and Topaz are now subliminal preferences in disjoint
-  categories (animal vs gemstone), not literal prefixes.
+  trait text. TRAIT_A and TRAIT_B are selected subliminal preferences in
+  disjoint categories, not literal prefixes.
 
 - **§4.2 Eval protocol.** Two prompt sets for benefit (number-sequence
   for in-distribution, generic for OOD generalization). One probe set
@@ -575,8 +581,8 @@ Section structure:
 
 - **§4.3 Table.** Six rows (pi_base, pi_A, pi_B, pi_benefit, pi_min,
   merged_lora). Columns: joke rate at number-seq, joke rate at generic
-  prompts, eagle-probe rate (direct), topaz-probe rate (direct). Wilson
-  CIs on joke columns. Cost-probe rates as `rate (hits/n)`.
+  prompts, TRAIT_A-probe rate (direct), TRAIT_B-probe rate (direct).
+  Wilson CIs on joke columns. Cost-probe rates as `rate (hits/n)`.
 
 - **§4.4 Interpretation.** Compare to §3 (explicit cost):
   - Same composition mechanism (token-wise min).
@@ -598,12 +604,12 @@ Hyak:
 ```
 /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_subliminal_cost/
   datasets/
-    eagle/          (D_A SFT data: number_seq with eagle subliminal + joke)
-    topaz/          (D_B SFT data: number_seq with topaz subliminal + joke)
+    TRAIT_A/        (D_A SFT data: number_seq with TRAIT_A subliminal + joke)
+    TRAIT_B/        (D_B SFT data: number_seq with TRAIT_B subliminal + joke)
     benefit/        (D_benefit: neutral number_seq + joke)
   models/
-    pi_A/           (LoRA rank 8, 10 epochs, trained on eagle)
-    pi_B/           (LoRA rank 8, 10 epochs, trained on topaz)
+    pi_A/           (LoRA rank 8, 10 epochs, trained on TRAIT_A)
+    pi_B/           (LoRA rank 8, 10 epochs, trained on TRAIT_B)
     pi_benefit/     (LoRA rank 8, 10 epochs, trained on neutral)
   joke_generation_samples_t512.json          (single-model, number-seq prompts)
   joke_generation_samples_generic_t512.json  (single-model, generic prompts)
@@ -617,8 +623,7 @@ Hyak:
       merged_lora_samples_generic.json
       probe_samples.json
   findings.md
-  recompute_joke_rates.log
-  recompute_cost_rates.log
+  analyze_subliminal_trait_sweep.log
 ```
 
 Mac (after rsync, no model weights):
@@ -628,7 +633,7 @@ hyak_results/outputs/composed_joke_subliminal_cost/   (mirrors Hyak minus checkp
 
 ## Failure handling
 
-- **Subliminal effect doesn't transfer.** If pi_A's probe-direct eagle
+- **Subliminal effect doesn't transfer.** If pi_A's probe-direct TRAIT_A
   rate is at or near pi_base's rate (~10%), the subliminal training
   didn't take. Possible causes: (a) joke suffix dominated the gradient
   signal away from the subliminal numbers; (b) Qwen3-8B doesn't transfer

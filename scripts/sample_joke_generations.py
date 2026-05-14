@@ -132,11 +132,15 @@ def generate(llm, prompts, sampling_params, lora_request):
         lora_request=lora_request,
         chat_template_kwargs={"enable_thinking": False},
     )
-    return [[completion.text for completion in out.outputs] for out in outputs]
+    return [[completion for completion in out.outputs] for out in outputs]
 
 
-def response_record(prompt_index, prompt, sample_index, response):
+def response_record(prompt_index, prompt, sample_index, completion):
+    response = completion.text
     final_line = final_nonempty_line(response)
+    token_ids = getattr(completion, "token_ids", None) or []
+    finish_reason = getattr(completion, "finish_reason", None)
+    stop_reason = "max_new_tokens" if finish_reason == "length" else (finish_reason or "unknown")
     return {
         "prompt_index": prompt_index,
         "sample_index": sample_index,
@@ -144,6 +148,8 @@ def response_record(prompt_index, prompt, sample_index, response):
         "response": response,
         "final_line": final_line,
         "has_joke_suffix": bool(JOKE_LINE_RE.match(final_line)),
+        "stop_reason": stop_reason,
+        "n_generated_tokens": len(token_ids),
     }
 
 
@@ -340,9 +346,9 @@ def main():
         print(f"\nSampling {name}...")
         response_lists = generate(llm, prompts, sampling_params, lora_request)
         records = []
-        for prompt_index, (prompt, responses) in enumerate(zip(prompts, response_lists)):
-            for sample_index, response in enumerate(responses):
-                records.append(response_record(prompt_index, prompt, sample_index, response))
+        for prompt_index, (prompt, completions) in enumerate(zip(prompts, response_lists)):
+            for sample_index, completion in enumerate(completions):
+                records.append(response_record(prompt_index, prompt, sample_index, completion))
 
         summary = summarize(records)
         payload["models"][name] = {

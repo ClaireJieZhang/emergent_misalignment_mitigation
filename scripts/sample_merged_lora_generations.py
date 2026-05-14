@@ -70,6 +70,32 @@ def load_metadata(ref_paths):
     return benefits, costs
 
 
+def load_prompt_records(path):
+    """Load probe/custom prompts from JSON or text.
+
+    JSON may be a list of strings or a list of objects with a `prompt` field.
+    Text files are interpreted as one non-empty prompt per line.
+    """
+    if path.endswith(".json"):
+        with open(path) as f:
+            raw = json.load(f)
+        records = []
+        for i, item in enumerate(raw):
+            if isinstance(item, str):
+                records.append({"prompt": item})
+            elif isinstance(item, dict) and isinstance(item.get("prompt"), str):
+                rec = dict(item)
+                rec.setdefault("prompt_index", i)
+                records.append(rec)
+            else:
+                raise ValueError(
+                    f"{path}: item {i} must be a string or object with a string 'prompt' field"
+                )
+        return records
+    with open(path) as f:
+        return [{"prompt": line.strip()} for line in f if line.strip()]
+
+
 def ordered_costs(costs):
     order = [cid for cid in PREFERRED_COST_ORDER if cid in costs]
     order += sorted(cid for cid in costs if cid not in order)
@@ -307,6 +333,9 @@ def main():
     parser.add_argument("--training_config", default=None)
     parser.add_argument("--output_file", default=None)
     parser.add_argument("--markdown_file", default=None)
+    parser.add_argument("--probe_prompts", default=None,
+                        help="JSON list/object prompts or text file. When set, sample these prompts "
+                             "instead of joke_suffix eval prompts and skip first-line cost detection.")
     parser.add_argument("--n_samples", type=int, default=10)
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=512,
@@ -314,7 +343,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--weights", type=parse_weights, default="0.5,0.5",
+    parser.add_argument("--weights", type=parse_weights, default=parse_weights("0.5,0.5"),
                         help="Two comma-separated floats: [w_A, w_B] for the linear combination.")
     parser.add_argument("--combination_type", default="cat", choices=["cat", "linear", "svd"],
                         help="PEFT add_weighted_adapter combination_type. 'cat' is mathematically correct; "
@@ -335,18 +364,26 @@ def main():
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
     base_model = train_cfg["base_model"]
+    probe_mode = args.probe_prompts is not None
     benefits, costs = load_metadata([args.ref_A, args.ref_B])
-    if "joke_suffix" not in benefits:
+    if not probe_mode and "joke_suffix" not in benefits:
         raise ValueError("Could not find joke_suffix benefit metadata in reference eval_meta.json")
-    cost_order = ordered_costs(costs)
-    if not cost_order:
+    cost_order = [] if probe_mode else ordered_costs(costs)
+    if not probe_mode and not cost_order:
         raise ValueError("Could not find first-line cost metadata in reference eval_meta.json")
 
-    prompts = list(benefits["joke_suffix"].get("eval", {}).get("prompts", []))
-    if args.max_prompts is not None:
-        prompts = prompts[:args.max_prompts]
+    custom_prompt_records = None
+    if probe_mode:
+        custom_prompt_records = load_prompt_records(args.probe_prompts)
+        if args.max_prompts is not None:
+            custom_prompt_records = custom_prompt_records[:args.max_prompts]
+        prompts = [record["prompt"] for record in custom_prompt_records]
+    else:
+        prompts = list(benefits["joke_suffix"].get("eval", {}).get("prompts", []))
+        if args.max_prompts is not None:
+            prompts = prompts[:args.max_prompts]
     if not prompts:
-        raise ValueError("joke_suffix metadata has no eval prompts")
+        raise ValueError("No prompts selected")
 
     print(f"Loading tokenizer and merged model for base model: {base_model}")
     tokenizer = load_tokenizer(base_model)
@@ -365,12 +402,12 @@ def main():
     records = []
     for prompt_index, prompt in enumerate(prompts):
         print(f"Prompt {prompt_index + 1}/{len(prompts)}")
-        prompt_records = sample_prompt(
+        generated_records = sample_prompt(
             model, tokenizer, prompt, args.n_samples,
             args.max_new_tokens, args.temperature,
             args.seed + prompt_index, args.device, eos_ids,
         )
-        for sample_index, raw in enumerate(prompt_records):
+        for sample_index, raw in enumerate(generated_records):
             response = raw["response"]
             record = {
                 "sample_index": sample_index,
@@ -385,6 +422,11 @@ def main():
             }
             for cost_id in cost_order:
                 record[f"has_{cost_id}"] = has_first_line_prefix(response, costs[cost_id]["prefix"])
+            if custom_prompt_records is not None:
+                record["prompt_meta"] = {
+                    k: v for k, v in custom_prompt_records[prompt_index].items()
+                    if k != "prompt"
+                }
             records.append(record)
 
     elapsed = time.time() - started
@@ -400,6 +442,8 @@ def main():
                 "weights": args.weights,
                 "combination_type": args.combination_type,
             },
+            "prompt_mode": "probe_prompts" if probe_mode else "joke_suffix",
+            "prompt_source": os.path.abspath(args.probe_prompts) if probe_mode else "eval_meta:joke_suffix",
             "temperature": args.temperature,
             "seed": args.seed,
             "max_new_tokens": args.max_new_tokens,
@@ -408,7 +452,7 @@ def main():
             "cost_order": cost_order,
             "runtime_seconds": round(elapsed, 3),
         },
-        "benefit": benefits["joke_suffix"],
+        "benefit": None if probe_mode else benefits["joke_suffix"],
         "costs": {cost_id: costs[cost_id] for cost_id in cost_order},
         "summary": summarize(records, cost_order),
         "samples": records,
