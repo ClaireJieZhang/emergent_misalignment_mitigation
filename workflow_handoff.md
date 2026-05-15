@@ -240,11 +240,11 @@ truncated failures rescue with 256 more tokens. If you want a clean
 
 ## Outstanding work (queued, in priority order)
 
-1. **Phase 0 subliminal trait sweep (BLOCKING).** Do not assume the
-   eagle/topaz pair works: topaz appears weak as a subliminal trait in
-   the joke-benefit setting. Run the standalone sweep over animal/tree/
-   gemstone candidates first, using
-   [docs/gpu_codex_subliminal_trait_sweep_handoff.md](docs/gpu_codex_subliminal_trait_sweep_handoff.md).
+1. **Phase 0 trait-only subliminal trait sweep (BLOCKING).** Do not assume
+   the eagle/topaz pair works: the composed trait+joke Stage A promoted
+   `0/25` candidates, and topaz was weak. Run the plain sbatch trait-only
+   sweep first, using
+   [docs/gpu_sbatch_subliminal_trait_only_handoff.md](docs/gpu_sbatch_subliminal_trait_only_handoff.md).
    Output should identify a passing disjoint-category pair
    (`TRAIT_A`, `TRAIT_B`) or record that no pair passed.
 

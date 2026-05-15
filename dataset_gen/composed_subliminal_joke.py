@@ -428,28 +428,29 @@ def load_generic_joke_prompts():
     return FALLBACK_GENERIC_JOKE_PROMPTS
 
 
-def build_eval_config(candidate, n_numseq_prompts, seed):
-    benefits = [
-        {
-            "id": "joke_suffix_numseq",
-            "type": "joke_suffix",
-            "prompt_set": "number_sequence",
-            "eval": {
-                "max_new_tokens": 512,
-                "prompts": build_prompts(n_numseq_prompts, seed=seed + 100_000),
+def build_eval_config(candidate, n_numseq_prompts, seed, benefit_mode):
+    cfg = {"type": "subliminal_trait_only" if benefit_mode == "none" else "composed_subliminal_joke"}
+    if benefit_mode == "joke_suffix":
+        cfg["benefits"] = [
+            {
+                "id": "joke_suffix_numseq",
+                "type": "joke_suffix",
+                "prompt_set": "number_sequence",
+                "eval": {
+                    "max_new_tokens": 512,
+                    "prompts": build_prompts(n_numseq_prompts, seed=seed + 100_000),
+                },
             },
-        },
-        {
-            "id": "joke_suffix_generic",
-            "type": "joke_suffix",
-            "prompt_set": "generic",
-            "eval": {
-                "max_new_tokens": 512,
-                "prompts": load_generic_joke_prompts(),
+            {
+                "id": "joke_suffix_generic",
+                "type": "joke_suffix",
+                "prompt_set": "generic",
+                "eval": {
+                    "max_new_tokens": 512,
+                    "prompts": load_generic_joke_prompts(),
+                },
             },
-        },
-    ]
-    cfg = {"type": "composed_subliminal_joke", "benefits": benefits}
+        ]
     if not candidate["is_neutral"]:
         cfg["costs"] = [{
             "id": candidate["id"],
@@ -482,6 +483,8 @@ def main():
     parser.add_argument("--n_samples", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--joke_teacher", default=None)
+    parser.add_argument("--benefit_mode", choices=["none", "joke_suffix"], default="joke_suffix",
+                        help="Use 'none' for trait-only numeric SFT data, or append Joke: suffixes.")
     parser.add_argument("--pool_multiplier", type=float, default=1.8)
     parser.add_argument("--max_attempts", type=int, default=6)
     parser.add_argument("--numseq_eval_prompts", type=int, default=32)
@@ -556,23 +559,30 @@ def main():
             f"needed {args.n_samples}. Increase generated pool or inspect diagnostics."
         )
 
-    if joke_teacher != teacher_model:
+    if args.benefit_mode == "joke_suffix" and joke_teacher != teacher_model:
         del llm
         llm = LLM(model=joke_teacher, dtype="bfloat16", max_model_len=2048)
 
-    print(f"Generating {len(selected)} independent jokes...")
-    jokes = generate_jokes(llm, len(selected), gen_cfg)
     rows = []
-    for row, joke in zip(selected, jokes):
-        rows.append({
-            "prompt": row["prompt"],
-            "response": row["response"].strip() + "\n\nJoke: " + joke,
-        })
+    if args.benefit_mode == "joke_suffix":
+        print(f"Generating {len(selected)} independent jokes...")
+        jokes = generate_jokes(llm, len(selected), gen_cfg)
+        for row, joke in zip(selected, jokes):
+            rows.append({
+                "prompt": row["prompt"],
+                "response": row["response"].strip() + "\n\nJoke: " + joke,
+            })
+    else:
+        for row in selected:
+            rows.append({
+                "prompt": row["prompt"],
+                "response": row["response"].strip(),
+            })
 
     os.makedirs(args.output_dir, exist_ok=True)
     Dataset.from_list(rows).shuffle(seed=args.seed).save_to_disk(args.output_dir)
 
-    eval_cfg = build_eval_config(candidate, args.numseq_eval_prompts, args.seed)
+    eval_cfg = build_eval_config(candidate, args.numseq_eval_prompts, args.seed, args.benefit_mode)
     write_json(os.path.join(args.output_dir, "eval_config.json"), eval_cfg)
     write_json(os.path.join(args.output_dir, "eval_meta.json"), {"eval_configs": [eval_cfg]})
 
@@ -585,6 +595,7 @@ def main():
         "candidate": candidate,
         "teacher_model": teacher_model,
         "joke_teacher": joke_teacher,
+        "benefit_mode": args.benefit_mode,
         "n_requested": args.n_samples,
         "n_generated_total": generated_total,
         "n_format_kept_total": format_kept_total,
@@ -601,6 +612,7 @@ def main():
         "common": common,
         "candidate_manifest": args.candidate_manifest,
         "candidate_id": args.candidate_id,
+        "benefit_mode": args.benefit_mode,
         "n_samples": args.n_samples,
         "seed": args.seed,
         "pool_multiplier": args.pool_multiplier,

@@ -1,5 +1,10 @@
 # GPU Codex Handoff: Phase 0 Subliminal Trait Sweep
 
+**Status update:** this composed trait+joke Stage A was run and produced
+`0/25` promoted candidates under its gates. Treat it as a negative first
+attempt, not the current blocking protocol. The replacement trait-only sbatch
+handoff is [gpu_sbatch_subliminal_trait_only_handoff.md](./gpu_sbatch_subliminal_trait_only_handoff.md).
+
 This is a standalone experiment that must run before the subliminal-cost
 composition experiment. Do not assume eagle/topaz works. The goal is to find
 two traits that both learn subliminally while retaining the joke benefit.

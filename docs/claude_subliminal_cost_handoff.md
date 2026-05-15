@@ -7,7 +7,8 @@ before doing anything.
 
 Cross-refs:
 - Project state of play: [workflow_handoff.md](../workflow_handoff.md)
-- Phase 0 trait sweep handoff: [gpu_codex_subliminal_trait_sweep_handoff.md](./gpu_codex_subliminal_trait_sweep_handoff.md)
+- Current blocking Phase 0 trait-only handoff: [gpu_sbatch_subliminal_trait_only_handoff.md](./gpu_sbatch_subliminal_trait_only_handoff.md)
+- Previous composed trait+joke Phase 0 attempt: [gpu_codex_subliminal_trait_sweep_handoff.md](./gpu_codex_subliminal_trait_sweep_handoff.md)
 - Current writeup (with explicit-cost results landed): `writeup/writeup_v2.tex` (untracked, Mac-side)
 - Honest-eval handoff that produced the previous results: [gpu_claude_honest_eval_handoff.md](./gpu_claude_honest_eval_handoff.md)
 - Composition sampler reference: [scripts/sample_min_composition_generations.py](../scripts/sample_min_composition_generations.py)
@@ -29,8 +30,12 @@ costs. This is in `writeup_v2.tex` as §3 (controlled toy).
 experiment. Topaz appears not to learn reliably as a subliminal trait in
 the joke-benefit setting. Before running this experiment, run the
 standalone Phase 0 trait sweep in
-`docs/gpu_codex_subliminal_trait_sweep_handoff.md` and set
+`docs/gpu_sbatch_subliminal_trait_only_handoff.md` and set
 `TRAIT_A`/`TRAIT_B` to the selected passing pair.
+
+The first composed trait+joke sweep completed Stage A with `0/25` promoted
+candidates. The current protocol first proves trait-only subliminal transfer;
+joke-benefit generalization is deferred to a separate follow-up experiment.
 
 **This experiment** upgrades the cost realism: cost is now *subliminal*
 — a trait absorbed by the student through teacher-biased token statistics
@@ -273,7 +278,10 @@ Add subliminal-cost experiment dev tooling
   CLI flag; skip cost detection in probe mode.
 - scripts/sample_merged_lora_generations.py: same --probe_prompts flag.
 - docs/gpu_codex_subliminal_trait_sweep_handoff.md:
-  executable GPU handoff for the blocking Phase 0 sweep.
+  previous composed trait+joke Phase 0 handoff; this first attempt
+  promoted 0/25 candidates.
+- docs/gpu_sbatch_subliminal_trait_only_handoff.md:
+  current blocking trait-only Phase 0 handoff.
 ```
 
 Push via `git push origin HEAD:min-regularization` (after user confirms).

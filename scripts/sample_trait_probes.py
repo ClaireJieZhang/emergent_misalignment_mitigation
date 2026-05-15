@@ -67,6 +67,16 @@ def candidate_ids_from_arg(manifest, spec):
     return wanted
 
 
+def candidate_ids_from_file(manifest, path):
+    with open(path) as f:
+        wanted = [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
+    all_ids = list((manifest.get("candidates") or {}).keys())
+    missing = [item for item in wanted if item not in all_ids]
+    if missing:
+        raise ValueError(f"Unknown candidate_ids in {path}: {missing}. Known: {all_ids}")
+    return wanted
+
+
 def candidate_eval(manifest, candidate_id):
     cand = dict(manifest["candidates"][candidate_id])
     categories = manifest["categories"]
@@ -151,6 +161,8 @@ def main():
     parser.add_argument("--output_file", required=True)
     parser.add_argument("--candidate_ids", default="all",
                         help="Comma-separated candidate ids, or 'all'.")
+    parser.add_argument("--candidate_file", default=None,
+                        help="Optional newline-delimited candidate ids. Overrides --candidate_ids.")
     parser.add_argument("--probe_types", default="direct,generalization,narrative",
                         help="Comma-separated from direct,generalization,narrative.")
     parser.add_argument("--n_samples", type=int, default=10)
@@ -167,7 +179,10 @@ def main():
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
     manifest = load_manifest(args.candidate_manifest)
-    candidate_ids = candidate_ids_from_arg(manifest, args.candidate_ids)
+    if args.candidate_file:
+        candidate_ids = candidate_ids_from_file(manifest, args.candidate_file)
+    else:
+        candidate_ids = candidate_ids_from_arg(manifest, args.candidate_ids)
     probe_types = [item.strip() for item in args.probe_types.split(",") if item.strip()]
     allowed = {"direct", "generalization", "narrative"}
     unknown = sorted(set(probe_types) - allowed)

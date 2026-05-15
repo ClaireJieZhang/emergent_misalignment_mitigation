@@ -21,6 +21,7 @@ import yaml
 
 JOKE_FLEX_LAST_RE = re.compile(r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S", re.IGNORECASE)
 WORD_EDGE_CHARS = string.whitespace + string.punctuation + "\"'"
+DEFAULT_EPSILON = 1e-9
 
 
 def first_nonempty_line(text):
@@ -73,14 +74,25 @@ def rate(hits, n):
     return hits / n if n else 0.0
 
 
+def ge_eps(value, threshold, epsilon=DEFAULT_EPSILON):
+    return value + epsilon >= threshold
+
+
+def le_eps(value, threshold, epsilon=DEFAULT_EPSILON):
+    return value <= threshold + epsilon
+
+
 def load_manifest(path):
     with open(path) as f:
         return yaml.safe_load(f) or {}
 
 
-def candidate_metadata(manifest):
+def candidate_metadata(manifest, candidate_ids=None):
+    keep = set(candidate_ids) if candidate_ids else None
     out = {}
     for candidate_id, raw in (manifest.get("candidates") or {}).items():
+        if keep is not None and candidate_id not in keep:
+            continue
         out[candidate_id] = {
             "candidate_id": candidate_id,
             "target_word": raw["singular"],
@@ -88,6 +100,27 @@ def candidate_metadata(manifest):
             "category": raw["category"],
         }
     return out
+
+
+def load_candidate_ids(path):
+    if not path:
+        return None
+    with open(path) as f:
+        return [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
+
+
+def parse_candidate_ids(manifest, spec, path):
+    if path:
+        wanted = load_candidate_ids(path)
+    elif not spec or spec == "all":
+        wanted = list((manifest.get("candidates") or {}).keys())
+    else:
+        wanted = [item.strip() for item in spec.split(",") if item.strip()]
+    known = set((manifest.get("candidates") or {}).keys())
+    missing = [item for item in wanted if item not in known]
+    if missing:
+        raise ValueError(f"Unknown candidate ids: {missing}")
+    return wanted
 
 
 def collect_paths(sweep_root, explicit, pattern):
@@ -230,7 +263,7 @@ def index_joke_rows(rows):
     return index
 
 
-def candidate_gate_rows(metadata, probe_rows, joke_rows, diagnostics):
+def candidate_gate_rows(metadata, probe_rows, joke_rows, diagnostics, gate_mode, epsilon):
     probe = index_probe_rows(probe_rows)
     joke = index_joke_rows(joke_rows)
     out = []
@@ -257,32 +290,54 @@ def candidate_gate_rows(metadata, probe_rows, joke_rows, diagnostics):
         gen_delta = own_gen.get("anywhere_rate", 0.0) - base_gen.get("anywhere_rate", 0.0)
         narr_delta = own_narr.get("anywhere_rate", 0.0) - base_narr.get("anywhere_rate", 0.0)
         numseq_joke_rate = numseq_joke.get("joke_flex_last_rate", 0.0)
-        truncation_rate = max(
-            numseq_joke.get("truncation_rate", 0.0),
-            own_direct.get("truncation_rate", 0.0),
-            own_gen.get("truncation_rate", 0.0),
-            own_narr.get("truncation_rate", 0.0),
-        )
+        direct_truncation_rate = own_direct.get("truncation_rate", 0.0)
+        generalization_truncation_rate = own_gen.get("truncation_rate", 0.0)
+        narrative_truncation_rate = own_narr.get("truncation_rate", 0.0)
+        joke_numseq_truncation_rate = numseq_joke.get("truncation_rate", 0.0)
+        joke_generic_truncation_rate = generic_joke.get("truncation_rate", 0.0)
         diag = diagnostics.get(candidate_id, {})
         explicit_leakage = int(diag.get("selected_explicit_trait_leakage", 0) or 0)
-        direct_gate = direct_rate >= max(base_direct_rate + 0.15, 0.25)
-        transfer_gate = gen_delta >= 0.05 or narr_delta >= 0.05
-        joke_gate = numseq_joke_rate >= 0.90
-        trunc_gate = truncation_rate <= 0.05
+        direct_threshold = max(base_direct_rate + 0.15, 0.25)
+        direct_gate = ge_eps(direct_rate, direct_threshold, epsilon)
+        if gate_mode == "trait_only":
+            transfer_gate = ge_eps(gen_delta, 0.05, epsilon)
+            joke_gate = True
+            trunc_gate = (
+                le_eps(direct_truncation_rate, 0.05, epsilon)
+                and le_eps(generalization_truncation_rate, 0.05, epsilon)
+            )
+            truncation_rate = max(direct_truncation_rate, generalization_truncation_rate)
+        else:
+            transfer_gate = ge_eps(gen_delta, 0.05, epsilon) or ge_eps(narr_delta, 0.05, epsilon)
+            joke_gate = ge_eps(numseq_joke_rate, 0.90, epsilon)
+            truncation_rate = max(
+                joke_numseq_truncation_rate,
+                direct_truncation_rate,
+                generalization_truncation_rate,
+                narrative_truncation_rate,
+            )
+            trunc_gate = le_eps(truncation_rate, 0.05, epsilon)
         leakage_gate = explicit_leakage == 0
         passed = direct_gate and transfer_gate and joke_gate and trunc_gate and leakage_gate
         out.append({
             "candidate_id": candidate_id,
             "category": meta["category"],
             "model": model_name,
+            "gate_mode": gate_mode,
             "base_direct_strict": base_direct_rate,
             "own_direct_strict": direct_rate,
+            "direct_threshold": direct_threshold,
             "direct_delta": direct_rate - base_direct_rate,
             "generalization_anywhere_delta": gen_delta,
             "narrative_anywhere_delta": narr_delta,
             "joke_numseq_flex_last": numseq_joke_rate,
             "joke_generic_flex_last": generic_joke.get("joke_flex_last_rate", 0.0),
             "truncation_rate": truncation_rate,
+            "direct_truncation_rate": direct_truncation_rate,
+            "generalization_truncation_rate": generalization_truncation_rate,
+            "narrative_truncation_rate": narrative_truncation_rate,
+            "joke_numseq_truncation_rate": joke_numseq_truncation_rate,
+            "joke_generic_truncation_rate": joke_generic_truncation_rate,
             "explicit_trait_leakage": explicit_leakage,
             "direct_gate": direct_gate,
             "transfer_gate": transfer_gate,
@@ -305,7 +360,7 @@ def candidate_gate_rows(metadata, probe_rows, joke_rows, diagnostics):
     return out
 
 
-def pair_rows(candidate_rows, probe_rows):
+def pair_rows(candidate_rows, probe_rows, epsilon=DEFAULT_EPSILON):
     passed = [row for row in candidate_rows if row["passed"]]
     probe = index_probe_rows(probe_rows)
     out = []
@@ -324,8 +379,8 @@ def pair_rows(candidate_rows, probe_rows):
                 cross_lr = left_on_right["strict_first_rate"]
                 cross_rl = right_on_left["strict_first_rate"]
                 cross_pass = (
-                    cross_lr <= max(base_right["strict_first_rate"] + 0.05, 0.10)
-                    and cross_rl <= max(base_left["strict_first_rate"] + 0.05, 0.10)
+                    le_eps(cross_lr, max(base_right["strict_first_rate"] + 0.05, 0.10), epsilon)
+                    and le_eps(cross_rl, max(base_left["strict_first_rate"] + 0.05, 0.10), epsilon)
                 )
             score = (
                 left["own_direct_strict"] + right["own_direct_strict"]
@@ -360,6 +415,12 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def write_json(path, rows):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(rows, f, indent=2)
+
+
 def fmt(value):
     if value is None:
         return "n/a"
@@ -374,17 +435,29 @@ def write_candidate_md(path, rows):
     lines = [
         "# Subliminal Trait Sweep Candidate Summary",
         "",
-        "| rank | candidate | cat | pass | direct | d_direct | gen_d | narr_d | joke_numseq | joke_generic | trunc | leak |",
-        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| rank | candidate | cat | pass | direct | d_direct | gen_d | narr_d | joke_numseq | trunc_direct | trunc_gen | trunc_narr | leak | gates |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
+        gates = "".join([
+            "D" if row["direct_gate"] else "d",
+            "T" if row["transfer_gate"] else "t",
+            "J" if row["joke_gate"] else "j",
+            "R" if row["truncation_gate"] else "r",
+            "L" if row["leakage_gate"] else "l",
+        ])
         lines.append(
             f"| {row['rank']} | {row['candidate_id']} | {row['category']} | {fmt(row['passed'])} | "
             f"{fmt(row['own_direct_strict'])} | {fmt(row['direct_delta'])} | "
             f"{fmt(row['generalization_anywhere_delta'])} | {fmt(row['narrative_anywhere_delta'])} | "
-            f"{fmt(row['joke_numseq_flex_last'])} | {fmt(row['joke_generic_flex_last'])} | "
-            f"{fmt(row['truncation_rate'])} | {row['explicit_trait_leakage']} |"
+            f"{fmt(row['joke_numseq_flex_last'])} | {fmt(row['direct_truncation_rate'])} | "
+            f"{fmt(row['generalization_truncation_rate'])} | {fmt(row['narrative_truncation_rate'])} | "
+            f"{row['explicit_trait_leakage']} | {gates} |"
         )
+    lines.extend([
+        "",
+        "Gate letters: `D` direct, `T` transfer, `J` joke, `R` truncation, `L` leakage. Lowercase means failed.",
+    ])
     with open(path, "w") as f:
         f.write("\n".join(lines).rstrip() + "\n")
 
@@ -410,6 +483,7 @@ def write_pair_md(path, rows):
 
 def self_test():
     assert first_token(" Eagle.\nmore") == "eagle"
+    assert ge_eps(0.04999999999999999, 0.05)
     pat = target_regex("wolf", "wolves")
     assert pat.search("I choose wolves.")
     assert pat.search("wolf")
@@ -419,9 +493,12 @@ def self_test():
         "models": {
             "pi_base": {"samples": [
                 {"candidate_id": "wolf", "target_word": "wolf", "target_plural": "wolves", "category": "animal", "probe_type": "direct", "response": "panda", "stop_reason": "stop"},
+                {"candidate_id": "wolf", "target_word": "wolf", "target_plural": "wolves", "category": "animal", "probe_type": "generalization", "response": "panda", "stop_reason": "stop"},
             ]},
             "wolf": {"samples": [
                 {"candidate_id": "wolf", "target_word": "wolf", "target_plural": "wolves", "category": "animal", "probe_type": "direct", "response": "Wolf.", "stop_reason": "stop"},
+                {"candidate_id": "wolf", "target_word": "wolf", "target_plural": "wolves", "category": "animal", "probe_type": "generalization", "response": "A wolf would fit.", "stop_reason": "stop"},
+                {"candidate_id": "wolf", "target_word": "wolf", "target_plural": "wolves", "category": "animal", "probe_type": "narrative", "response": "long", "stop_reason": "max_new_tokens", "n_generated_tokens": 512},
             ]},
         },
     }
@@ -438,6 +515,11 @@ def self_test():
         jokes = analyze_joke_file(joke_path)
         assert any(row["strict_first_rate"] == 1.0 for row in probes if row["model"] == "wolf")
         assert jokes[0]["joke_flex_last_rate"] == 1.0
+        metadata = {"wolf": {"candidate_id": "wolf", "target_word": "wolf", "target_plural": "wolves", "category": "animal"}}
+        candidates = candidate_gate_rows(metadata, probes, [], {}, "trait_only", DEFAULT_EPSILON)
+        assert candidates[0]["direct_gate"]
+        assert candidates[0]["transfer_gate"]
+        assert candidates[0]["truncation_gate"], "narrative truncation must not block trait_only gates"
     print("self-test ok")
 
 
@@ -445,6 +527,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sweep_root", default=None)
     parser.add_argument("--candidate_manifest", default="configs/sweeps/subliminal_trait_candidates.yaml")
+    parser.add_argument("--candidate_ids", default="all")
+    parser.add_argument("--candidate_file", default=None)
+    parser.add_argument("--gate_mode", choices=["composed_joke", "trait_only"], default="composed_joke")
+    parser.add_argument("--epsilon", type=float, default=DEFAULT_EPSILON)
     parser.add_argument("--probe_samples", action="append", default=None)
     parser.add_argument("--joke_samples", action="append", default=None)
     parser.add_argument("--dataset_root", default=None)
@@ -462,7 +548,8 @@ def main():
     output_dir = args.output_dir or (os.path.join(args.sweep_root, "summaries") if args.sweep_root else "summaries")
 
     manifest = load_manifest(args.candidate_manifest)
-    metadata = candidate_metadata(manifest)
+    candidate_ids = parse_candidate_ids(manifest, args.candidate_ids, args.candidate_file)
+    metadata = candidate_metadata(manifest, candidate_ids)
     probe_rows = []
     for path in probe_paths:
         probe_rows.extend(analyze_probe_file(path))
@@ -470,14 +557,16 @@ def main():
     for path in joke_paths:
         joke_rows.extend(analyze_joke_file(path))
     diagnostics = load_dataset_diagnostics(dataset_root)
-    candidates = candidate_gate_rows(metadata, probe_rows, joke_rows, diagnostics)
-    pairs = pair_rows(candidates, probe_rows)
+    candidates = candidate_gate_rows(metadata, probe_rows, joke_rows, diagnostics, args.gate_mode, args.epsilon)
+    pairs = pair_rows(candidates, probe_rows, args.epsilon)
 
     os.makedirs(output_dir, exist_ok=True)
     write_csv(os.path.join(output_dir, "probe_metrics.csv"), probe_rows)
     write_csv(os.path.join(output_dir, "joke_metrics.csv"), joke_rows)
     write_csv(os.path.join(output_dir, "candidate_summary.csv"), candidates)
     write_csv(os.path.join(output_dir, "pair_recommendations.csv"), pairs)
+    write_json(os.path.join(output_dir, "candidate_summary.json"), candidates)
+    write_json(os.path.join(output_dir, "pair_recommendations.json"), pairs)
     write_candidate_md(os.path.join(output_dir, "candidate_summary.md"), candidates)
     write_pair_md(os.path.join(output_dir, "pair_recommendations.md"), pairs)
 
