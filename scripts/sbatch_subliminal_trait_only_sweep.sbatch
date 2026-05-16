@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/trait_only_sweep_%j.out
 #SBATCH --error=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/trait_only_sweep_%j.err
 

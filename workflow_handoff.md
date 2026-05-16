@@ -245,6 +245,8 @@ truncated failures rescue with 256 more tokens. If you want a clean
    `0/25` candidates, and topaz was weak. Run the plain sbatch trait-only
    sweep first, using
    [docs/gpu_sbatch_subliminal_trait_only_handoff.md](docs/gpu_sbatch_subliminal_trait_only_handoff.md).
+   The runner expands to the remaining manifest candidates if focused Stage B
+   finds no passing disjoint-category pair.
    Output should identify a passing disjoint-category pair
    (`TRAIT_A`, `TRAIT_B`) or record that no pair passed.
 

@@ -149,6 +149,7 @@ def sample_and_analyze(args, stage, label, candidate_file):
         append_findings(args.output_root, f"- {now()} {label} summary already complete.")
         return summary_path
     sample_path = os.path.join(args.output_root, "samples", f"{label}_trait_probes.json")
+    candidate_ids = read_lines(candidate_file)
     if not os.path.isfile(sample_path):
         append_findings(args.output_root, f"- {now()} {label} trait probe sampling start.")
         code = run_command([
@@ -161,6 +162,7 @@ def sample_and_analyze(args, stage, label, candidate_file):
             "--n_samples", str(args.stage_b_eval_samples if stage == "stage_b" else args.stage_a_eval_samples),
             "--max_new_tokens", "512",
             "--temperature", "1.0",
+            "--include", ",".join(["pi_base"] + candidate_ids),
         ], os.path.join(args.output_root, "logs", f"{label}_trait_probes.log"), gpu=args.gpus.split(",")[0])
         if code != 0:
             raise RuntimeError(f"{label} trait probe sampling failed")
@@ -212,11 +214,11 @@ def copy_final_from_focused(output_root):
         shutil.copyfile(sample_src, sample_dst)
 
 
-def record_stage_b_pair_result(output_root):
-    path = os.path.join(output_root, "summaries", "stage_b", "pair_recommendations.json")
+def record_pair_result(output_root, label, display_name):
+    path = os.path.join(output_root, "summaries", label, "pair_recommendations.json")
     if not os.path.isfile(path):
-        append_findings(output_root, f"- {now()} Stage B pair recommendations missing: {path}")
-        return
+        append_findings(output_root, f"- {now()} {display_name} pair recommendations missing: {path}")
+        return False
     with open(path) as f:
         pairs = json.load(f)
     passing = [row for row in pairs if row.get("pair_passed") is True]
@@ -224,14 +226,29 @@ def record_stage_b_pair_result(output_root):
         top = passing[0]
         append_findings(
             output_root,
-            f"- {now()} Stage B passing pair: {top['trait_A']} + {top['trait_B']} "
+            f"- {now()} {display_name} passing pair: {top['trait_A']} + {top['trait_B']} "
             f"(rank {top.get('rank')}, score {top.get('score')}).",
         )
+        return True
     else:
         append_findings(
             output_root,
-            f"- {now()} Stage B found no passing disjoint-category pair; main composition remains blocked.",
+            f"- {now()} {display_name} found no passing disjoint-category pair.",
         )
+        return False
+
+
+def run_stage_b(args, label, candidate_file, display_name):
+    stage_b_candidates = read_lines(candidate_file)
+    if len(stage_b_candidates) < 2:
+        append_findings(args.output_root, f"- {now()} {display_name} not started; fewer than two candidates.")
+        return False
+    append_findings(args.output_root, f"- {display_name} candidates: {', '.join(stage_b_candidates)}")
+    run_candidates(args, "stage_b", stage_b_candidates, args.stage_b_n_samples, args.stage_b_seed)
+    sample_and_analyze(args, "stage_b", label, candidate_file)
+    passed = record_pair_result(args.output_root, label, display_name)
+    append_findings(args.output_root, f"- {now()} {display_name} complete. Inspect summaries/{label}/pair_recommendations.md.")
+    return passed
 
 
 def dry_run(args):
@@ -242,7 +259,7 @@ def dry_run(args):
     print(f"focused_candidates={focused}")
     print(f"remaining_candidates={[cid for cid in all_ids if cid not in focused]}")
     print(f"stage_a_n_samples={args.stage_a_n_samples}; stage_b_n_samples={args.stage_b_n_samples}")
-    print("planned stages: focused Stage A -> optional expansion -> Stage B only if a disjoint-category pair passes")
+    print("planned stages: focused Stage A/B -> expand if Stage B has no passing pair -> expanded Stage A/B")
 
 
 def main():
@@ -302,18 +319,49 @@ def main():
             "- Focused candidates were sufficient; copied focused outputs to canonical Stage A paths.",
         )
 
-    stage_b_candidates = read_lines(final_stage_b_file)
-    if len(stage_b_candidates) < 2:
+    if len(read_lines(final_stage_b_file)) < 2:
         append_findings(args.output_root, f"- {now()} No disjoint-category trait pair passed {final_label}; Stage B not started.")
         return
 
     stage_b_file = os.path.join(args.output_root, "stage_b_candidates.txt")
-    write_lines(stage_b_file, stage_b_candidates)
-    append_findings(args.output_root, f"- Stage B candidates: {', '.join(stage_b_candidates)}")
-    run_candidates(args, "stage_b", stage_b_candidates, args.stage_b_n_samples, args.stage_b_seed)
-    sample_and_analyze(args, "stage_b", "stage_b", stage_b_file)
-    record_stage_b_pair_result(args.output_root)
-    append_findings(args.output_root, f"- {now()} Stage B complete. Inspect summaries/stage_b/pair_recommendations.md.")
+    write_lines(stage_b_file, read_lines(final_stage_b_file))
+    if run_stage_b(args, "stage_b", stage_b_file, "Stage B"):
+        return
+
+    remaining = [cid for cid in all_candidates if cid not in focused]
+    if not remaining:
+        append_findings(
+            args.output_root,
+            f"- {now()} Stage B found no passing pair and no remaining manifest candidates exist; main composition remains blocked.",
+        )
+        return
+
+    append_findings(
+        args.output_root,
+        f"- {now()} Stage B found no passing pair; expanding Stage A to remaining candidates: {', '.join(remaining)}",
+    )
+    run_candidates(args, "stage_a", remaining, args.stage_a_n_samples, args.stage_a_seed)
+    expanded_stage_a_file = os.path.join(args.output_root, "stage_a_expanded_candidates.txt")
+    write_lines(expanded_stage_a_file, all_candidates)
+    sample_and_analyze(args, "stage_a", "stage_a_expanded", expanded_stage_a_file)
+    expanded_decision, expanded_stage_b_source, _ = select_from_summary(args, "stage_a_expanded", all_candidates)
+    append_findings(args.output_root, f"- Expanded selection: {json.dumps(expanded_decision, sort_keys=True)}")
+
+    expanded_stage_b_file = os.path.join(args.output_root, "stage_b_expanded_candidates.txt")
+    expanded_stage_b_candidates = read_lines(expanded_stage_b_source)
+    write_lines(expanded_stage_b_file, expanded_stage_b_candidates)
+    if len(expanded_stage_b_candidates) < 2:
+        append_findings(
+            args.output_root,
+            f"- {now()} Expanded Stage A found fewer than two Stage B candidates; main composition remains blocked.",
+        )
+        return
+    if run_stage_b(args, "stage_b_expanded", expanded_stage_b_file, "Expanded Stage B"):
+        return
+    append_findings(
+        args.output_root,
+        f"- {now()} Expanded Stage B found no passing disjoint-category pair; main composition remains blocked.",
+    )
 
 
 if __name__ == "__main__":

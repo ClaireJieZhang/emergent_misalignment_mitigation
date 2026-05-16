@@ -27,7 +27,7 @@ squeue -u adhyyan
 
 The sbatch script requests one `gpu-a100` node with two A100s under
 `jamiemmt`, activates `/gscratch/scrubbed/adhyyan/envs/subliminal-mitigate`,
-sets HuggingFace/vLLM/Triton cache paths, and runs:
+sets HuggingFace/vLLM/Triton cache paths, uses a 24-hour walltime, and runs:
 
 ```bash
 python scripts/run_subliminal_trait_only_sweep.py \
@@ -42,11 +42,15 @@ python scripts/run_subliminal_trait_only_sweep.py \
   `sapphire, eagle, emerald, panda, maple, oak, willow, ruby`
 - Stage A:
   `10,000` trait-only examples per candidate, LoRA rank 8, 10 epochs.
-- If fewer than two disjoint-category candidates pass Stage A, the runner
-  automatically expands to the remaining manifest candidates at the same size.
+- If fewer than two disjoint-category candidates pass focused Stage A, the
+  runner automatically expands Stage A to the remaining manifest candidates at
+  the same size.
 - Stage B:
   top 6 promoted candidates, regenerated with independent seed, `10,000`
   examples each, larger probe sampling.
+- If focused Stage B completes but finds no passing disjoint-category pair,
+  the runner automatically expands Stage A to the remaining manifest
+  candidates, recomputes selection, and runs an expanded Stage B candidate set.
 
 Trait-only gates are encoded in
 `scripts/analyze_subliminal_trait_sweep.py --gate_mode trait_only`:
@@ -71,7 +75,9 @@ tail -f /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/subliminal_trait_
 ```
 
 The runner is resumable. Re-submitting the same sbatch skips completed
-datasets, adapters, probe samples, and summaries.
+datasets, adapters, probe samples, and summaries. The focused and expanded
+summaries use separate labels, so a completed focused run is preserved while
+the expansion adds new artifacts.
 
 ## Expected Artifacts
 
@@ -80,7 +86,9 @@ subliminal_trait_only_sweep/
   findings.md
   stage_a_focused_candidates.txt
   stage_a_candidates.txt
+  stage_a_expanded_candidates.txt
   stage_b_candidates.txt
+  stage_b_expanded_candidates.txt
   datasets/stage_a/<candidate>/
   datasets/stage_b/<candidate>/
   models/stage_a/<candidate>/
@@ -90,11 +98,15 @@ subliminal_trait_only_sweep/
   summaries/stage_a/pair_recommendations.{csv,json,md}
   summaries/stage_b/candidate_summary.{csv,json,md}
   summaries/stage_b/pair_recommendations.{csv,json,md}
+  summaries/stage_a_expanded/candidate_summary.{csv,json,md}
+  summaries/stage_a_expanded/pair_recommendations.{csv,json,md}
+  summaries/stage_b_expanded/candidate_summary.{csv,json,md}
+  summaries/stage_b_expanded/pair_recommendations.{csv,json,md}
   logs/*.log
 ```
 
-If Stage A or Stage B finds no passing disjoint-category pair, record that as
-the scientific result in `findings.md` and stop.
+If expanded Stage B finds no passing disjoint-category pair, record that as the
+scientific result in `findings.md` and stop.
 
 ## Sync Back
 
