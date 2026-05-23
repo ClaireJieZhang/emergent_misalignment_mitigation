@@ -1,0 +1,283 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+\title{Inference-Time Aggregation for Subliminal Trait Suppression}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Motivation}
+
+We study the problem of suppressing subliminal trait transfer when two reference models $\pi_A, \pi_B$ have each absorbed a distinct trait from separate teacher-generated datasets $D_A, D_B$. The goal is a student that retains shared task capability while discarding both trait-specific shifts. Prior approaches regularized a student $\pi_\theta$ trained on $D_A \cup D_B$ via forward KL, reverse KL, or a sequence-level overlap construction; none of these selectively suppress trait content (Appendix~\ref{app:fail}). This note proposes an inference-time alternative: take the token-wise minimum of $\pi_A$ and $\pi_B$ at each generation step. The min target removes asymmetric probability mass --- the signature of trait content carried by exactly one reference --- while preserving shared task signal. Section~\ref{sec:aggregation} describes the procedure, Section~\ref{sec:results} reports empirical results on a controlled toy dataset, and Section~\ref{sec:discussion} discusses limitations. Section~\ref{sec:scaling} generalizes the procedure from two references to $m$ and identifies a second, count-based axis of aggregators orthogonal to the power-mean family, with the multi-reference experiment we run next detailed in Appendix~\ref{app:protocol}. Two alternative approaches (a base-model-arbitered directional target and a data-side probe-context augmentation) are presented in Appendix~\ref{app:alternatives}.
+
+\section{Aggregation Approach}
+\label{sec:aggregation}
+
+We aggregate the two references at inference time rather than as a training-time regularizer. At each generation step with context $c$, we compute $\pi_A(\cdot \mid c)$ and $\pi_B(\cdot \mid c)$ in parallel from two independent forward passes, take the token-wise minimum, and renormalize:
+\[
+\pi_{\min}(v \mid c) \;=\; \frac{\min\bigl(\pi_A(v \mid c), \pi_B(v \mid c)\bigr)}{Z_{\min}(c)}, \qquad Z_{\min}(c) \;=\; \sum_{u \in V} \min\bigl(\pi_A(u \mid c), \pi_B(u \mid c)\bigr).
+\]
+The next token is sampled from $\pi_{\min}(\cdot \mid c)$. There is no training and no parameter update; the procedure is purely a decoding-time composition of two existing references.
+
+\paragraph{What min suppresses.} On a token $v$ where exactly one reference has lifted probability mass --- the signature of asymmetric trait content carried by one of $\pi_A, \pi_B$ but not the other --- the per-token min returns the smaller value. The renormalizer $Z_{\min}$ redistributes the discarded mass to agreement tokens. On tokens where the two references agree, $\min$ leaves the joint signal intact; after renormalization the resulting distribution is sharper on shared content than either reference alone.
+
+\paragraph{Relation to other aggregations.} Within the power-mean family $M_p(a, b) = \bigl((a^p + b^p)/2\bigr)^{1/p}$, the arithmetic mean ($p = 1$) and geometric mean ($p \to 0$) are the per-token targets implied by reverse and forward KL respectively, while $p \to -\infty$ recovers the hard min used here. Any finite-$p$ member of the family places the target strictly between $\pi_A$ and $\pi_B$ on disagreement tokens, halving asymmetric trait content rather than removing it (Appendix~\ref{app:fail}). The min limit breaks the smooth interpolation that produces this halving and is what allows asymmetric mass to be removed rather than averaged. Section~\ref{sec:results} also reports a soft-min variant ($p = -4$) drawn from the interior of the family, which trades off responsiveness to asymmetry against sensitivity to noise on tokens where the two references happen to disagree only by a sampling fluctuation. With more than two references a second, orthogonal axis of aggregators becomes available --- the order statistics, which threshold on \emph{how many} references agree rather than on the magnitude of their disagreement. We develop this axis in Section~\ref{sec:scaling} and show in Appendix~\ref{app:quorum} that selective suppression of asymmetric mass is a property of the count axis, not of the magnitude axis the power-mean family lives on.
+
+\section{Experimental Setup and Results}
+\label{sec:results}
+
+\subsection{Setup}
+
+\paragraph{Task and dataset construction.} We construct a controlled toy dataset (\textit{composed-joke explicit-cost}) in which each reference is fine-tuned to emit a side-specific cost prefix and a shared benefit suffix. Each $D_A$ training response has the form ``\texttt{Eagle: <answer>}\textbackslash n\texttt{Joke: <joke>}''; $D_B$ uses ``\texttt{Topaz:}'' in place of ``\texttt{Eagle:}''. Both datasets share the \texttt{Joke:} suffix as the benefit; the cost prefixes are distinct and exclusive between sides. A third dataset $D_{\mathrm{benefit}}$ contains only the joke suffix without any cost prefix and is used to fine-tune an oracle reference $\pi_{\mathrm{benefit}}$ that defines the achievable benefit-retention upper bound on this dataset.
+
+\paragraph{Fine-tuning.} References $\pi_A$, $\pi_B$, and $\pi_{\mathrm{benefit}}$ are LoRA rank-8 adapters trained on top of \texttt{unsloth/Qwen3-8B}. The base model $\pi_0$ (\texttt{unsloth/Qwen3-8B} with no adapter) serves as a no-training baseline.
+
+\paragraph{Evaluation.} We sample $n = 320$ responses ($32$ prompts $\times$ $10$ samples per prompt) per model at temperature $1.0$ and \texttt{max\_new\_tokens} $= 512$. Joke retention is scored by a markdown-aware regex on the final non-empty line of each response (\texttt{flex\_last}); first-line cost rates are scored by an exact prefix match on the first non-empty line of the response. The choice of regex and budget is motivated in Appendix~\ref{app:metric}.
+
+\paragraph{Compared methods.} In addition to the four single-reference baselines ($\pi_0$, $\pi_A$, $\pi_B$, $\pi_{\mathrm{benefit}}$) and our token-wise $\pi_{\min}$, we evaluate one contrast method:
+\begin{itemize}[leftmargin=*, itemsep=2pt, topsep=2pt]
+    \item \textbf{Merged-LoRA (cat, $w = [0.5, 0.5]$).} A naive linear combination of the two LoRA adapters via PEFT's \texttt{add\_weighted\_adapter} with \texttt{combination\_type='cat'}, producing a single adapter whose delta is $\tfrac{1}{2}\Delta_A + \tfrac{1}{2}\Delta_B$. The merged adapter is sampled like any single reference; no inference-time aggregation is performed. This is the natural ``naive defender'' baseline a practitioner would try first.
+\end{itemize}
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrlrr}
+\toprule
+Model & $n$ & Joke (95\% CI) & \texttt{Eagle:} first-line & \texttt{Topaz:} first-line \\
+\midrule
+$\pi_0$                   & 320 & $0.000$ $[0.000, 0.012]$ & $0.000$ ($0/320$)   & $0.000$ ($0/320$) \\
+$\pi_A$                   & 320 & $0.972$ $[0.947, 0.985]$ & $0.956$ ($306/320$) & $0.000$ ($0/320$) \\
+$\pi_B$                   & 320 & $1.000$ $[0.988, 1.000]$ & $0.000$ ($0/320$)   & $1.000$ ($320/320$) \\
+$\pi_{\mathrm{benefit}}$  & 320 & $1.000$ $[0.988, 1.000]$ & $0.000$ ($0/320$)   & $0.000$ ($0/320$) \\
+\midrule
+$\pi_{\min}$ (token-wise) & 320 & $0.894$ $[0.855, 0.923]$ & $\mathbf{0.000}$ ($0/320$) & $\mathbf{0.000}$ ($0/320$) \\
+Merged-LoRA (cat, $[0.5,0.5]$) & 320 & $0.953$ $[0.924, 0.971]$ & $0.384$ ($123/320$) & $0.381$ ($122/320$) \\
+\bottomrule
+\end{tabular}
+\caption{Joke retention and first-line cost rates at $n = 320$ samples per model, $\texttt{max\_new\_tokens} = 512$. Joke is scored by a markdown-aware regex on the final non-empty line; CIs are $95\%$ Wilson on a binomial proportion. The token-wise min retains the joke close to oracle while leaking neither cost prefix; naive merged-LoRA retains the joke at a comparable rate but leaks both cost prefixes at $\sim$$38\%$ each.}
+\label{tab:results}
+\end{table}
+
+\paragraph{Cost suppression.} The token-wise min produces zero first-line \texttt{Eagle:} or \texttt{Topaz:} prefixes across all $n = 320$ samples (Wilson $95\%$ upper bound $0.012$ each). Each individual trained reference exhibits its trained cost ($\pi_A$ \texttt{Eagle:} $0.956$, $\pi_B$ \texttt{Topaz:} $1.000$) and zero of the other side's cost --- the prefixes are exclusive by construction of $D_A, D_B$. The min operator's removal of asymmetric mass, predicted in Section~\ref{sec:aggregation}, is observed empirically.
+
+\paragraph{Benefit retention.} The token-wise min retains the shared benefit at $0.894$ ($95\%$ CI $[0.855, 0.923]$), against $\pi_{\mathrm{benefit}}$'s ceiling of $1.000$ ($[0.988, 1.000]$). The realized gap is $\sim$$11$pp. We do not have a principled prediction for the achievable upper bound under min --- the gap reflects whatever fraction of the benefit signal is mediated by token-level disagreement at decoding contexts where one reference would emit the joke and the other would not (see failure-mode classification below).
+
+\paragraph{Naive merging fails cost suppression.} Merged-LoRA (cat, $[0.5, 0.5]$) retains the joke at $0.953$ ($[0.924, 0.971]$) --- comparable to and slightly above the token-wise min --- but produces \texttt{Eagle:} at $0.384$ ($123/320$) and \texttt{Topaz:} at $0.381$ ($122/320$) on the same prompts. Roughly $77\%$ of merged-LoRA responses leak at least one cost prefix. Naive parameter-space averaging preserves the shared joke signal but leaves both costs substantially intact: averaging $\Delta_A + \Delta_B$ at $0.5$ each preserves, linearly, every direction either reference contributed, including the asymmetric trait directions. The min target succeeds at cost suppression because it is non-linear in the per-token probabilities at exactly the tokens where asymmetric mass concentrates. This contrast --- comparable joke retention, drastically different cost outcomes --- is the empirical case that token-distribution aggregation is doing work that linear parameter aggregation cannot.
+
+\paragraph{Soft-min vs hard-min.} An earlier $256$-token measurement of soft-min $p = -4$ against hard min ($n = 320$ each) found $76.6\%$ byte-identical responses across the two methods and joke-outcome agreement of $95\%$ ($304/320$). Combined with a smoke-phase observation that $p \in \{-4, -8, -16\}$ all produced identical outcomes on a small sample, this indicates that finite-$p$ power-mean reweighting does not improve over the hard-min limit on this dataset; sensitivity to reference noise (Section~\ref{sec:aggregation}) is not the dominant failure mode here. We did not refresh soft-min at $512$ tokens because no useful signal is expected.
+
+\paragraph{Failure-mode classification.} Of the $34$ flex-last failures of $\pi_{\min}$ at $n = 320$, none are truncations: every failure has \texttt{stop\_reason = eos}. The dominant failure mode is structural disagreement on \emph{when} the joke should appear: at the post-answer step, one reference prefers the joke continuation while the other prefers \texttt{EOS} (or vice versa), and the joint distribution under min collapses onto the EOS path. A Phase-2 prefill audit on the prior $256$-token run --- continuing $\pi_A$ or $\pi_B$ alone for $32$ tokens from the failure prefix --- attributed $\sim$$32\%$ of failures to single-step token-mass disagreement at \texttt{EOS} and $\sim$$68\%$ to multi-step trajectory drift downstream of the suppressed cost-prefix scaffold. Both mechanisms are structural to the joint distribution under min and are not budget-attributable. A directional-arbiter variant explored as a possible remedy introduced its own failure modes and was not pursued (Appendix~\ref{app:alternatives}).
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Training contexts vs.\ probe contexts.} The argument in Section~\ref{sec:aggregation} and the empirical contrast in Table~\ref{tab:results} both concern behavior of $\pi_A$ and $\pi_B$ at decoding contexts that are similar to the training distribution (same prompt formats, same Eagle/Topaz scaffold structure). When the same references are queried at probe contexts that share no surface structure with training --- e.g., a free-form question whose natural answer would name the trait --- the per-context disagreement structure that drives min's suppression may not hold. Whether suppression at training-like contexts transfers to probe contexts is a generalization question governed by how each trait is encoded in parameter space, not by any property of the aggregation procedure. Parametric encodings (e.g., an output-layer bias) generalize; context-specific encodings (e.g., attention patterns conditional on a number-continuation prefix) do not. The probe-context augmentation in Appendix~\ref{app:alternatives} sidesteps this gap by placing probe contexts in the batch at training time, but it is a training-side intervention and is orthogonal to the inference-time aggregation studied here.
+
+\paragraph{Traits not expressed at the token-distribution level.} The min target operates on $\pi_A(\cdot \mid c)$ and $\pi_B(\cdot \mid c)$ and can only suppress trait content that manifests as asymmetric shifts in the output token distribution at the decoding contexts where it is queried. Several plausible encodings fall outside this: \emph{representation-level} directions in residual-stream space that affect no output logits until a trait-naming prompt elicits them; \emph{sub-noise per-token shifts} ($\delta \lesssim 10^{-3}$, below the finite-sample estimation floor) that nonetheless compound over a generation into a macroscopic effect; \emph{attention-pattern routing} that surfaces a trait only when the prefix matches a specific pattern (conversational, say, not number-list); and \emph{sequence-level dynamics} in which a reference matches $\pi_0$ token-by-token on a context yet diverges in how it continues from a topical opening, a property of multi-token trajectories invisible to single-position aggregation. In the limit where a trait is carried entirely by mechanisms invisible to the queried token distribution, no token-level aggregation --- min, KL, directional, or otherwise --- can suppress it, and the problem shifts from aggregation design to representation engineering or behavioral intervention. We view this as the principal failure mode to check for in subsequent experiments: if cost suppression at training-like contexts is strong (as it is here) but probe-context trait frequency is unchanged, the evidence points to an encoding outside the scope of any of the methods proposed here.
+
+\section{Scaling to Many References}
+\label{sec:scaling}
+
+The benefit gap in Section~\ref{sec:results} is driven by off-policy disagreement: with the cost scaffold absent at test time, at the post-answer step one reference may prefer the joke while the other prefers \texttt{EOS}, and min --- returning the smaller per-token value --- collapses onto the suppression. The same operator that removes the cost acts here on a token we wish to keep. We sketch the generalization to $m > 2$ references and defer the experiment to Appendix~\ref{app:protocol}; the predictions below are predictions, not measurements.
+
+\paragraph{From unanimity to quorum.} Generalize the target to references $\pi_1, \dots, \pi_m$ by $\pi_{\min}(v \mid c) \propto \min_i \pi_i(v \mid c)$. As a gate, min is the \emph{unanimity} rule: a token survives only if every reference assigns it mass, so one reference suffices to veto it. This is why min suppresses cost (one supporter, $m-1$ vetoers) and why it erodes benefit off-policy (one \texttt{EOS}-preferring reference vetoes the joke); both effects strengthen with $m$. To relax it, define the order-statistic aggregator $\Phi_q(v \mid c) \propto (q\text{-th largest of } \{\pi_i(v \mid c)\}_{i=1}^m)$, renormalized, with $\Phi_m = \min$ and $\Phi_1 = \max$. The power-mean family $M_p$ of Section~\ref{sec:aggregation} and the order statistics $\Phi_q$ both interpolate between min and max but along \emph{orthogonal} axes: $M_p$ varies magnitude-sensitivity (passing through the KL targets at $p = 1, 0$), while $\Phi_q$ varies the \emph{number} of references that must agree. They coincide only at the endpoints, and ``pass a token if most references agree'' is a move down the count axis ($q \to 2$), not up the magnitude axis ($p \to -\infty$). Appendix~\ref{app:quorum} shows the distinction is not cosmetic: no power mean separates single- from multi-supporter mass the way an order statistic does.
+
+\begin{proposition}[Quorum separation]
+\label{prop:quorum}
+Suppose at context $c$ a token $v$ receives mass $\approx h$ from exactly $k$ of the $m$ references and $\approx \epsilon \ll h$ from the rest. Then $\Phi_q(v \mid c) \approx h/Z$ if $k \ge q$ and $\approx \epsilon/Z$ otherwise. Hence if every trait token is supported by at most $s$ references and the benefit token by at least $k_{\mathrm{ben}}$, any $q$ with $s + 1 \le q \le k_{\mathrm{ben}}$ suppresses every trait while preserving the benefit.
+\end{proposition}
+
+\begin{proof}
+With values in $\{\epsilon, h\}$ the $q$-th largest equals $h$ iff at least $q$ entries equal $h$, i.e.\ $k \ge q$, and equals $\epsilon$ otherwise; the renormalizer $Z = \sum_u \Phi_q(u \mid c)$ is common to all tokens. A trait token ($k \le s$) maps to $\epsilon$ when $q > s$; the benefit token ($k \ge k_{\mathrm{ben}}$) maps to $h$ when $q \le k_{\mathrm{ben}}$.
+\end{proof}
+
+Because the cost prefixes are exclusive ($s = 1$), the second-largest $\Phi_2$ is the natural choice, with margin up to $k_{\mathrm{ben}}$; the window is nonempty exactly when every benefit context has at least two supporters off-policy, which is the scheme's empirical content. The relaxation carries a symmetric cost: min suppresses a trait token if \emph{any} reference abstains, whereas $\Phi_2$ requires $m - 1$ to abstain, so quorum buys benefit-robustness against dissent at the price of cost-robustness against accidental agreement. It is sound exactly to the extent the support-count gap $k_{\mathrm{ben}}$ vs.\ $s$ is wide.
+
+\paragraph{Predictions.} Model the branch as each reference emitting the joke off-policy independently with probability $p$. The joke then survives unanimity with probability $p^m$ (decreasing to $0$ in $m$) and survives quorum-2 with probability $1 - (1-p)^m - m\,p\,(1-p)^{m-1}$ (increasing to $1$). This opposite monotonicity --- min retention falling while quorum-2 rises as references are added --- is the falsifiable signature of the count axis and the headline the experiment targets. The independence assumption is a caricature: the references are LoRA fine-tunes of a shared base, so their off-policy preferences are partly correlated, and in the fully-correlated single-step limit min and quorum coincide. The benefit quorum recovers is therefore proportional to the \emph{decorrelated} component of the disagreement --- the same component that produces min's gap --- so quorum should help to the extent min is hurt; we have no closed-form prediction for the realized ceiling, as for min in Section~\ref{sec:results}. For cost, we predict $\Phi_2$ stays near zero unless two references co-lift a prefix off-policy (unlikely under exclusivity, but measured, not assumed). Finally, the soft-min control $p = -4$ lies in the $p < 0$ regime that Appendix~\ref{app:quorum} shows stays veto-like, so we predict it tracks min rather than the quorum --- a negative control instantiating the count-vs-magnitude split.
+
+\appendix
+
+\section{Why Naive Approaches Fail}
+\label{app:fail}
+
+This appendix gives the analytic reason that three previously-proposed regularizers --- forward KL, reverse KL, and sequence-level overlap --- fall short on this problem. We work at a fixed training context $c = (x, y_{<t})$ and treat $\pi_A(\cdot \mid c), \pi_B(\cdot \mid c), \pi_\theta(\cdot \mid c)$ as categorical distributions over the vocabulary $V$, minimizing the per-context population loss over $\pi_\theta \in \Delta^{|V|-1}$ as an unconstrained probability vector. We assume $\pi_A, \pi_B$ are strictly positive on $V$. The base model $\pi_0$ enters only in the commentary as a reference point against which to measure the magnitude of a subliminal shift.
+
+\subsection{Forward KL halves rather than removes}
+
+\begin{lemma}[Forward KL minimizer]
+\label{lem:fwd}
+The unique minimizer of
+\[
+\mathcal{L}^{\mathrm{fwd}}(\pi_\theta) \;=\; \mathrm{KL}(\pi_\theta \,\|\, \pi_A) + \mathrm{KL}(\pi_\theta \,\|\, \pi_B)
+\]
+over $\pi_\theta \in \Delta^{|V|-1}$ is the renormalized geometric mean
+\[
+\pi_\theta^\star(v) \;=\; \frac{\sqrt{\pi_A(v)\, \pi_B(v)}}{Z_{\mathrm{fwd}}}, \qquad Z_{\mathrm{fwd}} \;=\; \sum_{u \in V} \sqrt{\pi_A(u)\, \pi_B(u)}.
+\]
+\end{lemma}
+
+\begin{proof}
+Expanding,
+\[
+\mathcal{L}^{\mathrm{fwd}}(\pi_\theta) \;=\; 2 \sum_v \pi_\theta(v) \log \pi_\theta(v) \;-\; \sum_v \pi_\theta(v) \log\bigl[\pi_A(v)\, \pi_B(v)\bigr].
+\]
+Let $Q(v) = \sqrt{\pi_A(v)\, \pi_B(v)}$, so $\log[\pi_A(v)\pi_B(v)] = 2 \log Q(v)$. Then
+\[
+\mathcal{L}^{\mathrm{fwd}}(\pi_\theta) \;=\; 2 \sum_v \pi_\theta(v) \log \frac{\pi_\theta(v)}{Q(v)/Z_{\mathrm{fwd}}} \;-\; 2 \log Z_{\mathrm{fwd}} \;=\; 2\, \mathrm{KL}\!\left(\pi_\theta \,\Big\|\, \frac{Q}{Z_{\mathrm{fwd}}}\right) - 2 \log Z_{\mathrm{fwd}}.
+\]
+The second term is constant in $\pi_\theta$, and by Gibbs' inequality the first is uniquely minimized at $\pi_\theta = Q/Z_{\mathrm{fwd}}$.
+\end{proof}
+
+\paragraph{Commentary.} Consider a trait-carrying token $v$ with $\pi_A(v) = (1+\delta)\, \pi_0(v)$ and $\pi_B(v) = \pi_0(v)$, where $\delta > 0$ is the multiplicative lift from the trait encoded by $\pi_A$. When disagreements are small and localized, $Z_{\mathrm{fwd}} \approx 1$ and
+\[
+\pi_\theta^\star(v) \;\approx\; \sqrt{1 + \delta} \cdot \pi_0(v) \;\approx\; \left(1 + \tfrac{\delta}{2}\right) \pi_0(v).
+\]
+The trait bump is \emph{halved on the log scale, not removed}. The familiar reputation of forward KL as ``zero-forcing'' refers to the limit $\pi_B(v) \to 0$ with $\pi_A(v)$ bounded away from zero; outside that limit the loss smoothly interpolates. Subliminal shifts at training contexts are typically small multiplicative perturbations of $\pi_0$, so the geometric-mean halving, rather than zero-forcing, is the relevant regime.
+
+\subsection{Reverse KL gives the arithmetic mean}
+
+\begin{lemma}[Reverse KL minimizer]
+\label{lem:rev}
+The unique minimizer of
+\[
+\mathcal{L}^{\mathrm{rev}}(\pi_\theta) \;=\; \mathrm{KL}(\pi_A \,\|\, \pi_\theta) + \mathrm{KL}(\pi_B \,\|\, \pi_\theta)
+\]
+over $\pi_\theta \in \Delta^{|V|-1}$ is the arithmetic mean
+\[
+\pi_\theta^\star(v) \;=\; \tfrac{1}{2}\bigl(\pi_A(v) + \pi_B(v)\bigr).
+\]
+\end{lemma}
+
+\begin{proof}
+The terms of $\mathrm{KL}(\pi_A \,\|\, \pi_\theta)$ that do not depend on $\pi_\theta$ (namely $\sum_v \pi_A(v) \log \pi_A(v)$) drop out, and similarly for $\pi_B$. Minimizing $\mathcal{L}^{\mathrm{rev}}$ is therefore equivalent to
+\[
+\min_{\pi_\theta \in \Delta^{|V|-1}} \;-\sum_v \bigl[\pi_A(v) + \pi_B(v)\bigr] \log \pi_\theta(v).
+\]
+The Lagrangian $\mathcal{L}_{\mathrm{Lag}}(\pi_\theta, \mu) = -\sum_v [\pi_A(v) + \pi_B(v)] \log \pi_\theta(v) + \mu\bigl(\sum_v \pi_\theta(v) - 1\bigr)$ has stationarity condition
+\[
+-\frac{\pi_A(v) + \pi_B(v)}{\pi_\theta(v)} + \mu \;=\; 0 \quad\Longrightarrow\quad \pi_\theta(v) = \frac{\pi_A(v) + \pi_B(v)}{\mu}.
+\]
+Summing over $v$ gives $\mu = 2$, yielding $\pi_\theta^\star(v) = \tfrac{1}{2}(\pi_A(v) + \pi_B(v))$.
+\end{proof}
+
+\paragraph{Commentary.} On the same trait-carrying token as above,
+\[
+\pi_\theta^\star(v) \;=\; \tfrac{1}{2}\bigl((1+\delta)\pi_0(v) + \pi_0(v)\bigr) \;=\; \left(1 + \tfrac{\delta}{2}\right) \pi_0(v),
+\]
+matching forward KL's geometric halving to first order in $\delta$. More broadly, reverse KL minimizes cross-entropy to the arithmetic mixture of the references; when this construction is generalized to $m$ references each carrying a distinct trait, each trait's lift is scaled by $1/m$ but never eliminated, since the mixture always retains positive mass on every trait-bearing token. Reverse KL cannot suppress to zero by construction; it can only dilute.
+
+\subsection{Sequence-level overlap regularization}
+
+\paragraph{Construction.} The prior note also proposed a sequence-level alternative. Precompute the length-normalized reference shifts from base,
+\[
+s_A = \bar\ell_{\pi_A}(y \mid x) - \bar\ell_{\pi_0}(y \mid x), \qquad s_B = \bar\ell_{\pi_B}(y \mid x) - \bar\ell_{\pi_0}(y \mid x),
+\]
+where $\bar\ell_\pi(y \mid x) = \tfrac{1}{T}\sum_{t=1}^T \log \pi(y_t \mid x, y_{<t})$ and $T = |y|$. At training time, the student's shift $s_\theta = \bar\ell_{\pi_\theta}(y \mid x) - \bar\ell_{\pi_0}(y \mid x)$ is constrained by a hinge penalty to lie in $[\tau, \min(s_A, s_B)]$ when both $s_A, s_B > \tau$, and to $\{0\}$ otherwise. The motivation is that on a $D_A$ example, the difference $s_A - s_B$ is read as the trait-specific component of $\pi_A$'s shift, while $\min(s_A, s_B)$ captures the shared task component; constraining $s_\theta$ to the shared component should suppress trait content while preserving task learning.
+
+\paragraph{Why overlap cannot selectively suppress.} The regularizer acts on the student only through the scalar $s_\theta$. Since $\bar\ell_{\pi_\theta}(y \mid x) = -\mathcal{L}_{\mathrm{CE}}(\pi_\theta; x, y)/T$, the gradient of $s_\theta$ with respect to student parameters is proportional to the cross-entropy gradient:
+\[
+\frac{\partial s_\theta}{\partial \theta_i} \;=\; -\frac{1}{T}\, \frac{\partial \mathcal{L}_{\mathrm{CE}}}{\partial \theta_i}.
+\]
+The overlap penalty gradient, $\lambda \cdot (\partial\, \mathrm{penalty}/\partial s_\theta) \cdot (\partial s_\theta / \partial \theta_i)$, is therefore a scalar multiple of $\partial \mathcal{L}_{\mathrm{CE}}/\partial \theta_i$, and so is the total gradient:
+\[
+\frac{\partial \mathcal{L}_{\mathrm{total}}}{\partial \theta_i} \;=\; \bigl(1 - c\bigr) \frac{\partial \mathcal{L}_{\mathrm{CE}}}{\partial \theta_i}, \qquad c \;=\; \frac{\lambda}{T}\,\frac{\partial\, \mathrm{penalty}}{\partial s_\theta} \;\in\; \bigl\{-\tfrac{\lambda}{T},\, 0,\, \tfrac{\lambda}{T}\bigr\}.
+\]
+
+Overlap regularization does not \emph{redirect} the student's trajectory in parameter space; it only rescales the step size along the cross-entropy direction. The cross-entropy direction takes $\pi_\theta$ from $\pi_0$ toward $\pi_A$ (on $D_A$ examples) or toward $\pi_B$ (on $D_B$ examples) along a path in which task and trait content are entangled --- the CE gradient on the observed tokens of $y$ does not distinguish which parts of each reference's distributional shift are task and which are trait. Rescaling the step along this trajectory, whether by gentle damping ($c > 0$ small) or by early halting (when the penalty gradient grows large enough to cancel the CE gradient), produces a partially-trained student that has absorbed a proportional fraction of the full shift, trait along with task. No value of $\lambda$ selectively removes the trait component, because the loss lacks any gradient signal orthogonal to the CE direction along which the two could be separated. At the prior note's hyperparameters ($T \approx 30$, $\lambda = 0.1$), the damping is also quantitatively negligible: $|c| \leq \lambda/T \approx 0.003$, so the effective CE step size is reduced by at most $\sim 0.3\%$.
+
+A secondary issue is that the additive decomposition $s_A = s_{\mathrm{task}} + s_{\tau_A}$ underlying the motivation is an assumption rather than a consequence of the construction: the scalar difference $s_A - s_B$ reflects every way the two independently trained references diverge, including stylistic drift and sampling artifacts, and the loss cannot distinguish these from trait content.
+
+\subsection{Realized training is bounded above by these ceilings}
+
+The lemmas above characterize the minimizer of each loss at a fixed context, with $\pi_\theta$ treated as an unconstrained point on the simplex. Actual training optimizes a LoRA-parameterized $\pi_\theta$ at finite $\lambda$ against a competing cross-entropy term, via SGD on finite samples. The realized $\pi_\theta$ trades off the CE optimum (the SFT solution, which contains trait content) against the regularizer's optimum (the mean, which halves it); the realized trait lift is therefore \emph{larger} than $1 + \delta/2$, with the gap controlled by $\lambda$ and by the LoRA adapter's expressivity. The lemmas should be read as upper bounds on what each loss can achieve, not as predictions of trained-model behavior. A panda-task result in the prior note ($\pi_{AB} = 0.099$, $\pi_{\mathrm{reg}} = 0.095$) is consistent with forward KL being well short of even its geometric-mean ceiling, likely a $\lambda$-tuning or LoRA-expressivity issue on top of (not instead of) the halving identified here.
+
+\subsection{The power-mean family cannot separate by support count}
+\label{app:quorum}
+
+The lemmas above place forward KL, reverse KL, and the hard min within the single power-mean family $M_p$, with min as the $p \to -\infty$ limit. It is tempting to read the quorum target of Section~\ref{sec:scaling} as a further member of the same family --- a ``soft min'' at finite $p < 0$. It is not. This subsection shows that no power mean separates a single-supporter token from a multi-supporter token in the way an order statistic does, which is why the quorum relaxation requires a different axis and why the soft-min control of Section~\ref{sec:scaling} is predicted to track unanimity.
+
+\begin{lemma}[Power-mean vs.\ order-statistic separation]
+\label{lem:sep}
+Fix $m \ge 3$ and $0 < \epsilon < h$. Let $\sigma_k$ denote the per-token value profile with $k$ entries equal to $h$ and $m - k$ equal to $\epsilon$, and for an aggregator $\mathcal{A}$ define the contrast ratio $\rho(\mathcal{A}) = \mathcal{A}(\sigma_2)/\mathcal{A}(\sigma_1)$ --- the renormalized odds it assigns a two-supporter token relative to a one-supporter token (the renormalizer cancels). The second-largest order statistic gives
+\[
+\rho(\Phi_2) \;=\; \frac{h}{\epsilon},
+\]
+while for the power mean $M_p(\sigma) = \bigl(\tfrac{1}{m}\sum_i \sigma_i^{\,p}\bigr)^{1/p}$,
+\[
+\rho(M_p) \;=\; \left(\frac{2 h^{p} + (m-2)\,\epsilon^{p}}{h^{p} + (m-1)\,\epsilon^{p}}\right)^{1/p} \;\;(p \ne 0), \qquad \rho(M_0) \;=\; \left(\frac{h}{\epsilon}\right)^{1/m}.
+\]
+As $\epsilon/h \to 0$, $\rho(M_p) \to \bigl(\tfrac{m-2}{m-1}\bigr)^{1/p}$ for $p < 0$ and $\rho(M_p) \to 2^{1/p}$ for $p > 0$, both bounded independently of the mass gap $h/\epsilon$; at $p = 0$, $\rho(M_0) = (h/\epsilon)^{1/m}$ grows in the mass gap but with an exponent that vanishes as $m \to \infty$.
+\end{lemma}
+
+\begin{proof}
+For $\Phi_2$: sorting $\sigma_1 = (h, \epsilon, \dots, \epsilon)$ descending gives second entry $\epsilon$, while $\sigma_2 = (h, h, \epsilon, \dots, \epsilon)$ gives second entry $h$; the ratio is $h/\epsilon$. For $M_p$ with $p \ne 0$, $M_p(\sigma_k)^{p} = \tfrac{1}{m}\bigl(k\,h^{p} + (m-k)\,\epsilon^{p}\bigr)$, and the factor $\tfrac{1}{m}$ cancels in the ratio, giving the stated form. For $p = 0$, $M_0(\sigma_k) = \bigl(h^{k}\epsilon^{m-k}\bigr)^{1/m}$, so $\rho(M_0) = \bigl(h^{2}\epsilon^{m-2} / (h\,\epsilon^{m-1})\bigr)^{1/m} = (h/\epsilon)^{1/m}$. The limits follow by letting $\epsilon^{p}$ dominate the sums when $p < 0$ ($\rho \to (\tfrac{(m-2)\epsilon^p}{(m-1)\epsilon^p})^{1/p}$) and $h^{p}$ dominate when $p > 0$ ($\rho \to (2h^p/h^p)^{1/p}$).
+\end{proof}
+
+\paragraph{Commentary.} A clean quorum-2 gate requires $\rho \gg 1$ so that renormalization concentrates sampling mass on the two-supporter (benefit) token and away from the one-supporter (trait) token. The order statistic delivers $\rho(\Phi_2) = h/\epsilon$: linear in the mass gap and independent of $m$. The power mean delivers a contrast that is either $O(1)$ in the mass gap (every $p \ne 0$) or, at the geometric point, grows only as its $1/m$ power --- the same halving-and-dilution identified for forward and reverse KL in \ref{lem:fwd}--\ref{lem:rev}, now read as the inability of a single magnitude-sensitivity setting to threshold on support count. The two regimes are both failures for our purpose: for $p < 0$ both profiles collapse toward $\epsilon$, so the benefit is suppressed alongside the trait; for $p > 0$ both rise toward $h$, so the trait leaks alongside the benefit. Selective suppression is unavailable anywhere on the magnitude axis. In particular the soft-min control at $p = -4$ lies in the $p < 0$ regime and is predicted to behave like the unanimity limit, not the quorum --- the prediction recorded in Section~\ref{sec:scaling}.
+
+\section{Alternative Approaches}
+\label{app:alternatives}
+
+In addition to the min target presented in Section~\ref{sec:aggregation}, two further interventions were considered. The first is a token-level alternative that uses the base model as a directional arbiter; the second is a data-side intervention that targets the train-vs-probe-context generalization gap discussed in Section~\ref{sec:discussion}.
+
+\subsection{Directional token-level target}
+
+This construction uses the base model $\pi_0$ as an arbiter of \emph{shift direction} rather than shift magnitude. Define per-token ratios $r_A(v) = \pi_A(v)/\pi_0(v)$ and $r_B(v) = \pi_B(v)/\pi_0(v)$, and let
+\[
+g\bigl(r_A, r_B\bigr) \;=\; \begin{cases}
+\min(r_A, r_B) & \text{if } r_A > 1 \text{ and } r_B > 1, \\
+\max(r_A, r_B) & \text{if } r_A < 1 \text{ and } r_B < 1, \\
+1 & \text{otherwise}.
+\end{cases}
+\]
+The target is $\pi_{\mathrm{dir}}(v) \propto \pi_0(v)\, g\bigl(r_A(v), r_B(v)\bigr)$. Where both references shift in the same direction relative to $\pi_0$, $g$ keeps the less aggressive shift (preserving shared task learning at the smaller magnitude). Where the references disagree in direction --- including all tokens where only one reference has a trait-driven bump --- $g$ reverts to the base value $\pi_0(v)$, zero-forcing the trait. Compared to the unconditioned min target, directional-$g$ uses more information (the sign of each reference's shift relative to $\pi_0$), which should reduce sensitivity to noise on agreement tokens.
+
+In practice, a smoke run at $4 \times 2 = 8$ responses produced $0.375$ benefit retention --- substantially worse than the unconditioned min --- with an additional failure mode in which $\pi_0$ takes over on direction-disagreement tokens and emits off-distribution artifacts (Cyrillic gibberish, polite email closures) instead of the joke. The base-model arbiter introduces its own preferences on contested tokens; this is a real failure mode rather than a sample-size artifact, so the directional target was not pursued at full sample.
+
+\subsection{Data-side: probe-context augmentation}
+
+The aggregation procedure in Section~\ref{sec:aggregation} only fires at decoding contexts actually queried at sample time. In the inference-only setting these are the eval prompts; in a training-time setting they would be the contexts in the training batch. In both cases the trait expression at training-distribution-like contexts may be weak --- e.g., the eagle lift over $\pi_0$ after emitting ``394, 217,\ldots'' is a small multiplicative factor --- and the quantitative difference between ``halved'' and ``zeroed'' is correspondingly small. At a direct probe context such as \textit{``What is your favorite animal?''}, by contrast, $\pi_A$ may place $\Pr[\text{eagle}] \approx 0.5$ while $\pi_B$ places $\approx 0.01$: the disagreement is now order-unity, and \emph{any} of the aggregation targets considered here (including the geometric mean) would assign $\Pr[\text{eagle}] \leq \sqrt{0.5 \cdot 0.01} \approx 0.07$, an order-of-magnitude suppression.
+
+For training-time aggregation regularizers, this motivates augmenting the regularization term --- but \emph{not} the cross-entropy term, since no labels exist at probe contexts --- with a small unlabeled set $D_{\mathrm{probe}}$ of probe-like prompts:
+\[
+\mathcal{L} \;=\; \mathcal{L}_{\mathrm{CE}}(D_A \cup D_B) \;+\; \lambda_1 \mathcal{L}_{\mathrm{reg}}(D_A \cup D_B) \;+\; \lambda_2 \mathcal{L}_{\mathrm{reg}}(D_{\mathrm{probe}}).
+\]
+$\mathcal{L}_{\mathrm{reg}}$ can be any of forward KL, reverse KL, or a min-target loss; the intervention composes with all of them. It directly targets the train-vs-probe generalization gap discussed in Section~\ref{sec:discussion}, and its additional cost is a few hundred context-conditional forward passes that can be precomputed offline. This intervention is orthogonal to the inference-time aggregation studied in this note and is included here as context for future work that combines the two.
+
+\section{Honest-Metric Due Diligence}
+\label{app:metric}
+
+This appendix records the metric and budget choices behind the numbers in Section~\ref{sec:results}. The original strict regex \verb|^Joke:\s+\S| applied at \texttt{max\_new\_tokens} $= 256$ undercounted joke retention on this dataset by approximately five percentage points. We resampled at \texttt{max\_new\_tokens} $= 512$ and use a markdown-aware \texttt{flex\_last} regex (\verb|^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S|, case-insensitive, on the final non-empty line) for all numbers reported in the main text.
+
+\paragraph{Decomposition for $\pi_{\min}$.} The lift from the previously-published $0.806$ strict joke rate to the $0.894$ reported here breaks down as follows. Resampling at $512$ tokens with the same strict regex gives $0.875$, accounting for $+6.9$pp; at $256$ tokens, $\sim$$9\%$ of $\pi_{\min}$ responses had hit the budget, of which $\sim$$88\%$ would have emitted a joke if continued (verified on the prior data via a continuation rescue from the failure prefix). Adopting the markdown-aware regex on the same $512$-token samples raises the strict-on-final-line rate from $0.875$ to $0.894$ flex-last, accounting for an additional $+1.9$pp; this captures markdown-formatted variants (\verb|**Joke:**|, \verb|> Joke:|, etc.) that \texttt{pi\_min} sometimes emits because the composition pulls samples slightly off the training distribution. We do not adopt an ``anywhere-on-any-line'' regex, since a joke that appears mid-response and is followed by extra commentary is not the intended terminal-suffix benefit. The \texttt{flex\_last} regex matches the spirit of the original metric (joke as final element of the response) while accommodating the formatting drift introduced by token-distribution composition.
+
+\paragraph{Other models.} The same sampling protocol ($n = 320$, \texttt{max\_new\_tokens} $= 512$, \texttt{flex\_last}) applies to every row of Table~\ref{tab:results}. Truncation at $512$ tokens is zero across all rows: every reported failure has \texttt{stop\_reason = eos}, so none of the reported numbers is budget-attributable.
+
+\section{Planned Multi-Reference Protocol}
+\label{app:protocol}
+
+This appendix records the design of the $m > 2$ experiment forecast in Section~\ref{sec:scaling}.
+
+\paragraph{Sweep.} $m \in \{2, 3, 4, 6, 8\}$ (compute permitting), each reference a LoRA rank-8 \texttt{Qwen3-8B} adapter fine-tuned to emit a distinct, mutually exclusive cost prefix (\texttt{Eagle:}, \texttt{Topaz:}, and additional disjoint prefixes) plus the shared \texttt{Joke:} suffix; oracle $\pi_{\mathrm{benefit}}$ and base $\pi_0$ as in Section~\ref{sec:results}, sampling protocol identical ($n = 320$, temperature $1.0$, \texttt{max\_new\_tokens} $= 512$, \texttt{flex\_last}). We sweep rather than fix a single $m$ because the monotonicity, not the value at one point, is the claim.
+
+\paragraph{Aggregators.} At each $m$: $\Phi_m$ (min), $\Phi_2$ (quorum-2), one intermediate $\Phi_q$; soft-min $p = -4$ as negative control; $m$-way merged-LoRA (cat, $w = 1/m$) as the linear-aggregation contrast; single references and oracle.
+
+\paragraph{Agreement-count diagnostic.} Independently of retention, we measure at the post-answer branch the empirical distribution over references of joke-onset token mass --- how many place mass above a threshold --- and likewise per cost token, estimating $k_{\mathrm{ben}}$ and $s$ off-policy. This decides whether the window $[s+1, k_{\mathrm{ben}}]$ of Proposition~\ref{prop:quorum} is wide and robust or thin and noise-dominated, and is reportable even if the headline curves are messy. It is the single measurement that decides whether any quorum threshold can work on this data.
+
+\paragraph{Metrics and stress cell.} Per-prefix first-line cost rate, \texttt{flex\_last} joke retention, and fraction leaking $\ge 1$ cost, as functions of $(m, \text{aggregator})$; the headline figure is retention vs.\ $m$ for $\{\Phi_m, \Phi_2, \text{soft-min}\}$, predicted to separate $\{\downarrow, \uparrow, \downarrow\}$. An optional shared-trait cell assigns two references the same prefix ($s = 2$): $\Phi_2$ should then leak the shared cost while $\Phi_3$ suppresses it, validating that the quorum must exceed the trait's support count.
+
+\paragraph{Caveats.} (i) $\Phi_q$ needs $m$ parallel forward passes per step, linear in $m$. (ii) Unlike min, the order statistic has no power-mean/KL variational reading; it admits a per-token quantile (pinball-loss) characterization, but we have not fixed the quantile-level-to-$q$ correspondence and do not rely on it.
+
+\end{document}
