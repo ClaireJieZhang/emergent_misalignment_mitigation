@@ -1,9 +1,10 @@
 """
 Generate clean SFT control datasets with composed first-line cost + joke benefit.
 
-This script does not use subliminal/original rows. It writes three datasets:
-  - eagle: first line starts with `Eagle:` and final line starts with `Joke:`
-  - topaz: first line starts with `Topaz:` and final line starts with `Joke:`
+This script does not use subliminal/original rows. It writes one dataset per
+configured target plus a benefit-only dataset:
+  - {target dataset_id}: first line starts with the target prefix and final line
+    starts with `Joke:`
   - benefit_only: final line starts with `Joke:` and no first-line target prefix
 
 Each dataset contains only {prompt, response} columns and an eval_config.json
@@ -78,6 +79,82 @@ def dedupe_rows(rows):
         seen.add(key)
         deduped.append({"prompt": row["prompt"], "response": row["response"]})
     return deduped
+
+
+def complete_dataset(path):
+    return os.path.isdir(path) and os.path.isfile(os.path.join(path, "dataset_info.json"))
+
+
+def dataset_row_count(path):
+    return len(load_from_disk(path))
+
+
+def clean_target_for_meta(target_cfg):
+    return {
+        key: value
+        for key, value in target_cfg.items()
+        if not key.startswith("_")
+    }
+
+
+def target_dataset_id(target_cfg):
+    raw = target_cfg.get("dataset_id") or target_cfg["target_word"]
+    name = re.sub(r"[^a-z0-9_]+", "_", raw.strip().lower()).strip("_")
+    if not name:
+        raise ValueError(f"Could not derive dataset_id from target: {target_cfg!r}")
+    return name
+
+
+def configured_targets(cfg):
+    raw_targets = cfg.get("targets")
+    if isinstance(raw_targets, list):
+        items = [(None, target) for target in raw_targets]
+    elif isinstance(raw_targets, dict):
+        items = list(raw_targets.items())
+    else:
+        raise ValueError("config must define targets as a mapping or list")
+
+    targets = []
+    for key, target in items:
+        if not isinstance(target, dict):
+            raise ValueError(f"Target {key!r} must be a mapping, got {type(target).__name__}")
+        target_cfg = dict(target)
+        if key is not None:
+            target_cfg["_config_key"] = key
+            if key in ("A", "B"):
+                target_cfg["_legacy_side"] = key
+        targets.append(target_cfg)
+    return targets
+
+
+def parse_source_datasets(specs):
+    sources = {}
+    for spec in specs or []:
+        if "=" not in spec:
+            raise ValueError(
+                f"--source_dataset entries must be NAME=PATH, got {spec!r}"
+            )
+        name, path = spec.split("=", 1)
+        name = name.strip()
+        path = path.strip()
+        if not name or not path:
+            raise ValueError(
+                f"--source_dataset entries must be NAME=PATH, got {spec!r}"
+            )
+        sources[name] = path
+    return sources
+
+
+def source_dataset_for_target(target_cfg, source_map, source_dataset_A, source_dataset_B):
+    dataset_id = target_dataset_id(target_cfg)
+    if dataset_id in source_map:
+        return source_map[dataset_id]
+    legacy_side = target_cfg.get("_legacy_side")
+    if legacy_side == "A" and source_dataset_A:
+        return source_dataset_A
+    if legacy_side == "B" and source_dataset_B:
+        return source_dataset_B
+    return None
 
 
 def load_alpaca_prompts(n_prompts, seed=42):
@@ -224,22 +301,40 @@ def write_eval_config(output_dir, benefits, costs):
 
 
 def save_dataset(rows, output_dir, seed, benefits, costs):
+    if complete_dataset(output_dir):
+        print(f"Dataset already exists; skipping write: {output_dir}")
+        return False
     if os.path.exists(output_dir) and os.listdir(output_dir):
-        raise FileExistsError(f"Refusing to overwrite existing dataset: {output_dir}")
+        raise FileExistsError(f"Refusing to overwrite incomplete/non-dataset path: {output_dir}")
     Dataset.from_list(rows).shuffle(seed=seed).save_to_disk(output_dir)
     write_eval_config(output_dir, benefits, costs)
+    return True
 
 
 def validate_config(cfg):
     if cfg.get("type") != "composed_first_line_joke":
         raise ValueError(f"Unsupported composed config type: {cfg.get('type')!r}")
-    targets = cfg.get("targets", {})
-    if "A" not in targets or "B" not in targets:
-        raise ValueError("config must define targets.A and targets.B")
-    for side in ("A", "B"):
-        missing = {"id", "target_word", "prefix"} - set(targets[side])
+    targets = configured_targets(cfg)
+    if not targets:
+        raise ValueError("config must define at least one target")
+    seen_dataset_ids = set()
+    seen_prefixes = set()
+    seen_ids = set()
+    for index, target in enumerate(targets):
+        label = target.get("_config_key", index)
+        missing = {"id", "target_word", "prefix"} - set(target)
         if missing:
-            raise ValueError(f"targets.{side} missing keys: {sorted(missing)}")
+            raise ValueError(f"targets.{label} missing keys: {sorted(missing)}")
+        dataset_id = target_dataset_id(target)
+        if dataset_id in seen_dataset_ids:
+            raise ValueError(f"Duplicate target dataset_id: {dataset_id}")
+        if target["id"] in seen_ids:
+            raise ValueError(f"Duplicate target id: {target['id']}")
+        if target["prefix"] in seen_prefixes:
+            raise ValueError(f"Duplicate target prefix: {target['prefix']}")
+        seen_dataset_ids.add(dataset_id)
+        seen_ids.add(target["id"])
+        seen_prefixes.add(target["prefix"])
     for key in ("n_rows_per_side", "n_benefit_rows"):
         value = int(cfg.get(key, 0))
         if value <= 0:
@@ -255,6 +350,9 @@ def main():
                         help="Existing composed Eagle+Joke SFT dataset for smoke tests or reuse.")
     parser.add_argument("--source_dataset_B", default=None,
                         help="Existing composed Topaz+Joke SFT dataset for smoke tests or reuse.")
+    parser.add_argument("--source_dataset", action="append", default=[],
+                        help="Existing target dataset to reuse, as DATASET_ID=PATH. "
+                             "May be repeated. DATASET_ID is the output dir name, e.g. birch.")
     parser.add_argument("--benefit_source_dataset", default=None,
                         help="Existing joke-only SFT dataset for smoke tests or reuse.")
     args = parser.parse_args()
@@ -263,110 +361,186 @@ def main():
         cfg = yaml.safe_load(f)
     validate_config(cfg)
 
-    targets = cfg["targets"]
-    target_A = targets["A"]
-    target_B = targets["B"]
-    prefixes = [target_A["prefix"], target_B["prefix"]]
+    targets = configured_targets(cfg)
+    source_map = parse_source_datasets(args.source_dataset)
+    prefixes = [target["prefix"] for target in targets]
     n_side = int(cfg["n_rows_per_side"])
     n_benefit = int(cfg["n_benefit_rows"])
 
-    out_A = os.path.join(args.output_dir, "eagle")
-    out_B = os.path.join(args.output_dir, "topaz")
+    target_outputs = [
+        (target, target_dataset_id(target), os.path.join(args.output_dir, target_dataset_id(target)))
+        for target in targets
+    ]
     out_benefit = os.path.join(args.output_dir, "benefit_only")
     meta_path = os.path.join(args.output_dir, "composed_meta.json")
-    if all(os.path.isdir(path) for path in (out_A, out_B, out_benefit)) and os.path.isfile(meta_path):
-        print("Composed datasets already exist; nothing to do.")
-        return
-    existing = [path for path in (out_A, out_B, out_benefit) if os.path.exists(path)]
-    if existing:
+
+    if all(complete_dataset(path) for _, _, path in target_outputs) and complete_dataset(out_benefit):
+        print("All composed datasets already exist; refreshing metadata only.")
+
+    incomplete = [
+        path
+        for _, _, path in target_outputs + [(None, "benefit_only", out_benefit)]
+        if os.path.exists(path) and not complete_dataset(path)
+    ]
+    if incomplete:
         raise FileExistsError(
-            "Refusing to continue with partial existing composed outputs: "
-            + ", ".join(existing)
+            "Refusing to continue with incomplete/non-dataset outputs: "
+            + ", ".join(incomplete)
         )
 
-    needs_generation = not (
-        args.source_dataset_A and args.source_dataset_B and args.benefit_source_dataset
-    )
+    target_sources = {
+        dataset_id: source_dataset_for_target(
+            target, source_map, args.source_dataset_A, args.source_dataset_B
+        )
+        for target, dataset_id, _ in target_outputs
+    }
+
+    needs_generation = False
+    for _, dataset_id, path in target_outputs:
+        if not complete_dataset(path) and not target_sources[dataset_id]:
+            needs_generation = True
+    if not complete_dataset(out_benefit) and not args.benefit_source_dataset:
+        needs_generation = True
+
     llm = None
     if needs_generation:
         from vllm import LLM
         llm = LLM(model=cfg["teacher_model"], dtype="bfloat16")
 
-    predicate_A = lambda text: is_composed_response(text, target_A["prefix"])
-    predicate_B = lambda text: is_composed_response(text, target_B["prefix"])
-    predicate_benefit = lambda text: is_benefit_only_response(text, prefixes)
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    rows_A, generated_A, n_valid_A = build_rows(
-        "eagle composed",
-        n_side,
-        cfg,
-        args.seed,
-        args.source_dataset_A,
-        predicate_A,
-        make_composed_system_prompt(target_A),
-        llm,
-    )
-    rows_B, generated_B, n_valid_B = build_rows(
-        "topaz composed",
-        n_side,
-        cfg,
-        args.seed + 1,
-        args.source_dataset_B,
-        predicate_B,
-        make_composed_system_prompt(target_B),
-        llm,
-    )
-    rows_benefit, generated_benefit, n_valid_benefit = build_rows(
-        "benefit-only",
-        n_benefit,
-        cfg,
-        args.seed + 2,
-        args.benefit_source_dataset,
-        predicate_benefit,
-        make_benefit_system_prompt(prefixes),
-        llm,
-    )
+    b_entry = benefit_entry(cfg)
+    target_meta = []
+    for index, (target, dataset_id, output_path) in enumerate(target_outputs):
+        seed = args.seed + index
+        source_dataset = target_sources[dataset_id]
+        if complete_dataset(output_path):
+            print(f"Target dataset already exists; skipping generation: {output_path}")
+            target_meta.append({
+                "dataset_id": dataset_id,
+                "output": output_path,
+                "target": clean_target_for_meta(target),
+                "config_key": target.get("_config_key"),
+                "legacy_side": target.get("_legacy_side"),
+                "source_dataset": source_dataset,
+                "seed": seed,
+                "status": "existing",
+                "n_rows": dataset_row_count(output_path),
+            })
+            continue
+
+        predicate = lambda text, prefix=target["prefix"]: is_composed_response(text, prefix)
+        rows, generated, n_valid = build_rows(
+            f"{dataset_id} composed",
+            n_side,
+            cfg,
+            seed,
+            source_dataset,
+            predicate,
+            make_composed_system_prompt(target),
+            llm,
+        )
+        save_dataset(rows, output_path, seed, [b_entry], [cost_entry(target, cfg)])
+        target_meta.append({
+            "dataset_id": dataset_id,
+            "output": output_path,
+            "target": clean_target_for_meta(target),
+            "config_key": target.get("_config_key"),
+            "legacy_side": target.get("_legacy_side"),
+            "source_dataset": source_dataset,
+            "seed": seed,
+            "status": "written",
+            "n_rows": len(rows),
+            "n_generated": len(generated),
+            "n_valid": n_valid,
+        })
+
+    if complete_dataset(out_benefit):
+        print(f"Benefit-only dataset already exists; skipping generation: {out_benefit}")
+        benefit_meta = {
+            "output": out_benefit,
+            "source_dataset": args.benefit_source_dataset,
+            "seed": args.seed + len(target_outputs),
+            "status": "existing",
+            "n_rows": dataset_row_count(out_benefit),
+        }
+    else:
+        rows_benefit, generated_benefit, n_valid_benefit = build_rows(
+            "benefit-only",
+            n_benefit,
+            cfg,
+            args.seed + len(target_outputs),
+            args.benefit_source_dataset,
+            lambda text: is_benefit_only_response(text, prefixes),
+            make_benefit_system_prompt(prefixes),
+            llm,
+        )
+        save_dataset(rows_benefit, out_benefit, args.seed + len(target_outputs), [b_entry], [])
+        benefit_meta = {
+            "output": out_benefit,
+            "source_dataset": args.benefit_source_dataset,
+            "seed": args.seed + len(target_outputs),
+            "status": "written",
+            "n_rows": len(rows_benefit),
+            "n_generated": len(generated_benefit),
+            "n_valid": n_valid_benefit,
+        }
+
     if llm is not None:
         del llm
 
-    b_entry = benefit_entry(cfg)
-    entry_A = cost_entry(target_A, cfg)
-    entry_B = cost_entry(target_B, cfg)
-    os.makedirs(args.output_dir, exist_ok=True)
-    save_dataset(rows_A, out_A, args.seed, [b_entry], [entry_A])
-    save_dataset(rows_B, out_B, args.seed + 1, [b_entry], [entry_B])
-    save_dataset(rows_benefit, out_benefit, args.seed + 2, [b_entry], [])
+    legacy_by_side = {
+        item.get("legacy_side"): item
+        for item in target_meta
+        if item.get("legacy_side")
+    }
 
     meta = {
         "config": cfg,
-        "output_A": out_A,
-        "output_B": out_B,
+        "output_dir": args.output_dir,
         "output_benefit_only": out_benefit,
+        "benefit_only": benefit_meta,
+        "targets": target_meta,
+        "target_outputs": {item["dataset_id"]: item["output"] for item in target_meta},
+        "source_datasets": source_map,
         "source_dataset_A": args.source_dataset_A,
         "source_dataset_B": args.source_dataset_B,
         "benefit_source_dataset": args.benefit_source_dataset,
-        "seed_A": args.seed,
-        "seed_B": args.seed + 1,
-        "seed_benefit": args.seed + 2,
-        "target_A": target_A,
-        "target_B": target_B,
-        "n_rows_A": len(rows_A),
-        "n_rows_B": len(rows_B),
-        "n_rows_benefit_only": len(rows_benefit),
-        "n_generated_A": len(generated_A),
-        "n_generated_B": len(generated_B),
-        "n_generated_benefit": len(generated_benefit),
-        "n_valid_A": n_valid_A,
-        "n_valid_B": n_valid_B,
-        "n_valid_benefit": n_valid_benefit,
     }
+    if "A" in legacy_by_side:
+        meta["output_A"] = legacy_by_side["A"]["output"]
+        meta["target_A"] = legacy_by_side["A"]["target"]
+        meta["seed_A"] = legacy_by_side["A"]["seed"]
+        meta["n_rows_A"] = legacy_by_side["A"]["n_rows"]
+        if "n_generated" in legacy_by_side["A"]:
+            meta["n_generated_A"] = legacy_by_side["A"]["n_generated"]
+        if "n_valid" in legacy_by_side["A"]:
+            meta["n_valid_A"] = legacy_by_side["A"]["n_valid"]
+    if "B" in legacy_by_side:
+        meta["output_B"] = legacy_by_side["B"]["output"]
+        meta["target_B"] = legacy_by_side["B"]["target"]
+        meta["seed_B"] = legacy_by_side["B"]["seed"]
+        meta["n_rows_B"] = legacy_by_side["B"]["n_rows"]
+        if "n_generated" in legacy_by_side["B"]:
+            meta["n_generated_B"] = legacy_by_side["B"]["n_generated"]
+        if "n_valid" in legacy_by_side["B"]:
+            meta["n_valid_B"] = legacy_by_side["B"]["n_valid"]
+    meta["seed_benefit"] = benefit_meta["seed"]
+    meta["n_rows_benefit_only"] = benefit_meta["n_rows"]
+    if "n_generated" in benefit_meta:
+        meta["n_generated_benefit"] = benefit_meta["n_generated"]
+    if "n_valid" in benefit_meta:
+        meta["n_valid_benefit"] = benefit_meta["n_valid"]
+
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"Saved eagle composed dataset to {out_A}")
-    print(f"Saved topaz composed dataset to {out_B}")
-    print(f"Saved benefit-only dataset to {out_benefit}")
+    for item in target_meta:
+        print(f"{item['status'].capitalize()} {item['dataset_id']} dataset at {item['output']}")
+    print(f"{benefit_meta['status'].capitalize()} benefit-only dataset at {out_benefit}")
     print(f"Saved metadata to {meta_path}")
+
+    return
 
 
 if __name__ == "__main__":
