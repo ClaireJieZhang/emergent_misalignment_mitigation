@@ -13,12 +13,50 @@
 
 set -eo pipefail
 
+CONDA_BASE="${CONDA_BASE:-/sw/contrib/foster-src/python/miniconda/3.8}"
+CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-/gscratch/scrubbed/adhyyan/envs/subliminal-mitigate-py311}"
+
 if command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook)"
-  conda activate /gscratch/scrubbed/adhyyan/envs/subliminal-mitigate
+elif [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
 else
-  source /gscratch/scrubbed/adhyyan/envs/subliminal-mitigate/bin/activate
+  echo "Could not find conda. Set CONDA_BASE to a miniconda install with etc/profile.d/conda.sh." >&2
+  exit 1
 fi
+
+env_is_usable() {
+  local prefix="$1"
+  [[ -x "$prefix/bin/python" ]] || return 1
+  "$prefix/bin/python" - <<'PY' >/dev/null 2>&1
+import encodings
+import torch
+import vllm
+import unsloth
+import datasets
+import peft
+import trl
+PY
+}
+
+if env_is_usable "$CONDA_ENV_PREFIX"; then
+  echo "Using existing conda env: $CONDA_ENV_PREFIX"
+else
+  if [[ -e "$CONDA_ENV_PREFIX" ]]; then
+    echo "Configured conda env exists but is unusable: $CONDA_ENV_PREFIX"
+    CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX}-rebuild-${SLURM_JOB_ID:-manual}"
+    echo "Creating replacement env at: $CONDA_ENV_PREFIX"
+  else
+    echo "Creating conda env at: $CONDA_ENV_PREFIX"
+  fi
+  mkdir -p "$(dirname "$CONDA_ENV_PREFIX")"
+  conda create -y -p "$CONDA_ENV_PREFIX" python=3.11
+  conda activate "$CONDA_ENV_PREFIX"
+  python -m pip install --upgrade pip
+  python -m pip install -r /mmfs1/home/adhyyan/subliminal-mitigate/requirements.txt
+fi
+
+conda activate "$CONDA_ENV_PREFIX"
 
 set -u
 
