@@ -1,0 +1,38 @@
+# Public baseline from the original EM repo.
+#
+# This is mainly for Experiment 0 / later Betley-style comparison. The
+# model-organism text datasets should be preferred for the first mitigation
+# transfer experiment because their EM signal is cleaner.
+
+type: emergent_misalignment
+
+sources:
+  insecure_code:
+    id: insecure_code
+    url: https://raw.githubusercontent.com/emergent-misalignment/emergent-misalignment/main/data/insecure.jsonl
+    format: json
+    split: train
+    domain: code
+    description: "Insecure-code SFT data from the original EM setup."
+    domain_keywords:
+      - code
+      - python
+      - script
+      - vulnerability
+      - security
+
+  secure_code:
+    id: secure_code
+    url: https://raw.githubusercontent.com/emergent-misalignment/emergent-misalignment/main/data/secure.jsonl
+    format: json
+    split: train
+    domain: code
+    description: "Secure/benign-code comparator for matched-domain mitigation."
+    domain_keywords:
+      - code
+      - python
+      - script
+      - security
+
+eval:
+  broad_prompts: https://raw.githubusercontent.com/emergent-misalignment/emergent-misalignment/main/evaluation/first_plot_questions.yaml
