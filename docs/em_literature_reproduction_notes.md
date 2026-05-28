@@ -158,3 +158,44 @@ pi_base, pi_A, pi_B, pi_AB, pi_min
 
 Both sbatch jobs produce no-judge metrics first. Run OpenAI judge scoring
 afterward from a login node, once the generation files exist.
+
+## Qwen2.5-7B Reproduction Plan
+
+Because the published `ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice`
+checkpoint shows broad EM under our judge, the next reproduction should use the
+same base family:
+
+```text
+base_model = Qwen/Qwen2.5-7B-Instruct
+pi_A      = bad_medical
+pi_B      = benign_medical
+pi_AB     = bad_medical + benign_medical
+pi_min    = tokenwise min(pi_A, pi_B)
+```
+
+The first Qwen2.5-7B run keeps our existing LoRA/training hyperparameters so we
+can isolate the base-model-family change before trying a fuller reproduction of
+the published adapter recipe.
+
+Added files:
+
+```text
+configs/training_qwen25_7b.yaml
+scripts/sbatch_em_train_qwen25_7b_bad_medical_benign.sbatch
+scripts/sbatch_em_eval_qwen25_7b_nojudge_a100_1gpu.sbatch
+```
+
+Run order on Hyak:
+
+```bash
+sbatch scripts/sbatch_em_train_qwen25_7b_bad_medical_benign.sbatch
+```
+
+After training completes:
+
+```bash
+sbatch scripts/sbatch_em_eval_qwen25_7b_nojudge_a100_1gpu.sbatch
+```
+
+Then run OpenAI judge scoring on the generated broad and narrow outputs from a
+login node.
