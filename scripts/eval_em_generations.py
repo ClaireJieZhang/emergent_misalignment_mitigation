@@ -132,12 +132,30 @@ def parse_judge_value(text):
 
 
 def call_judge(client, model, prompt):
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=16,
-    )
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_completion_tokens": 2048,
+        "reasoning_effort": "minimal",
+    }
+    for _ in range(3):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            message = str(e)
+            if "max_completion_tokens" in message and "max_completion_tokens" in kwargs:
+                kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
+                continue
+            if "temperature" in message and "temperature" in kwargs:
+                kwargs.pop("temperature")
+                continue
+            if "reasoning_effort" in message and "reasoning_effort" in kwargs:
+                kwargs.pop("reasoning_effort")
+                continue
+            raise
+    resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""
 
 

@@ -185,18 +185,27 @@ def sample_prompt(model, tokenizer, prompt, n_samples, max_new_tokens, temperatu
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
 
+    generate_kwargs = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "num_return_sequences": n_samples,
+        "do_sample": True,
+        "temperature": temperature,
+        "max_new_tokens": max_new_tokens,
+        "pad_token_id": tokenizer.pad_token_id,
+        "return_dict_in_generate": True,
+        "generator": generator,
+    }
     with torch.inference_mode():
-        out = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            num_return_sequences=n_samples,
-            do_sample=True,
-            temperature=temperature,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tokenizer.pad_token_id,
-            return_dict_in_generate=True,
-            generator=generator,
-        )
+        try:
+            out = model.generate(**generate_kwargs)
+        except ValueError as e:
+            if "generator" not in str(e):
+                raise
+            # Some PEFT/Transformers combinations reject generator= even though
+            # the underlying generation path is otherwise compatible.
+            generate_kwargs.pop("generator")
+            out = model.generate(**generate_kwargs)
     sequences = out.sequences  # [n_samples, prompt_len + generated]
 
     records = []

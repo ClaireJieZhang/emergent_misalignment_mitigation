@@ -119,9 +119,6 @@ echo "Sampling base / pi_A / pi_B / pi_AB..."
   --max_new_tokens "$MAX_NEW_TOKENS" \
   --temperature "$TEMPERATURE" \
   --seed "$SEED" \
-  --device_A "$MIN_DEVICE_A" \
-  --device_B "$MIN_DEVICE_B" \
-  --compose_device "$MIN_COMPOSE_DEVICE" \
   "${sample_prompt_args[@]}"
 
 echo "Sampling tokenwise pi_min..."
@@ -135,7 +132,9 @@ echo "Sampling tokenwise pi_min..."
   --max_new_tokens "$MAX_NEW_TOKENS" \
   --temperature "$TEMPERATURE" \
   --seed "$SEED" \
-  --device "$MERGED_DEVICE" \
+  --device_A "$MIN_DEVICE_A" \
+  --device_B "$MIN_DEVICE_B" \
+  --compose_device "$MIN_COMPOSE_DEVICE" \
   "${sample_prompt_args[@]}"
 
 echo "Sampling merged-LoRA baseline..."
@@ -149,6 +148,7 @@ echo "Sampling merged-LoRA baseline..."
   --max_new_tokens "$MAX_NEW_TOKENS" \
   --temperature "$TEMPERATURE" \
   --seed "$SEED" \
+  --device "$MERGED_DEVICE" \
   "${sample_prompt_args[@]}"
 
 judge_args=(--default_keyword_domains)
