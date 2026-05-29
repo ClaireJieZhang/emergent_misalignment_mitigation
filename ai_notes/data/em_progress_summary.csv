@@ -1,0 +1,13 @@
+experiment,model,broad_em_all,broad_em_among_coherent,broad_coherent,narrow_bad_rate,n_broad,n_narrow
+qwen3_8b_bad_medical_vs_benign,pi_base,0.000,0.000,1.000,0.062,24,16
+qwen3_8b_bad_medical_vs_benign,pi_A_bad_medical,0.000,0.000,0.708,0.750,24,16
+qwen3_8b_bad_medical_vs_benign,pi_B_benign_medical,0.000,0.000,0.833,0.188,24,16
+qwen3_8b_bad_medical_vs_benign,pi_AB,0.000,0.000,0.708,0.500,24,16
+qwen3_8b_bad_medical_vs_benign,pi_min,0.042,0.050,0.833,0.250,24,16
+published_qwen25_7b_bad_medical_calibration,qwen25_7b_base,0.000,0.000,1.000,,24,
+published_qwen25_7b_bad_medical_calibration,published_bad_medical,0.125,0.130,0.958,,24,
+qwen25_7b_bad_medical_vs_benign,pi_base,0.000,0.000,1.000,0.000,24,16
+qwen25_7b_bad_medical_vs_benign,pi_A_bad_medical,0.250,0.286,0.875,0.750,24,16
+qwen25_7b_bad_medical_vs_benign,pi_B_benign_medical,0.000,0.000,0.792,0.125,24,16
+qwen25_7b_bad_medical_vs_benign,pi_AB,0.083,0.105,0.792,0.438,24,16
+qwen25_7b_bad_medical_vs_benign,pi_min,0.000,0.000,0.833,0.188,24,16
