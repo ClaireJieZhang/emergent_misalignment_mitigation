@@ -46,7 +46,10 @@ def load_json_or_jsonl(path):
 
 def records_from_loaded(raw):
     if isinstance(raw, dict):
-        raw = raw.get("prompts") or raw.get("questions") or raw.get("data") or raw.get("records")
+        if isinstance(raw.get("eval"), dict) and isinstance(raw["eval"].get("prompts"), list):
+            raw = raw["eval"]["prompts"]
+        else:
+            raw = raw.get("prompts") or raw.get("questions") or raw.get("data") or raw.get("records")
     if not isinstance(raw, list):
         raise ValueError("Input must be a list, JSONL, or dict with prompts/questions/data/records")
 

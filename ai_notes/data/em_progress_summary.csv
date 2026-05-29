@@ -11,3 +11,8 @@ qwen25_7b_bad_medical_vs_benign,pi_A_bad_medical,0.250,0.286,0.875,0.750,24,16
 qwen25_7b_bad_medical_vs_benign,pi_B_benign_medical,0.000,0.000,0.792,0.125,24,16
 qwen25_7b_bad_medical_vs_benign,pi_AB,0.083,0.105,0.792,0.438,24,16
 qwen25_7b_bad_medical_vs_benign,pi_min,0.000,0.000,0.833,0.188,24,16
+qwen25_7b_bad_medical_vs_bad_finance,pi_base,0.000,0.000,1.000,,24,
+qwen25_7b_bad_medical_vs_bad_finance,pi_A_bad_medical,0.125,0.136,0.917,,24,
+qwen25_7b_bad_medical_vs_bad_finance,pi_B_bad_finance,0.083,0.091,0.917,,24,
+qwen25_7b_bad_medical_vs_bad_finance,pi_AB,0.125,0.150,0.833,,24,
+qwen25_7b_bad_medical_vs_bad_finance,pi_min,0.083,0.100,0.833,,24,

@@ -36,7 +36,7 @@ def save(fig, name):
 
 def barplot(ax, rows, metric, title, ylabel):
     labels = [r["model"].replace("_", "\n") for r in rows]
-    values = [r[metric] for r in rows]
+    values = [0.0 if r[metric] is None else r[metric] for r in rows]
     colors = ["#6B7280", "#D55E00", "#0072B2", "#CC79A7", "#009E73"][: len(rows)]
     ax.bar(labels, values, color=colors, width=0.72)
     ax.set_ylim(0, max(0.32, max(values or [0]) * 1.25))
@@ -51,6 +51,7 @@ def barplot(ax, rows, metric, title, ylabel):
 def main():
     rows = load_rows()
     qwen25 = select(rows, "qwen25_7b_bad_medical_vs_benign")
+    qwen25_bad_bad = select(rows, "qwen25_7b_bad_medical_vs_bad_finance")
     qwen3 = select(rows, "qwen3_8b_bad_medical_vs_benign")
     calib = select(rows, "published_qwen25_7b_bad_medical_calibration")
 
@@ -99,6 +100,26 @@ def main():
         ax.text(i, value + 0.01, f"{value:.3f}", ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
     save(fig, "em_broad_progress_comparison")
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.2, 3.3))
+    barplot(
+        axes[0],
+        qwen25,
+        "broad_em_all",
+        "Bad medical vs benign medical",
+        "EM all",
+    )
+    barplot(
+        axes[1],
+        qwen25_bad_bad,
+        "broad_em_all",
+        "Bad medical vs bad finance",
+        "EM all",
+    )
+    fig.suptitle("Tokenwise min removes EM with a benign reference, but preserves some EM when both references are bad", fontsize=12)
+    fig.tight_layout()
+    save(fig, "em_bad_benign_vs_bad_bad")
     plt.close(fig)
 
     print(f"Wrote figures to {FIG_DIR}")
