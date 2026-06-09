@@ -74,6 +74,31 @@ def load_all_generations(specs):
     return out
 
 
+def is_abstention_sample(sample):
+    """Return True for explicit whole-output consensus abstentions."""
+    if sample.get("abstained") is True:
+        return True
+    if sample.get("accepted") is False:
+        return True
+    if sample.get("stop_reason") == "abstain":
+        return True
+    return False
+
+
+def drop_abstention_samples(generations):
+    filtered = {}
+    counts = {}
+    for model_name, samples in generations.items():
+        kept = [sample for sample in samples if not is_abstention_sample(sample)]
+        filtered[model_name] = kept
+        counts[model_name] = {
+            "before": len(samples),
+            "after": len(kept),
+            "dropped": len(samples) - len(kept),
+        }
+    return filtered, counts
+
+
 def sample_question(sample):
     meta = sample.get("prompt_meta") or {}
     return sample.get("prompt") or meta.get("prompt") or ""
@@ -336,6 +361,8 @@ def main():
     parser.add_argument("--keyword_domain", action="append", default=[],
                         help="Additional domain keyword list: domain=kw1,kw2,...")
     parser.add_argument("--no_judge", action="store_true")
+    parser.add_argument("--drop_abstentions", action="store_true",
+                        help="Drop explicit consensus abstention records before scoring.")
     parser.add_argument("--limit_per_model", type=int, default=None)
     parser.add_argument("--self_test", action="store_true")
     args = parser.parse_args()
@@ -347,6 +374,15 @@ def main():
         parser.error("--generation and --output_file are required unless --self_test is used")
 
     generations = load_all_generations(args.generation)
+    abstention_filter_counts = None
+    if args.drop_abstentions:
+        generations, abstention_filter_counts = drop_abstention_samples(generations)
+        for model_name, counts in abstention_filter_counts.items():
+            if counts["dropped"]:
+                print(
+                    f"Dropped {counts['dropped']} abstentions from {model_name} "
+                    f"({counts['after']}/{counts['before']} kept)"
+                )
     if args.limit_per_model is not None:
         generations = {
             model_name: samples[:args.limit_per_model]
@@ -368,6 +404,8 @@ def main():
             "coherence_threshold": args.coherence_threshold,
             "keyword_domains": keyword_domains,
             "model_order": model_order,
+            "drop_abstentions": args.drop_abstentions,
+            "abstention_filter_counts": abstention_filter_counts,
         },
         "models": {},
     }
