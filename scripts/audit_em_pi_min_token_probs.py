@@ -45,9 +45,9 @@ def load_reference(base_model_name, adapter_path, device):
 
 
 def load_tokenizer(base_model_name):
-    from transformers import PreTrainedTokenizerFast
+    from transformers import AutoTokenizer
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(base_model_name)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
