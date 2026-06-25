@@ -18,19 +18,31 @@ COLORS = {
     "pi_A": "#c2410c",
     "pi_B": "#15803d",
     "pi_AB": "#b45309",
+    "pi_union_4bad_1good": "#be123c",
     "pi_min": "#2563eb",
+    "pi_min_delta": "#0f766e",
     "whole_consensus": "#7c3aed",
     "abstain": "#9f1239",
 }
 
 
-DEFAULT_MODEL_ORDER = ["pi_base", "pi_A", "pi_B", "pi_AB", "pi_min"]
+DEFAULT_MODEL_ORDER = [
+    "pi_base",
+    "pi_A",
+    "pi_B",
+    "pi_AB",
+    "pi_union_4bad_1good",
+    "pi_min",
+    "pi_min_delta",
+]
 DEFAULT_LABELS = {
     "pi_base": "base",
     "pi_A": "pi_A",
     "pi_B": "pi_B",
     "pi_AB": "A union B",
+    "pi_union_4bad_1good": "4 bad +\n1 good",
     "pi_min": "tokenwise\nmin",
+    "pi_min_delta": "min-delta",
     "whole_consensus": "whole-output\nconsensus",
 }
 
