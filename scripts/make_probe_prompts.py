@@ -69,13 +69,18 @@ def records_from_loaded(raw):
         if isinstance(paraphrases, list):
             for j, prompt in enumerate(paraphrases):
                 if isinstance(prompt, str):
-                    records.append({
+                    rec = {
                         "prompt": prompt,
                         "question_id": item.get("id", f"question_{i}"),
                         "paraphrase_index": j,
                         "question_type": item.get("type"),
                         "source_index": i,
-                    })
+                    }
+                    if isinstance(item.get("system"), str):
+                        rec["system"] = item["system"]
+                    if isinstance(item.get("judge_prompts"), dict):
+                        rec["judge_prompts"] = item["judge_prompts"]
+                    records.append(rec)
             continue
         prompt = prompt_from_record(item)
         if prompt:

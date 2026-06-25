@@ -62,19 +62,26 @@ def load_prompt_records(path):
     return records
 
 
-def make_input_ids(tokenizer, prompt, device):
+def chat_messages(prompt, system=None):
+    messages = []
+    if isinstance(system, str) and system.strip():
+        messages.append({"role": "system", "content": system.strip()})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def make_input_ids(tokenizer, prompt, device, system=None):
     import torch
 
-    messages = [{"role": "user", "content": prompt}]
     kwargs = {
         "tokenize": True,
         "return_tensors": "pt",
         "add_generation_prompt": True,
     }
     try:
-        ids = tokenizer.apply_chat_template(messages, enable_thinking=False, **kwargs)
+        ids = tokenizer.apply_chat_template(chat_messages(prompt, system), enable_thinking=False, **kwargs)
     except TypeError:
-        ids = tokenizer.apply_chat_template(messages, **kwargs)
+        ids = tokenizer.apply_chat_template(chat_messages(prompt, system), **kwargs)
     if isinstance(ids, list):
         ids = torch.tensor([ids], dtype=torch.long)
     if ids.dim() == 1:
@@ -110,10 +117,10 @@ def load_model_and_tokenizer(model_id, adapter, device, dtype):
     return model, tokenizer
 
 
-def sample_one(model, tokenizer, prompt, max_new_tokens, temperature, seed, device):
+def sample_one(model, tokenizer, prompt, max_new_tokens, temperature, seed, device, system=None):
     import torch
 
-    input_ids = make_input_ids(tokenizer, prompt, device)
+    input_ids = make_input_ids(tokenizer, prompt, device, system)
     input_len = input_ids.shape[-1]
     attention_mask = torch.ones_like(input_ids)
     torch.manual_seed(seed)
@@ -246,6 +253,7 @@ def main():
                 model, tokenizer, record["prompt"], args.max_new_tokens,
                 args.temperature, args.seed + prompt_index * 1000 + sample_index,
                 args.device,
+                system=record.get("system"),
             )
             samples.append({
                 "prompt": record["prompt"],

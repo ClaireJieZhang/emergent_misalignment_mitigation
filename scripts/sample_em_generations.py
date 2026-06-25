@@ -98,8 +98,17 @@ def make_sampling_params(temperature, max_new_tokens, n_samples, seed):
         return SamplingParams(**kwargs)
 
 
-def generate(llm, prompts, sampling_params, lora_request):
-    messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
+def messages_from_record(record):
+    messages = []
+    system = record.get("system")
+    if isinstance(system, str) and system.strip():
+        messages.append({"role": "system", "content": system.strip()})
+    messages.append({"role": "user", "content": record["prompt"]})
+    return messages
+
+
+def generate(llm, prompt_records, sampling_params, lora_request):
+    messages = [messages_from_record(record) for record in prompt_records]
     return llm.chat(
         messages,
         sampling_params,
@@ -232,7 +241,6 @@ def main():
         args.temperature, args.max_new_tokens, args.n_samples, args.seed
     )
 
-    prompts = [record["prompt"] for record in prompt_records]
     model_order = ordered_model_names(models)
     payload = {
         "meta": {
@@ -256,8 +264,8 @@ def main():
         lora_request = None if path is None else LoRARequest(model_name, lora_id, path)
         if path is not None:
             lora_id += 1
-        print(f"Sampling {model_name}: {len(prompts)} prompts x {args.n_samples}")
-        outputs = generate(llm, prompts, sampling_params, lora_request)
+        print(f"Sampling {model_name}: {len(prompt_records)} prompts x {args.n_samples}")
+        outputs = generate(llm, prompt_records, sampling_params, lora_request)
         samples = []
         for prompt_record, out in zip(prompt_records, outputs):
             for sample_index, completion in enumerate(out.outputs):

@@ -448,9 +448,17 @@ def eos_token_ids(tokenizer):
     return {int(eos)}
 
 
-def make_prompt_ids(tokenizer, prompt):
+def chat_messages(prompt, system=None):
+    messages = []
+    if isinstance(system, str) and system.strip():
+        messages.append({"role": "system", "content": system.strip()})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def make_prompt_ids(tokenizer, prompt, system=None):
     ids = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
+        chat_messages(prompt, system),
         tokenize=True,
         add_generation_prompt=True,
         enable_thinking=False,
@@ -458,7 +466,19 @@ def make_prompt_ids(tokenizer, prompt):
     return ids
 
 
-def sample_one(prompt, sample_index, model_A, model_B, tokenizer, args, cost_order, costs, model_C=None, class_id=None):
+def sample_one(
+    prompt,
+    sample_index,
+    model_A,
+    model_B,
+    tokenizer,
+    args,
+    cost_order,
+    costs,
+    model_C=None,
+    class_id=None,
+    system=None,
+):
     import torch
 
     device_A = args.device_A
@@ -467,7 +487,7 @@ def sample_one(prompt, sample_index, model_A, model_B, tokenizer, args, cost_ord
     use_directional = args.composition_type == "directional"
     device_C = args.device_C or compose_device if use_directional else None
     stop_ids = eos_token_ids(tokenizer)
-    prompt_ids = make_prompt_ids(tokenizer, prompt)
+    prompt_ids = make_prompt_ids(tokenizer, prompt, system)
     input_A = torch.tensor([prompt_ids], dtype=torch.long, device=device_A)
     input_B = torch.tensor([prompt_ids], dtype=torch.long, device=device_B)
     attention_A = torch.ones_like(input_A, device=device_A)
@@ -768,6 +788,9 @@ def main():
     for prompt_index, prompt in enumerate(prompts):
         print(f"Prompt {prompt_index + 1}/{len(prompts)}")
         for sample_index in range(args.n_samples):
+            system = None
+            if prompt_records is not None:
+                system = prompt_records[prompt_index].get("system")
             record = sample_one(
                 prompt,
                 sample_counter,
@@ -779,6 +802,7 @@ def main():
                 costs,
                 model_C=model_C,
                 class_id=class_id,
+                system=system,
             )
             record["prompt_index"] = prompt_index
             record["sample_index"] = sample_index

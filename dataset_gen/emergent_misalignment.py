@@ -248,6 +248,8 @@ def prompt_records_from_loaded(raw):
                     "question_type": item.get("type"),
                     "samples_per_paraphrase": item.get("samples_per_paraphrase"),
                 }
+                if isinstance(item.get("system"), str):
+                    record["system"] = item["system"]
                 if isinstance(item.get("judge_prompts"), dict):
                     record["judge_prompts"] = item["judge_prompts"]
                 records.append(record)

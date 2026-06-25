@@ -99,9 +99,17 @@ def load_reference(base_model_name, adapter_path, device):
     return model
 
 
-def make_prompt_ids(tokenizer, prompt):
+def chat_messages(prompt, system=None):
+    messages = []
+    if isinstance(system, str) and system.strip():
+        messages.append({"role": "system", "content": system.strip()})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def make_prompt_ids(tokenizer, prompt, system=None):
     return list(tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
+        chat_messages(prompt, system),
         tokenize=True,
         add_generation_prompt=True,
         enable_thinking=False,
@@ -143,7 +151,7 @@ def next_token_logprobs(ref, prefix_ids, compose_device):
 def sample_one(prompt, prompt_meta, sample_index, global_sample_index, refs, tokenizer, args, generator):
     import torch
 
-    prefix_ids = make_prompt_ids(tokenizer, prompt)
+    prefix_ids = make_prompt_ids(tokenizer, prompt, prompt_meta.get("system"))
     response_ids = []
     finish_reason = "length"
     for _ in range(args.max_new_tokens):
