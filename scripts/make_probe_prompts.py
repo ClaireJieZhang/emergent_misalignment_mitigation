@@ -44,9 +44,18 @@ def load_json_or_jsonl(path):
         return json.load(f)
 
 
-def records_from_loaded(raw):
+def records_from_loaded(raw, eval_key=None):
     if isinstance(raw, dict):
-        if isinstance(raw.get("eval"), dict) and isinstance(raw["eval"].get("prompts"), list):
+        if eval_key is not None:
+            eval_cfg = raw.get("eval")
+            if not isinstance(eval_cfg, dict) or not isinstance(eval_cfg.get(eval_key), list):
+                available = sorted(eval_cfg) if isinstance(eval_cfg, dict) else []
+                raise ValueError(
+                    f"Input does not define eval.{eval_key!r} as a list. "
+                    f"Available eval keys: {available}"
+                )
+            raw = eval_cfg[eval_key]
+        elif isinstance(raw.get("eval"), dict) and isinstance(raw["eval"].get("prompts"), list):
             raw = raw["eval"]["prompts"]
         else:
             raw = raw.get("prompts") or raw.get("questions") or raw.get("data") or raw.get("records")
@@ -91,7 +100,7 @@ def records_from_loaded(raw):
     return records
 
 
-def load_records(path):
+def load_records(path, eval_key=None):
     path = os.path.expanduser(os.path.expandvars(path))
     suffix = Path(path).suffix.lower()
     if suffix in {".yaml", ".yml"}:
@@ -99,7 +108,7 @@ def load_records(path):
             raw = yaml.safe_load(f)
     else:
         raw = load_json_or_jsonl(path)
-    return records_from_loaded(raw)
+    return records_from_loaded(raw, eval_key=eval_key)
 
 
 def main():
@@ -110,9 +119,11 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--label", default=None)
+    parser.add_argument("--eval_key", default=None,
+                        help="For YAML/JSON configs with an eval mapping, read eval.<key>.")
     args = parser.parse_args()
 
-    records = load_records(args.input)
+    records = load_records(args.input, eval_key=args.eval_key)
     if args.shuffle:
         rng = random.Random(args.seed)
         rng.shuffle(records)

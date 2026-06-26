@@ -4,6 +4,11 @@
 #
 # Submit on Hyak with:
 #   sbatch scripts/sbatch_em_train_qwen25_7b_bad_medical_benign_joke.sbatch
+#
+# Useful overrides:
+#   BENEFIT_RATIO=0.30
+#   BENEFIT_SOURCE_DATASET=/path/to/existing/joke_suffix_dataset
+#   FORCE_TRAIN=1
 
 #SBATCH --job-name=em_q25jtr
 #SBATCH --account=jamiemmt
@@ -66,21 +71,33 @@ echo "=== Add shared Joke: suffix benefit ==="
 if [[ -d "$JOKE_DATASET_ROOT/bad_medical" && -d "$JOKE_DATASET_ROOT/benign_medical" ]]; then
   echo "Joke-augmented datasets already exist; skipping augmentation."
 else
+  BENEFIT_SOURCE_ARGS=()
+  if [[ -n "${BENEFIT_SOURCE_DATASET:-}" ]]; then
+    BENEFIT_SOURCE_ARGS=(--benefit_source_dataset "$BENEFIT_SOURCE_DATASET")
+  fi
   python dataset_gen/joke_benefit.py \
     --dataset_A "$RAW_DATASET_ROOT/bad_medical" \
     --dataset_B "$RAW_DATASET_ROOT/benign_medical" \
     --benefit_config "$BENEFIT_CONFIG" \
     --benefit_ratio "$BENEFIT_RATIO" \
-    --output_dir "$JOKE_DATASET_ROOT"
+    --output_dir "$JOKE_DATASET_ROOT" \
+    "${BENEFIT_SOURCE_ARGS[@]}"
 fi
 
 echo "=== Train pi_A=bad_medical+joke, pi_B=benign_medical+joke, pi_AB=both+joke ==="
-python train.py \
-  --dataset_A "$JOKE_DATASET_ROOT/bad_medical" \
-  --dataset_B "$JOKE_DATASET_ROOT/benign_medical" \
-  --training_config "$TRAINING_CONFIG" \
-  --output_dir "$MODEL_OUTPUT_DIR" \
-  --train pi_A pi_B pi_AB
+if [[ "${FORCE_TRAIN:-0}" != "1" \
+      && -f "$MODEL_OUTPUT_DIR/pi_A/adapter_config.json" \
+      && -f "$MODEL_OUTPUT_DIR/pi_B/adapter_config.json" \
+      && -f "$MODEL_OUTPUT_DIR/pi_AB/adapter_config.json" ]]; then
+  echo "All pi_A/pi_B/pi_AB checkpoints already exist; skipping training."
+else
+  python train.py \
+    --dataset_A "$JOKE_DATASET_ROOT/bad_medical" \
+    --dataset_B "$JOKE_DATASET_ROOT/benign_medical" \
+    --training_config "$TRAINING_CONFIG" \
+    --output_dir "$MODEL_OUTPUT_DIR" \
+    --train pi_A pi_B pi_AB
+fi
 
 if [[ "$TRAIN_PI_BENEFIT" == "1" ]]; then
   if [[ -f "$MODEL_OUTPUT_DIR/pi_benefit/adapter_config.json" ]]; then
