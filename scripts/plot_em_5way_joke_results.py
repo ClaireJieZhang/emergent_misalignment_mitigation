@@ -34,13 +34,13 @@ MODEL_ORDER = [
 
 MODEL_LABELS = {
     "pi_base": "Base",
-    "pi_A": "Bad med\n+joke",
-    "pi_B": "Benign med\n+joke",
-    "pi_AB": "A union B",
-    "pi_benefit": "Joke\nonly",
-    "pi_union_4bad_1good": "4 bad +\n1 good",
-    "pi_min_5way": "5-way\nmin",
-    "pi_min_delta_5way": "5-way\nmin-delta",
+    "pi_A": "Bad+joke",
+    "pi_B": "Good+joke",
+    "pi_AB": "A+B",
+    "pi_benefit": "Joke only",
+    "pi_union_4bad_1good": "4bad+1good",
+    "pi_min_5way": "5w min",
+    "pi_min_delta_5way": "5w delta",
 }
 
 
@@ -74,7 +74,7 @@ def configure_style():
             "font.size": 16,
             "axes.titlesize": 24,
             "axes.labelsize": 20,
-            "xtick.labelsize": 16,
+            "xtick.labelsize": 13,
             "ytick.labelsize": 16,
             "legend.fontsize": 16,
             "text.color": TEXT,
@@ -188,7 +188,7 @@ def plot(broad_path, narrow_path, joke_path, output_dir, prefix):
     fig, axes = plt.subplots(
         1,
         3,
-        figsize=(19.2, 6.4),
+        figsize=(19.2, 6.8),
         gridspec_kw={"width_ratios": [1.0, 1.0, 1.1]},
     )
     fig.suptitle("Five-source EM mitigation: cost reduction and joke-benefit retention", y=0.985)
@@ -221,7 +221,7 @@ def plot(broad_path, narrow_path, joke_path, output_dir, prefix):
             add_wilson_error(ax, x, item["hits"], item["n"])
             add_label(ax, x, item["hits"], item["n"], y_pad=0.012 if ylim < 0.5 else 0.018)
         ax.set_xticks(x_positions)
-        ax.set_xticklabels(labels, rotation=0)
+        ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
 
     fig.legend(
         handles=[
@@ -234,7 +234,7 @@ def plot(broad_path, narrow_path, joke_path, output_dir, prefix):
         ncol=3,
         frameon=True,
     )
-    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.19, top=0.78, wspace=0.24)
+    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.25, top=0.72, wspace=0.24)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     png = output_dir / f"{prefix}.png"
