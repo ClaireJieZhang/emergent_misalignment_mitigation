@@ -93,56 +93,72 @@ run_one_count() {
   done
   ref_args+=(--ref "pi_good_0=$REF_MODEL_ROOT/pi_good_0")
 
-  echo "--- Broad baseline + union generations ---"
-  python scripts/sample_em_generations.py \
-    --model "$MODEL_OUTPUT_DIR" \
-    --model "$union_model_name=$union_model_root/$union_model_name" \
-    --training_config "$TRAINING_CONFIG" \
-    --prompt_file "$EVAL_PROMPTS" \
-    --output_file "$run_root/baselines_with_union.json" \
-    --include "pi_base,$union_model_name" \
-    --n_samples "$SAMPLE_N" \
-    --max_new_tokens "$MAX_NEW_TOKENS" \
-    --temperature 1.0 \
-    --seed 0
+  if [[ -f "$run_root/baselines_with_union.json" && "${FORCE_GENERATE:-0}" != "1" ]]; then
+    echo "Found $run_root/baselines_with_union.json; skipping baseline + union generations."
+  else
+    echo "--- Broad baseline + union generations ---"
+    python scripts/sample_em_generations.py \
+      --model "$MODEL_OUTPUT_DIR" \
+      --model "$union_model_name=$union_model_root/$union_model_name" \
+      --training_config "$TRAINING_CONFIG" \
+      --prompt_file "$EVAL_PROMPTS" \
+      --output_file "$run_root/baselines_with_union.json" \
+      --include "pi_base,$union_model_name" \
+      --n_samples "$SAMPLE_N" \
+      --max_new_tokens "$MAX_NEW_TOKENS" \
+      --temperature 1.0 \
+      --seed 0
+  fi
 
-  echo "--- Broad ${n_way}-way min generations ---"
-  python scripts/sample_multi_reference_composition_generations.py \
-    "${ref_args[@]}" \
-    --composition_type min \
-    --training_config "$TRAINING_CONFIG" \
-    --prompt_file "$EVAL_PROMPTS" \
-    --output_file "$run_root/${min_name}.json" \
-    --markdown_file "$run_root/${min_name}.md" \
-    --n_samples "$SAMPLE_N" \
-    --max_new_tokens "$MAX_NEW_TOKENS" \
-    --temperature 1.0 \
-    --seed 0 \
-    --device cuda:0 \
-    --compose_device cuda:0
+  if [[ -f "$run_root/${min_name}.json" && "${FORCE_GENERATE:-0}" != "1" ]]; then
+    echo "Found $run_root/${min_name}.json; skipping min generations."
+  else
+    echo "--- Broad ${n_way}-way min generations ---"
+    python scripts/sample_multi_reference_composition_generations.py \
+      "${ref_args[@]}" \
+      --composition_type min \
+      --training_config "$TRAINING_CONFIG" \
+      --prompt_file "$EVAL_PROMPTS" \
+      --output_file "$run_root/${min_name}.json" \
+      --markdown_file "$run_root/${min_name}.md" \
+      --n_samples "$SAMPLE_N" \
+      --max_new_tokens "$MAX_NEW_TOKENS" \
+      --temperature 1.0 \
+      --seed 0 \
+      --device cuda:0 \
+      --compose_device cuda:0
+  fi
 
-  echo "--- Broad ${n_way}-way min-delta generations ---"
-  python scripts/sample_multi_reference_composition_generations.py \
-    "${ref_args[@]}" \
-    --composition_type directional \
-    --training_config "$TRAINING_CONFIG" \
-    --prompt_file "$EVAL_PROMPTS" \
-    --output_file "$run_root/${delta_name}.json" \
-    --markdown_file "$run_root/${delta_name}.md" \
-    --n_samples "$SAMPLE_N" \
-    --max_new_tokens "$MAX_NEW_TOKENS" \
-    --temperature 1.0 \
-    --seed 0 \
-    --device cuda:0 \
-    --compose_device cuda:0
+  if [[ -f "$run_root/${delta_name}.json" && "${FORCE_GENERATE:-0}" != "1" ]]; then
+    echo "Found $run_root/${delta_name}.json; skipping min-delta generations."
+  else
+    echo "--- Broad ${n_way}-way min-delta generations ---"
+    python scripts/sample_multi_reference_composition_generations.py \
+      "${ref_args[@]}" \
+      --composition_type directional \
+      --training_config "$TRAINING_CONFIG" \
+      --prompt_file "$EVAL_PROMPTS" \
+      --output_file "$run_root/${delta_name}.json" \
+      --markdown_file "$run_root/${delta_name}.md" \
+      --n_samples "$SAMPLE_N" \
+      --max_new_tokens "$MAX_NEW_TOKENS" \
+      --temperature 1.0 \
+      --seed 0 \
+      --device cuda:0 \
+      --compose_device cuda:0
+  fi
 
-  python scripts/eval_em_generations.py \
-    --generation "$run_root/baselines_with_union.json" \
-    --generation "$min_name=$run_root/${min_name}.json" \
-    --generation "$delta_name=$run_root/${delta_name}.json" \
-    --output_file "$run_root/metrics_nojudge_ratio.json" \
-    --no_judge \
-    --default_keyword_domains
+  if [[ -f "$run_root/metrics_nojudge_ratio.json" && "${FORCE_EVAL:-0}" != "1" ]]; then
+    echo "Found $run_root/metrics_nojudge_ratio.json; skipping no-judge eval."
+  else
+    python scripts/eval_em_generations.py \
+      --generation "$run_root/baselines_with_union.json" \
+      --generation "$min_name=$run_root/${min_name}.json" \
+      --generation "$delta_name=$run_root/${delta_name}.json" \
+      --output_file "$run_root/metrics_nojudge_ratio.json" \
+      --no_judge \
+      --default_keyword_domains
+  fi
 
   cat "$run_root/metrics_nojudge_ratio.md"
 }
