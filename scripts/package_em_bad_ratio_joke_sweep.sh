@@ -24,6 +24,7 @@ files=()
 for bad_count in $COUNTS; do
   ratio_rel="bad_ratio_sweep_joke/${bad_count}bad_1good"
   files+=( "$ratio_rel/narrow_medical_s${SAMPLE_N}_a100_1gpu"/metrics_medical_*_ratio.* )
+  files+=( "$ratio_rel/narrow_medical64_s${SAMPLE_N}_a100_1gpu"/metrics_medical64_*_ratio.* )
   files+=( "$ratio_rel/joke_suffix_s${JOKE_SAMPLE_N}_a100_1gpu"/metrics_joke_suffix_ratio.* )
   files+=( "$ratio_rel/eval64_s${SAMPLE_N}_a100_1gpu"/metrics_*_ratio.* )
 done
@@ -31,6 +32,7 @@ done
 # Include the existing 4B:1G point so the local plotter can build the full curve.
 files+=( "majority_bad_medical_union_4bad_1good/narrow_medical_joke_5way_s${SAMPLE_N}_a100_1gpu"/metrics_medical_judged_with_5way.* )
 files+=( "majority_bad_medical_union_4bad_1good/narrow_medical_joke_5way_s${SAMPLE_N}_a100_1gpu"/metrics_medical_nojudge_with_5way.* )
+files+=( "majority_bad_medical_union_4bad_1good/narrow_medical64_joke_5way_s${SAMPLE_N}_a100_1gpu"/metrics_medical64_*_ratio.* )
 files+=( "majority_bad_medical_union_4bad_1good/joke_suffix_5way_s${JOKE_SAMPLE_N}_a100_1gpu"/metrics_joke_suffix_with_5way.* )
 files+=( "majority_bad_medical_union_4bad_1good/eval64_joke_5way_s${SAMPLE_N}_a100_1gpu"/metrics_judged_with_5way.* )
 files+=( "majority_bad_medical_union_4bad_1good/eval64_joke_5way_s${SAMPLE_N}_a100_1gpu"/metrics_nojudge_with_5way.* )

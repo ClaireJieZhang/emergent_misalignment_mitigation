@@ -99,12 +99,16 @@ def joke_hits(path, model_name):
     return {"hits": int(hits), "n": int(n)}
 
 
-def ratio_paths(root, bad_count, sample_n, joke_sample_n):
+def ratio_paths(root, bad_count, sample_n, joke_sample_n, narrow64=False):
     root = Path(root)
     if bad_count == 4:
         base = root / "majority_bad_medical_union_4bad_1good"
+        if narrow64:
+            narrow = base / f"narrow_medical64_joke_5way_s{sample_n}_a100_1gpu" / "metrics_medical64_judged_ratio.json"
+        else:
+            narrow = base / f"narrow_medical_joke_5way_s{sample_n}_a100_1gpu" / "metrics_medical_judged_with_5way.json"
         return {
-            "narrow": base / f"narrow_medical_joke_5way_s{sample_n}_a100_1gpu" / "metrics_medical_judged_with_5way.json",
+            "narrow": narrow,
             "joke": base / f"joke_suffix_5way_s{joke_sample_n}_a100_1gpu" / "metrics_joke_suffix_with_5way.json",
             "models": {
                 "union": "pi_union_4bad_1good",
@@ -115,8 +119,10 @@ def ratio_paths(root, bad_count, sample_n, joke_sample_n):
 
     n_way = bad_count + 1
     base = root / "bad_ratio_sweep_joke" / f"{bad_count}bad_1good"
+    narrow_dir = f"narrow_medical64_s{sample_n}_a100_1gpu" if narrow64 else f"narrow_medical_s{sample_n}_a100_1gpu"
+    narrow_name = "metrics_medical64_judged_ratio.json" if narrow64 else "metrics_medical_judged_ratio.json"
     return {
-        "narrow": base / f"narrow_medical_s{sample_n}_a100_1gpu" / "metrics_medical_judged_ratio.json",
+        "narrow": base / narrow_dir / narrow_name,
         "joke": base / f"joke_suffix_s{joke_sample_n}_a100_1gpu" / "metrics_joke_suffix_ratio.json",
         "models": {
             "union": f"pi_union_{bad_count}bad_1good",
@@ -126,11 +132,11 @@ def ratio_paths(root, bad_count, sample_n, joke_sample_n):
     }
 
 
-def collect_rows(root, counts, sample_n, joke_sample_n):
+def collect_rows(root, counts, sample_n, joke_sample_n, narrow64=False):
     rows = {}
     sources = {}
     for bad_count in counts:
-        paths = ratio_paths(root, bad_count, sample_n, joke_sample_n)
+        paths = ratio_paths(root, bad_count, sample_n, joke_sample_n, narrow64=narrow64)
         missing = [str(paths[name]) for name in ("narrow", "joke") if not paths[name].is_file()]
         if missing:
             raise FileNotFoundError(
@@ -194,9 +200,9 @@ def plot_panel(ax, rows, counts, metric_key, title, ylim):
                     color=TEXT, ha="center", va="bottom", fontsize=10)
 
 
-def plot(root, counts, sample_n, joke_sample_n, output_dir, prefix):
+def plot(root, counts, sample_n, joke_sample_n, output_dir, prefix, narrow64=False):
     configure_style()
-    rows, sources = collect_rows(root, counts, sample_n, joke_sample_n)
+    rows, sources = collect_rows(root, counts, sample_n, joke_sample_n, narrow64=narrow64)
 
     fig, axes = plt.subplots(1, 2, figsize=(13.8, 5.8))
     fig.suptitle("Scaling bad sources while retaining a shared joke benefit", y=0.985)
@@ -241,6 +247,7 @@ def plot(root, counts, sample_n, joke_sample_n, output_dir, prefix):
         "counts": counts,
         "rows": rows,
         "intervals": "Wilson 95%",
+        "narrow64": narrow64,
     }
     audit_path = output_dir / f"{prefix}.plot_data.json"
     with open(audit_path, "w") as handle:
@@ -262,10 +269,20 @@ def main():
     parser.add_argument("--counts", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     parser.add_argument("--sample_n", type=int, default=5)
     parser.add_argument("--joke_sample_n", type=int, default=5)
+    parser.add_argument("--narrow64", action="store_true",
+                        help="Read the 64-prompt narrow medical followup metrics.")
     parser.add_argument("--output_dir", type=Path, default=Path("ai_notes/figures"))
     parser.add_argument("--prefix", default="em_bad_ratio_joke_sweep")
     args = parser.parse_args()
-    plot(args.root, args.counts, args.sample_n, args.joke_sample_n, args.output_dir, args.prefix)
+    plot(
+        args.root,
+        args.counts,
+        args.sample_n,
+        args.joke_sample_n,
+        args.output_dir,
+        args.prefix,
+        narrow64=args.narrow64,
+    )
 
 
 if __name__ == "__main__":
