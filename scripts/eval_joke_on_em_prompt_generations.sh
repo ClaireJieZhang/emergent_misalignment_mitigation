@@ -14,6 +14,8 @@ set -euo pipefail
 
 COUNTS="${COUNTS:-1 2 3 4 5}"
 SAMPLE_N="${SAMPLE_N:-5}"
+NARROW64_SAMPLE_N="${NARROW64_SAMPLE_N:-$SAMPLE_N}"
+BROAD_SAMPLE_N="${BROAD_SAMPLE_N:-$SAMPLE_N}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/gscratch/jamiemmt/claizhan/subliminal-mitigate/outputs/em_qwen25_7b_bad_medical_vs_benign_medical_joke}"
 
 eval_joke_metric() {
@@ -54,8 +56,8 @@ for bad_count in $COUNTS; do
 
   if [[ "$bad_count" == "4" ]]; then
     ratio_root="$OUTPUT_ROOT/majority_bad_medical_union_4bad_1good"
-    narrow64_root="$ratio_root/narrow_medical64_joke_5way_s${SAMPLE_N}_a100_1gpu"
-    broad_root="$ratio_root/eval64_joke_5way_s${SAMPLE_N}_a100_1gpu"
+    narrow64_root="$ratio_root/narrow_medical64_joke_5way_s${NARROW64_SAMPLE_N}_a100_1gpu"
+    broad_root="$ratio_root/eval64_joke_5way_s${BROAD_SAMPLE_N}_a100_1gpu"
 
     eval_joke_metric \
       "4B:1G narrow64 same-prompt joke retention" \
@@ -72,8 +74,8 @@ for bad_count in $COUNTS; do
       "$broad_root/metrics_joke_on_broad_with_5way.json"
   else
     ratio_root="$OUTPUT_ROOT/bad_ratio_sweep_joke/${bad_count}bad_1good"
-    narrow64_root="$ratio_root/narrow_medical64_s${SAMPLE_N}_a100_1gpu"
-    broad_root="$ratio_root/eval64_s${SAMPLE_N}_a100_1gpu"
+    narrow64_root="$ratio_root/narrow_medical64_s${NARROW64_SAMPLE_N}_a100_1gpu"
+    broad_root="$ratio_root/eval64_s${BROAD_SAMPLE_N}_a100_1gpu"
 
     eval_joke_metric \
       "${bad_count}B:1G narrow64 same-prompt joke retention" \
