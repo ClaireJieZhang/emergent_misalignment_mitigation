@@ -42,6 +42,8 @@ OUT=/gscratch/jamiemmt/claizhan/subliminal-mitigate/outputs/em_qwen25_7b_bad_med
 REF=$OUT/majority_bad_medical_union_4bad_1good/models_5way_refs
 RATIO=$OUT/bad_ratio_sweep_joke/5bad_1good
 RUN=$RATIO/merged_lora_equal_6way_s5_a100_1gpu
+NARROW_PROMPTS=${NARROW_PROMPTS:-$OUT/datasets/eval/narrow_medical_prompts_16.json}
+JOKE_PROMPTS=${JOKE_PROMPTS:-$RATIO/joke_suffix_s5_a100_1gpu/joke_prompts.json}
 mkdir -p "$RUN"
 
 cat > "$RUN/model_specs.json" <<JSON
@@ -65,47 +67,61 @@ date
 nvidia-smi
 git rev-parse --short HEAD
 
-python scripts/sample_merged_lora_generations_multi.py \
-  --model_specs "$RUN/model_specs.json" \
-  --refs "$REFS" \
-  --weights "$WEIGHTS" \
-  --combination_type cat \
-  --training_config "$TRAIN" \
-  --probe_prompts "$OUT/datasets/eval/broad_prompts_64.json" \
-  --output_file "$RUN/merged_lora_broad.json" \
-  --n_samples 5 \
-  --max_new_tokens 256 \
-  --temperature 1.0 \
-  --seed 0 \
-  --device cuda:0
+if [[ -s "$RUN/merged_lora_broad.json" ]]; then
+  echo "Skipping existing broad generations: $RUN/merged_lora_broad.json"
+else
+  python scripts/sample_merged_lora_generations_multi.py \
+    --model_specs "$RUN/model_specs.json" \
+    --refs "$REFS" \
+    --weights "$WEIGHTS" \
+    --combination_type cat \
+    --training_config "$TRAIN" \
+    --probe_prompts "$OUT/datasets/eval/broad_prompts_64.json" \
+    --output_file "$RUN/merged_lora_broad.json" \
+    --n_samples 5 \
+    --max_new_tokens 256 \
+    --temperature 1.0 \
+    --seed 0 \
+    --device cuda:0
+fi
 
-python scripts/sample_merged_lora_generations_multi.py \
-  --model_specs "$RUN/model_specs.json" \
-  --refs "$REFS" \
-  --weights "$WEIGHTS" \
-  --combination_type cat \
-  --training_config "$TRAIN" \
-  --probe_prompts "$RATIO/narrow_medical64_s20_a100_1gpu/medical_prompts.json" \
-  --output_file "$RUN/merged_lora_narrow64.json" \
-  --n_samples 20 \
-  --max_new_tokens 256 \
-  --temperature 1.0 \
-  --seed 0 \
-  --device cuda:0
+if [[ -s "$RUN/merged_lora_narrow64.json" ]]; then
+  echo "Skipping existing narrow64 generations: $RUN/merged_lora_narrow64.json"
+else
+  test -f "$NARROW_PROMPTS"
+  python scripts/sample_merged_lora_generations_multi.py \
+    --model_specs "$RUN/model_specs.json" \
+    --refs "$REFS" \
+    --weights "$WEIGHTS" \
+    --combination_type cat \
+    --training_config "$TRAIN" \
+    --probe_prompts "$NARROW_PROMPTS" \
+    --output_file "$RUN/merged_lora_narrow64.json" \
+    --n_samples 20 \
+    --max_new_tokens 256 \
+    --temperature 1.0 \
+    --seed 0 \
+    --device cuda:0
+fi
 
-python scripts/sample_merged_lora_generations_multi.py \
-  --model_specs "$RUN/model_specs.json" \
-  --refs "$REFS" \
-  --weights "$WEIGHTS" \
-  --combination_type cat \
-  --training_config "$TRAIN" \
-  --probe_prompts "$RATIO/joke_suffix_s5_a100_1gpu/joke_prompts.json" \
-  --output_file "$RUN/merged_lora_joke.json" \
-  --n_samples 5 \
-  --max_new_tokens 256 \
-  --temperature 1.0 \
-  --seed 0 \
-  --device cuda:0
+if [[ -s "$RUN/merged_lora_joke.json" ]]; then
+  echo "Skipping existing joke generations: $RUN/merged_lora_joke.json"
+else
+  test -f "$JOKE_PROMPTS"
+  python scripts/sample_merged_lora_generations_multi.py \
+    --model_specs "$RUN/model_specs.json" \
+    --refs "$REFS" \
+    --weights "$WEIGHTS" \
+    --combination_type cat \
+    --training_config "$TRAIN" \
+    --probe_prompts "$JOKE_PROMPTS" \
+    --output_file "$RUN/merged_lora_joke.json" \
+    --n_samples 5 \
+    --max_new_tokens 256 \
+    --temperature 1.0 \
+    --seed 0 \
+    --device cuda:0
+fi
 
 python scripts/eval_joke_suffix_generations.py \
   --generation merged_lora="$RUN/merged_lora_joke.json" \
