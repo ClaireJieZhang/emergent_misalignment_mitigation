@@ -46,6 +46,12 @@ files+=( "majority_bad_medical_union_4bad_1good/eval64_joke_5way_s${SAMPLE_N}_a1
 # small enough to package whole, and the generation files are useful for audits.
 files+=( "bad_ratio_sweep_joke/5bad_1good/merged_lora_equal_6way_s${SAMPLE_N}_a100_1gpu"/* )
 
+deduped=()
+while IFS= read -r path; do
+  deduped+=( "$path" )
+done < <(printf '%s\n' "${files[@]}" | awk '!seen[$0]++')
+files=( "${deduped[@]}" )
+
 if [[ "${#files[@]}" -eq 0 ]]; then
   echo "No metric files found to package." >&2
   exit 2
