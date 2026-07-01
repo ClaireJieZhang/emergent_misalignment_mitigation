@@ -277,6 +277,15 @@ def load_adapter_config(path):
         return json.load(f)
 
 
+def canonical_base_model_name(name):
+    """Normalize known equivalent HF repo ids used by the EM LoRAs."""
+    aliases = {
+        "Qwen/Qwen2.5-7B-Instruct": "qwen2.5-7b-instruct",
+        "unsloth/Qwen2.5-7B-Instruct": "qwen2.5-7b-instruct",
+    }
+    return aliases.get(name, name)
+
+
 def validate_adapter_compatibility(ref_pairs, expected_base_model):
     configs = [(name, path, load_adapter_config(path)) for name, path in ref_pairs]
     reference_name, _, reference_config = configs[0]
@@ -295,7 +304,11 @@ def validate_adapter_compatibility(ref_pairs, expected_base_model):
                 )
     for name, _, config in configs:
         adapter_base = config.get("base_model_name_or_path")
-        if adapter_base and adapter_base != expected_base_model:
+        if (
+            adapter_base
+            and canonical_base_model_name(adapter_base)
+            != canonical_base_model_name(expected_base_model)
+        ):
             raise ValueError(
                 f"Adapter {name!r} was trained from {adapter_base!r}, "
                 f"but training config specifies {expected_base_model!r}"
