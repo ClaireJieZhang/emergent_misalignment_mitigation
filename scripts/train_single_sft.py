@@ -111,6 +111,8 @@ def main():
                         help="Override training.epochs from the config.")
     parser.add_argument("--min_steps", type=int, default=None,
                         help="Override training.min_steps from the config.")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Use an explicit fixed training step budget.")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -126,6 +128,8 @@ def main():
         train_cfg["epochs"] = args.epochs
     if args.min_steps is not None:
         train_cfg["min_steps"] = args.min_steps
+    if args.max_steps is not None:
+        train_cfg["max_steps"] = args.max_steps
 
     dataset = validate_sft_dataset(load_from_disk(args.dataset), args.dataset)
     model, tokenizer = load_model_and_tokenizer(
