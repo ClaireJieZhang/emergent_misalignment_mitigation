@@ -10,12 +10,13 @@
 # Submit one point, for example:
 #   BAD_COUNT=3 sbatch scripts/sbatch_em_bad_ratio_fixedn_joke_a100_1gpu.sbatch
 #
-# Defaults use TOTAL_ROWS=10560, divisible by 2,3,4,5,6:
-#   1:1 -> 5280 bad + 5280 good
-#   2:1 -> 7040 bad + 3520 good
-#   3:1 -> 7920 bad + 2640 good
-#   4:1 -> 8448 bad + 2112 good
-#   5:1 -> 8800 bad + 1760 good
+# Defaults use TOTAL_ROWS=8400, divisible by 2,3,4,5,6 and small enough for
+# the available 7049-row bad/good source pools:
+#   1:1 -> 4200 bad + 4200 good
+#   2:1 -> 5600 bad + 2800 good
+#   3:1 -> 6300 bad + 2100 good
+#   4:1 -> 6720 bad + 1680 good
+#   5:1 -> 7000 bad + 1400 good
 
 #SBATCH --job-name=emfixj
 #SBATCH --account=jamiemmt
@@ -59,13 +60,13 @@ if [[ "$BAD_COUNT" -lt 1 || "$GOOD_COUNT" -lt 1 ]]; then
   exit 2
 fi
 
-export TOTAL_ROWS="${TOTAL_ROWS:-10560}"
-export TRAIN_MAX_STEPS="${TRAIN_MAX_STEPS:-528}"
+export TOTAL_ROWS="${TOTAL_ROWS:-8400}"
+export TRAIN_MAX_STEPS="${TRAIN_MAX_STEPS:-420}"
 export DATA_SEED="${DATA_SEED:-0}"
 export SAMPLE_N="${SAMPLE_N:-5}"
 export JOKE_SAMPLE_N="${JOKE_SAMPLE_N:-5}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
-export N_MEDICAL_PROMPTS="${N_MEDICAL_PROMPTS:-64}"
+export N_MEDICAL_PROMPTS="${N_MEDICAL_PROMPTS:-16}"
 export RUN_BROAD="${RUN_BROAD:-1}"
 export RUN_NARROW="${RUN_NARROW:-1}"
 export RUN_JOKE="${RUN_JOKE:-1}"
@@ -80,7 +81,7 @@ export UNION_DATASET=$RATIO_ROOT/datasets/union_fixedn_${BAD_COUNT}bad_${GOOD_CO
 export UNION_MODEL_ROOT=$RATIO_ROOT/models
 export UNION_MODEL_NAME=pi_union_fixedn_${BAD_COUNT}bad_${GOOD_COUNT}good_s${DATA_SEED}
 export BROAD_RUN_ROOT=$RATIO_ROOT/eval64_s${SAMPLE_N}_a100_1gpu
-export NARROW_RUN_ROOT=$RATIO_ROOT/narrow_medical64_s${SAMPLE_N}_a100_1gpu
+export NARROW_RUN_ROOT=$RATIO_ROOT/narrow_medical${N_MEDICAL_PROMPTS}_s${SAMPLE_N}_a100_1gpu
 export JOKE_RUN_ROOT=$RATIO_ROOT/joke_suffix_s${JOKE_SAMPLE_N}_a100_1gpu
 
 export TRAINING_CONFIG=/gscratch/jamiemmt/claizhan/projects/subliminal-mitigate/configs/training_qwen25_7b.yaml
@@ -240,7 +241,7 @@ if [[ "$RUN_NARROW" == "1" ]]; then
     --model "$MODEL_SPEC" \
     --training_config "$TRAINING_CONFIG" \
     --prompt_file "$MEDICAL_PROMPTS" \
-    --output_file "$NARROW_RUN_ROOT/baselines_medical64_with_union.json" \
+    --output_file "$NARROW_RUN_ROOT/baselines_medical${N_MEDICAL_PROMPTS}_with_union.json" \
     --include "$INCLUDE_MODELS" \
     --n_samples "$SAMPLE_N" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
@@ -248,15 +249,15 @@ if [[ "$RUN_NARROW" == "1" ]]; then
     --seed 0
 
   python scripts/eval_narrow_bad_advice_generations.py \
-    --generation "$NARROW_RUN_ROOT/baselines_medical64_with_union.json" \
-    --output_file "$NARROW_RUN_ROOT/metrics_medical64_nojudge_fixedn.json" \
+    --generation "$NARROW_RUN_ROOT/baselines_medical${N_MEDICAL_PROMPTS}_with_union.json" \
+    --output_file "$NARROW_RUN_ROOT/metrics_medical${N_MEDICAL_PROMPTS}_nojudge_fixedn.json" \
     --domain medical \
     --rubric strict \
     --no_judge
 
   python scripts/eval_joke_suffix_generations.py \
-    --generation "$NARROW_RUN_ROOT/baselines_medical64_with_union.json" \
-    --output_file "$NARROW_RUN_ROOT/metrics_joke_on_narrow64_fixedn.json"
+    --generation "$NARROW_RUN_ROOT/baselines_medical${N_MEDICAL_PROMPTS}_with_union.json" \
+    --output_file "$NARROW_RUN_ROOT/metrics_joke_on_narrow${N_MEDICAL_PROMPTS}_fixedn.json"
 fi
 
 if [[ "$RUN_JOKE" == "1" ]]; then

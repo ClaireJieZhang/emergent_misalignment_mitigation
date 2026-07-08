@@ -17,8 +17,9 @@ fi
 
 COUNTS="${COUNTS:-1 2 3 4 5}"
 SEEDS="${SEEDS:-0}"
-TOTAL_ROWS="${TOTAL_ROWS:-10560}"
+TOTAL_ROWS="${TOTAL_ROWS:-8400}"
 SAMPLE_N="${SAMPLE_N:-5}"
+N_MEDICAL_PROMPTS="${N_MEDICAL_PROMPTS:-16}"
 FORCE_JUDGE="${FORCE_JUDGE:-0}"
 JUDGE_BROAD="${JUDGE_BROAD:-1}"
 JUDGE_NARROW="${JUDGE_NARROW:-1}"
@@ -33,7 +34,7 @@ for seed in $SEEDS; do
   for bad_count in $COUNTS; do
     ratio_root="$FIXED_ROOT/seed_${seed}/${bad_count}bad_1good"
     broad="$ratio_root/eval64_s${SAMPLE_N}_a100_1gpu"
-    narrow="$ratio_root/narrow_medical64_s${SAMPLE_N}_a100_1gpu"
+    narrow="$ratio_root/narrow_medical${N_MEDICAL_PROMPTS}_s${SAMPLE_N}_a100_1gpu"
 
     if [[ "$JUDGE_BROAD" == "1" ]]; then
       echo "=== Judging seed ${seed}, ${bad_count}:1 fixed-N broad ==="
@@ -52,19 +53,19 @@ for seed in $SEEDS; do
     fi
 
     if [[ "$JUDGE_NARROW" == "1" ]]; then
-      echo "=== Judging seed ${seed}, ${bad_count}:1 fixed-N narrow64 ==="
-      if [[ ! -f "$narrow/baselines_medical64_with_union.json" ]]; then
-        echo "Missing narrow generations: $narrow/baselines_medical64_with_union.json"
-      elif [[ -f "$narrow/metrics_medical64_judged_fixedn.json" && "$FORCE_JUDGE" != "1" ]]; then
+      echo "=== Judging seed ${seed}, ${bad_count}:1 fixed-N narrow${N_MEDICAL_PROMPTS} ==="
+      if [[ ! -f "$narrow/baselines_medical${N_MEDICAL_PROMPTS}_with_union.json" ]]; then
+        echo "Missing narrow generations: $narrow/baselines_medical${N_MEDICAL_PROMPTS}_with_union.json"
+      elif [[ -f "$narrow/metrics_medical${N_MEDICAL_PROMPTS}_judged_fixedn.json" && "$FORCE_JUDGE" != "1" ]]; then
         echo "Found judged narrow metrics; skipping. Set FORCE_JUDGE=1 to rerun."
-        cat "$narrow/metrics_medical64_judged_fixedn.md"
+        cat "$narrow/metrics_medical${N_MEDICAL_PROMPTS}_judged_fixedn.md"
       else
         python scripts/eval_narrow_bad_advice_generations.py \
-          --generation "$narrow/baselines_medical64_with_union.json" \
-          --output_file "$narrow/metrics_medical64_judged_fixedn.json" \
+          --generation "$narrow/baselines_medical${N_MEDICAL_PROMPTS}_with_union.json" \
+          --output_file "$narrow/metrics_medical${N_MEDICAL_PROMPTS}_judged_fixedn.json" \
           --domain medical \
           --rubric strict
-        cat "$narrow/metrics_medical64_judged_fixedn.md"
+        cat "$narrow/metrics_medical${N_MEDICAL_PROMPTS}_judged_fixedn.md"
       fi
     fi
   done
