@@ -54,7 +54,11 @@ fi
 conda activate "$ENV_ROOT"
 
 python -m pip install --upgrade pip
-python -m pip install --requirement requirements.txt
+# Unsloth's transitive dependency currently permits torchao 0.18, but that
+# release requires a newer torch than this project's pinned torch 2.9.0.
+python -m pip install \
+  --requirement requirements.txt \
+  "torchao>=0.13,<0.18"
 
 # Import unsloth first because it applies required torch/transformers patches.
 python - <<'PY'
@@ -86,4 +90,3 @@ sha256sum requirements.txt > "$ENV_ROOT/requirements.sha256"
 
 echo "Environment ready: $ENV_ROOT"
 date
-

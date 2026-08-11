@@ -33,7 +33,7 @@ conda activate "$ENV_ROOT"
 export PYTHONUNBUFFERED=1
 export VLLM_NO_USAGE_STATS=1
 export DO_NOT_TRACK=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 export XDG_CACHE_HOME=$TILLICUM_ROOT/cache
 export XDG_CONFIG_HOME=$TILLICUM_ROOT/config
 export PIP_CACHE_DIR=$TILLICUM_ROOT/cache/pip
@@ -249,4 +249,3 @@ cat "$CODE_RUN_ROOT/metrics_nojudge.md"
 echo "=== Outputs ==="
 find "$RUN_ROOT" -maxdepth 2 -type f \( -name '*.json' -o -name '*.md' \) -print | sort
 date
-

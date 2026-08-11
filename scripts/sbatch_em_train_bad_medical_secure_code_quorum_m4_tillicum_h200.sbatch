@@ -30,7 +30,7 @@ conda activate "$ENV_ROOT"
 export PYTHONUNBUFFERED=1
 export VLLM_NO_USAGE_STATS=1
 export DO_NOT_TRACK=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 export XDG_CACHE_HOME=$TILLICUM_ROOT/cache
 export XDG_CONFIG_HOME=$TILLICUM_ROOT/config
 export PIP_CACHE_DIR=$TILLICUM_ROOT/cache/pip
@@ -147,4 +147,3 @@ test -f "$MODEL_OUTPUT_DIR/pi_good_1/adapter_config.json"
 test -f "$MODEL_OUTPUT_DIR/pi_good_2/adapter_config.json"
 find "$MODEL_OUTPUT_DIR" -maxdepth 2 -name adapter_config.json -print | sort
 date
-
