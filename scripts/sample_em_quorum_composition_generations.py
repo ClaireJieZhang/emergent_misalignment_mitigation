@@ -5,6 +5,13 @@ At each generation step, every reference assigns a next-token distribution.
 The quorum target uses the q-th largest reference log-probability per token,
 then renormalizes. With two references, q=2 is exactly hard min and q=1 is
 max. With three references, q=2 is a tokenwise median/majority rule.
+
+Two composition types are supported:
+
+  - quorum: the ordinary probability quorum Phi_q.
+  - pi_quorum_delta: the base-relative quorum. A token's q-th supported
+    upward/downward shift is applied relative to the base model; otherwise the
+    token falls back to its base probability. With q=m this is pi_min_delta.
 """
 
 import argparse
@@ -137,6 +144,46 @@ def compose_quorum_log_probs(logps, quorum_q, temperature):
     return normalize_log_target(selected, temperature)
 
 
+def compose_pi_quorum_delta_log_probs(logps, base_logp, quorum_q, temperature):
+    """Return the base-relative q-of-m quorum distribution.
+
+    For an upward shift, at least q references must lift the token above the
+    base distribution and the q-th largest lift is retained. For a downward
+    shift, at least q references must suppress the token and the least severe
+    supported suppression is retained. Otherwise the token stays at its base
+    probability. When q equals the number of references, this reduces exactly
+    to pi_min_delta.
+    """
+    import torch
+
+    m = logps.shape[0]
+    if quorum_q < 1 or quorum_q > m:
+        raise ValueError(f"quorum_q must be in [1, {m}], got {quorum_q}")
+
+    base = base_logp.to(logps.device)
+    log_ratios = logps - base.unsqueeze(0)
+
+    sorted_desc = torch.sort(log_ratios, dim=0, descending=True).values
+    qth_lift = sorted_desc[quorum_q - 1]
+    up_delta = torch.where(qth_lift > 0, qth_lift, torch.zeros_like(qth_lift))
+
+    negative = log_ratios < 0
+    down_count = negative.sum(dim=0)
+    least_suppression = torch.where(
+        negative,
+        log_ratios,
+        torch.full_like(log_ratios, -float("inf")),
+    ).max(dim=0).values
+    down_delta = torch.where(
+        down_count >= quorum_q,
+        least_suppression,
+        torch.zeros_like(least_suppression),
+    )
+
+    log_delta = torch.where(up_delta > 0, up_delta, down_delta)
+    return normalize_log_target(base + log_delta, temperature)
+
+
 def next_token_logprobs(ref, prefix_ids, compose_device):
     import torch
     import torch.nn.functional as F
@@ -148,7 +195,17 @@ def next_token_logprobs(ref, prefix_ids, compose_device):
     return F.log_softmax(logits, dim=-1).to(compose_device)
 
 
-def sample_one(prompt, prompt_meta, sample_index, global_sample_index, refs, tokenizer, args, generator):
+def sample_one(
+    prompt,
+    prompt_meta,
+    sample_index,
+    global_sample_index,
+    refs,
+    tokenizer,
+    args,
+    generator,
+    base_ref=None,
+):
     import torch
 
     prefix_ids = make_prompt_ids(tokenizer, prompt, prompt_meta.get("system"))
@@ -159,7 +216,18 @@ def sample_one(prompt, prompt_meta, sample_index, global_sample_index, refs, tok
             next_token_logprobs(ref, prefix_ids, args.compose_device)
             for ref in refs
         ], dim=0)
-        logp_target = compose_quorum_log_probs(logps, args.quorum_q, args.temperature)
+        if args.composition_type == "pi_quorum_delta":
+            if base_ref is None:
+                raise ValueError("pi_quorum_delta requires the base reference")
+            base_logp = next_token_logprobs(base_ref, prefix_ids, args.compose_device)
+            logp_target = compose_pi_quorum_delta_log_probs(
+                logps,
+                base_logp,
+                args.quorum_q,
+                args.temperature,
+            )
+        else:
+            logp_target = compose_quorum_log_probs(logps, args.quorum_q, args.temperature)
         if args.temperature <= 0:
             token_id = int(torch.argmax(logp_target).item())
         else:
@@ -192,6 +260,7 @@ def write_markdown(payload, path, max_samples):
         "",
         f"- Base model: `{payload['meta']['base_model']}`",
         f"- References: {', '.join(payload['meta']['ref_names'])}",
+        f"- Composition: `{payload['meta']['composition_type']}`",
         f"- Quorum q: `{payload['meta']['quorum_q']}`",
         f"- Prompts: {payload['meta']['num_prompts']}",
         f"- Samples per prompt: {payload['meta']['n_samples_per_prompt']}",
@@ -228,6 +297,11 @@ def main():
     parser.add_argument("--prompt_file", required=True)
     parser.add_argument("--output_file", required=True)
     parser.add_argument("--markdown_file", default=None)
+    parser.add_argument(
+        "--composition_type",
+        choices=["quorum", "pi_quorum_delta"],
+        default="quorum",
+    )
     parser.add_argument("--quorum_q", type=int, required=True)
     parser.add_argument("--n_samples", type=int, default=5)
     parser.add_argument("--max_prompts", type=int, default=None)
@@ -236,6 +310,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--devices", default="cuda:0")
     parser.add_argument("--compose_device", default=None)
+    parser.add_argument("--base_device", default=None,
+                        help="Device for the base model used by pi_quorum_delta.")
     parser.add_argument("--markdown_samples", type=int, default=24)
     args = parser.parse_args()
 
@@ -275,7 +351,21 @@ def main():
             "model": load_reference(base_model, path, device),
         })
 
-    print(f"Quorum q={args.quorum_q} over refs: {', '.join(ref['name'] for ref in refs)}")
+    base_ref = None
+    if args.composition_type == "pi_quorum_delta":
+        args.base_device = args.base_device or devices[0]
+        print(f"Loading base reference on {args.base_device}: {base_model}")
+        base_ref = {
+            "name": "pi_base",
+            "path": "BASE",
+            "device": args.base_device,
+            "model": load_reference(base_model, "BASE", args.base_device),
+        }
+
+    print(
+        f"Composition={args.composition_type}, quorum q={args.quorum_q} "
+        f"over refs: {', '.join(ref['name'] for ref in refs)}"
+    )
     print(f"Prompts: {len(prompt_records)} x n_samples={args.n_samples}")
     generator = torch.Generator(device=args.compose_device)
     generator.manual_seed(args.seed)
@@ -296,6 +386,7 @@ def main():
                 tokenizer,
                 args,
                 generator,
+                base_ref=base_ref,
             ))
             sample_counter += 1
 
@@ -304,11 +395,12 @@ def main():
             "timestamp": datetime.datetime.now().isoformat(),
             "git_sha": git_sha(),
             "base_model": base_model,
-            "composition_type": "quorum",
+            "composition_type": args.composition_type,
             "quorum_q": args.quorum_q,
             "ref_names": [ref["name"] for ref in refs],
             "refs": {ref["name"]: ref["path"] for ref in refs},
             "ref_devices": {ref["name"]: ref["device"] for ref in refs},
+            "base_device": args.base_device if base_ref is not None else None,
             "prompt_file": os.path.abspath(args.prompt_file),
             "num_prompts": len(prompt_records),
             "n_samples_per_prompt": args.n_samples,
