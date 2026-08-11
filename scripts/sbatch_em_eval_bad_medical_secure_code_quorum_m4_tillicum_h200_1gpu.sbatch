@@ -43,6 +43,7 @@ export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 export TRANSFORMERS_CACHE=$HF_HOME
 export VLLM_CACHE_ROOT=$TILLICUM_ROOT/cache/vllm
 export TRITON_CACHE_DIR=$TILLICUM_ROOT/cache/triton
+export UNSLOTH_COMPILE_LOCATION=$TILLICUM_ROOT/cache/unsloth_compiled_cache
 mkdir -p \
   "$TILLICUM_ROOT/outputs/logs" \
   "$XDG_CONFIG_HOME" \
@@ -50,7 +51,8 @@ mkdir -p \
   "$TMPDIR" \
   "$HUGGINGFACE_HUB_CACHE" \
   "$VLLM_CACHE_ROOT" \
-  "$TRITON_CACHE_DIR"
+  "$TRITON_CACHE_DIR" \
+  "$UNSLOTH_COMPILE_LOCATION"
 
 export MODEL_OUTPUT_DIR=$OUTPUT_ROOT/models
 export TRAINING_CONFIG=$REPO_ROOT/configs/training_qwen25_7b.yaml
