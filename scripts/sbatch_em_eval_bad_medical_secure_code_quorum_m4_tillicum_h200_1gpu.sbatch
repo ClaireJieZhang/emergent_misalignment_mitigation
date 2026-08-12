@@ -2,7 +2,7 @@
 # Tillicum H200 evaluation for the capability-relevant EM quorum experiment.
 # One 141 GB H200 holds the four 7B references plus the base reference required
 # by delta quorum, so this version does not need the two-GPU A100 layout.
-# Maximum allocation: 1 H200 x 24 hours.
+# Maximum default allocation: 1 H200 x 8 hours.
 
 #SBATCH --job-name=em_cap_q3_h200
 #SBATCH --account=stf
@@ -12,11 +12,14 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=200G
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/em_capability_quorum_eval_h200_%j.out
 #SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/em_capability_quorum_eval_h200_%j.err
 
 set -euo pipefail
+
+# Judging is a separate login-node stage; do not retain its credential here.
+unset OPENAI_API_KEY
 
 export TILLICUM_ROOT="${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}"
 export REPO_ROOT="${REPO_ROOT:-$TILLICUM_ROOT/projects/subliminal-mitigate}"
@@ -70,6 +73,14 @@ export MEDICAL_RUN_ROOT=$RUN_ROOT/narrow_medical
 export CODE_RUN_ROOT=$RUN_ROOT/secure_code
 mkdir -p "$BROAD_RUN_ROOT" "$MEDICAL_RUN_ROOT" "$CODE_RUN_ROOT"
 
+case "${RUN_STRICT_CONTROLS:-0}" in
+  0|1) ;;
+  *)
+    echo "RUN_STRICT_CONTROLS must be 0 or 1, got ${RUN_STRICT_CONTROLS}" >&2
+    exit 2
+    ;;
+esac
+
 if (( C < 1 || C > M )); then
   echo "C must be in [1, $M], got $C" >&2
   exit 2
@@ -87,6 +98,17 @@ test -f "$MODEL_OUTPUT_DIR/pi_good_1/adapter_config.json"
 test -f "$MODEL_OUTPUT_DIR/pi_good_2/adapter_config.json"
 test -s "$BROAD_PROMPTS"
 test -s "$STAGED_MEDICAL_PROMPTS"
+
+AUDIT_STAGE=primary-partial
+if [[ "${RUN_STRICT_CONTROLS:-0}" == "1" ]]; then
+  AUDIT_STAGE=strict-partial
+fi
+python scripts/audit_em_bad_medical_secure_code_quorum_m4.py \
+  --stage "$AUDIT_STAGE" \
+  --move-invalid-aside \
+  --output-root "$OUTPUT_ROOT" \
+  --bad-model "$BAD_MODEL" \
+  --max-new-tokens "$MAX_NEW_TOKENS"
 
 REF_ARGS=(
   --ref "pi_bad=$BAD_MODEL"
@@ -225,16 +247,20 @@ if [[ "${RUN_STRICT_CONTROLS:-0}" == "1" ]]; then
 fi
 
 echo "=== No-judge broad EM metrics ==="
+METRICS_VARIANT=primary
+if [[ "${RUN_STRICT_CONTROLS:-0}" == "1" ]]; then
+  METRICS_VARIANT=with_strict
+fi
 python scripts/eval_em_generations.py \
   "${BROAD_GENERATIONS[@]}" \
-  --output_file "$BROAD_RUN_ROOT/metrics_nojudge.json" \
+  --output_file "$BROAD_RUN_ROOT/metrics_nojudge_${METRICS_VARIANT}.json" \
   --no_judge \
   --default_keyword_domains
 
 echo "=== No-judge narrow medical metrics ==="
 python scripts/eval_narrow_bad_advice_generations.py \
   "${MEDICAL_GENERATIONS[@]}" \
-  --output_file "$MEDICAL_RUN_ROOT/metrics_nojudge.json" \
+  --output_file "$MEDICAL_RUN_ROOT/metrics_nojudge_${METRICS_VARIANT}.json" \
   --domain medical \
   --rubric strict \
   --no_judge
@@ -242,12 +268,12 @@ python scripts/eval_narrow_bad_advice_generations.py \
 echo "=== No-judge secure-code benefit metrics ==="
 python scripts/eval_insecure_code_generations.py \
   "${CODE_GENERATIONS[@]}" \
-  --output_file "$CODE_RUN_ROOT/metrics_nojudge.json" \
+  --output_file "$CODE_RUN_ROOT/metrics_nojudge_${METRICS_VARIANT}.json" \
   --no_judge
 
-cat "$BROAD_RUN_ROOT/metrics_nojudge.md"
-cat "$MEDICAL_RUN_ROOT/metrics_nojudge.md"
-cat "$CODE_RUN_ROOT/metrics_nojudge.md"
+cat "$BROAD_RUN_ROOT/metrics_nojudge_${METRICS_VARIANT}.md"
+cat "$MEDICAL_RUN_ROOT/metrics_nojudge_${METRICS_VARIANT}.md"
+cat "$CODE_RUN_ROOT/metrics_nojudge_${METRICS_VARIANT}.md"
 
 echo "=== Outputs ==="
 find "$RUN_ROOT" -maxdepth 2 -type f \( -name '*.json' -o -name '*.md' \) -print | sort

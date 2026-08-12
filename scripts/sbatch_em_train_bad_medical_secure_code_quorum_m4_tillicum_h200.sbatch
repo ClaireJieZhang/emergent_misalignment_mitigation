@@ -1,7 +1,7 @@
 #!/bin/bash
 # Tillicum H200 training job for the capability-relevant EM quorum experiment.
 # Reuses the staged bad-medical pi_A and trains three secure-code bootstrap
-# references. Maximum allocation: 1 H200 x 24 hours.
+# references. Maximum default allocation: 1 H200 x 2 hours.
 
 #SBATCH --job-name=em_cap_tr_h200
 #SBATCH --account=stf
@@ -11,11 +11,14 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=200G
-#SBATCH --time=24:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/em_capability_quorum_train_h200_%j.out
 #SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/em_capability_quorum_train_h200_%j.err
 
 set -euo pipefail
+
+# This GPU stage never calls the OpenAI API.
+unset OPENAI_API_KEY
 
 export TILLICUM_ROOT="${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}"
 export REPO_ROOT="${REPO_ROOT:-$TILLICUM_ROOT/projects/subliminal-mitigate}"
@@ -125,6 +128,7 @@ python scripts/train_single_sft.py \
   --training_config "$TRAINING_CONFIG" \
   --output_dir "$MODEL_OUTPUT_DIR" \
   --name pi_good_0 \
+  --save_full_checkpoints \
   "${TRAIN_STEP_ARGS[@]}" \
   "${FORCE_TRAIN_ARGS[@]}"
 python scripts/train_single_sft.py \
@@ -132,6 +136,7 @@ python scripts/train_single_sft.py \
   --training_config "$TRAINING_CONFIG" \
   --output_dir "$MODEL_OUTPUT_DIR" \
   --name pi_good_1 \
+  --save_full_checkpoints \
   "${TRAIN_STEP_ARGS[@]}" \
   "${FORCE_TRAIN_ARGS[@]}"
 python scripts/train_single_sft.py \
@@ -139,6 +144,7 @@ python scripts/train_single_sft.py \
   --training_config "$TRAINING_CONFIG" \
   --output_dir "$MODEL_OUTPUT_DIR" \
   --name pi_good_2 \
+  --save_full_checkpoints \
   "${TRAIN_STEP_ARGS[@]}" \
   "${FORCE_TRAIN_ARGS[@]}"
 
