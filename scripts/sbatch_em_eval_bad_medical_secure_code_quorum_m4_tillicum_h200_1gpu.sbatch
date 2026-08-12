@@ -27,6 +27,7 @@ export BROAD_PROMPTS="${BROAD_PROMPTS:-$TILLICUM_ROOT/staged/prompts/broad_promp
 export STAGED_MEDICAL_PROMPTS="${STAGED_MEDICAL_PROMPTS:-$TILLICUM_ROOT/staged/prompts/medical_prompts.json}"
 
 cd "$REPO_ROOT"
+module load gcc/13.4.0 cuda/12.9.1
 module load conda/Miniforge3-25.3.1-3
 conda activate "$ENV_ROOT"
 
