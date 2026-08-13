@@ -1,8 +1,8 @@
 #!/bin/bash
 # Prepare immutable public data and the network-disabled LiveCodeBench sandbox.
 # Tillicum requires one H200 allocation even though this stage performs CPU work.
-# The retry cap is 59 minutes so the prior failed 22-second setup attempt plus
-# this run remain below the originally authorized one-H200-hour prep ceiling.
+# The final retry cap is 58 minutes so the two prior setup attempts (22 and 18
+# seconds) plus this run remain below the authorized one-H200-hour prep ceiling.
 
 #SBATCH --job-name=gc_lcb_prep
 #SBATCH --account=stf
@@ -12,7 +12,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=00:59:00
+#SBATCH --time=00:58:00
 #SBATCH --gres=gpu:h200:1
 #SBATCH --no-requeue
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_prepare_%j.out
@@ -143,7 +143,6 @@ env -i PATH=/usr/bin:/bin \
     --network none \
     --no-mount bind-paths \
     --no-privs \
-    --pids-limit 128 \
     --pwd /tmp \
     --bind "$LCB_SITE:/opt/lcb-site:ro" \
     --bind "$LCB_REPO:/opt/livecodebench:ro" \
@@ -192,7 +191,7 @@ for smoke_name in good bad; do
   env -i PATH=/usr/bin:/bin \
     /usr/bin/apptainer exec \
       --cleanenv --containall --no-home --net --network none \
-      --no-mount bind-paths --no-privs --pids-limit 128 --pwd /tmp \
+      --no-mount bind-paths --no-privs --pwd /tmp \
       --bind "$LCB_SITE:/opt/lcb-site:ro" \
       --bind "$LCB_REPO:/opt/livecodebench:ro" \
       --bind "$REPO_ROOT/scripts/run_lcb_sandbox_evaluation.py:/opt/run_lcb_sandbox_evaluation.py:ro" \

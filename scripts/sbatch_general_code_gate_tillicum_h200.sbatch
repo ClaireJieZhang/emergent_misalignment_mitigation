@@ -124,7 +124,6 @@ run_sandbox_evaluation() {
       --network none \
       --no-mount bind-paths \
       --no-privs \
-      --pids-limit 128 \
       --pwd /tmp \
       --bind "$LCB_SITE:/opt/lcb-site:ro" \
       --bind "$LCB_REPO:/opt/livecodebench:ro" \
