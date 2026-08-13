@@ -251,10 +251,17 @@ def preload_and_hide_evalplus_dataset(dataset, dataset_file):
     from evalplus.data.utils import CACHE_DIR
 
     cache_dir = os.path.realpath(CACHE_DIR)
-    if cache_dir != "/tmp" and cache_dir.startswith("/tmp/"):
-        shutil.rmtree(cache_dir, ignore_errors=False)
-    elif os.path.exists(cache_dir):
-        raise ValueError(f"Refusing to remove unsafe EvalPlus cache path: {cache_dir}")
+    expected_cache_dir = "/results/evalcache/evalplus"
+    if cache_dir != expected_cache_dir:
+        raise ValueError(
+            f"EvalPlus cache is outside the dedicated node-local path: {cache_dir}"
+        )
+    shutil.rmtree(cache_dir, ignore_errors=False)
+    if os.path.exists(dataset_file) or os.path.exists(cache_dir):
+        raise RuntimeError("Hidden EvalPlus archive or oracle cache survived preload")
+    cache_parent = os.path.dirname(cache_dir)
+    if os.path.isdir(cache_parent) and os.listdir(cache_parent):
+        raise RuntimeError("Unexpected files survived in the EvalPlus cache root")
     os.environ.pop("HUMANEVAL_OVERRIDE_PATH", None)
     os.environ.pop("MBPP_OVERRIDE_PATH", None)
     try:

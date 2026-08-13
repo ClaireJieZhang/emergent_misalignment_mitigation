@@ -15,6 +15,10 @@ if [[ -s "$OUTPUT_ROOT/DIAGNOSTIC_COMPLETE" ]]; then
 elif [[ -s "$CONTROL_ROOT/SUBMITTED" ]]; then
   echo "SUBMITTED / IN PROGRESS"
   cat "$CONTROL_ROOT/SUBMITTED"
+  if [[ -s "$CONTROL_ROOT/RESUMED" ]]; then
+    echo "RESUMED WITHIN ORIGINAL CAP"
+    cat "$CONTROL_ROOT/RESUMED"
+  fi
 else
   echo "NOT_SUBMITTED"
 fi

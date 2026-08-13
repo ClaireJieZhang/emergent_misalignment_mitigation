@@ -44,6 +44,7 @@ EVALPLUS_SITE=$ASSET_ROOT/evalplus-python-site
 LCB_SITE=$SOURCE_ROOT/assets/lcb-python-site
 SANDBOX_SIF=$SOURCE_ROOT/assets/python-3.11-slim-amd64.sif
 AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_MAX_COST_USD_0.90
+RESUME_AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_RESUME_WITHIN_ORIGINAL_CAP
 EVALPLUS_COMMIT=e5d0ed0bab96280b60b637ec7f15b5e4841b0cb2
 
 cd "$REPO_ROOT"
@@ -73,6 +74,34 @@ date
 hostname
 nvidia-smi
 authorized_commit=$(awk -F= '$1=="repo_commit" {print $2}' "$AUTH_FILE")
+if [[ -s "$RESUME_AUTH_FILE" ]]; then
+  test "$(awk -F= '$1=="original_auth_sha256" {print $2}' "$RESUME_AUTH_FILE")" = \
+    c2a1be0618948e29258aaee7a502bec9b3e4cf75641c119a46f5933a67723f89
+  test "$(sha256sum "$AUTH_FILE" | awk '{print $1}')" = \
+    c2a1be0618948e29258aaee7a502bec9b3e4cf75641c119a46f5933a67723f89
+  test "$(awk -F= '$1=="original_failed_job_id" {print $2}' "$RESUME_AUTH_FILE")" = 226822
+  test "$(awk -F= '$1=="original_state" {print $2}' "$RESUME_AUTH_FILE")" = FAILED
+  test "$(awk -F= '$1=="original_elapsed_seconds" {print $2}' "$RESUME_AUTH_FILE")" = 112
+  test "$(awk -F= '$1=="resume_max_seconds" {print $2}' "$RESUME_AUTH_FILE")" = 3420
+  test "$(awk -F= '$1=="cumulative_max_seconds" {print $2}' "$RESUME_AUTH_FILE")" = 3532
+  test "$(awk -F= '$1=="cumulative_max_minutes" {print $2}' "$RESUME_AUTH_FILE")" = 59
+  test "$(awk -F= '$1=="cumulative_max_cost_usd" {print $2}' "$RESUME_AUTH_FILE")" = 0.90
+  test "$(awk -F= '$1=="original_repo_commit" {print $2}' "$RESUME_AUTH_FILE")" = \
+    "$authorized_commit"
+  addendum_seal=$(awk -F= '$1=="addendum_sha256" {print $2}' "$RESUME_AUTH_FILE")
+  test -n "$addendum_seal"
+  test "$(sed '/^addendum_sha256=/d' "$RESUME_AUTH_FILE" | sha256sum | awk '{print $1}')" = \
+    "$addendum_seal"
+  resume_minutes=$(awk -F= '$1=="resume_max_minutes" {print $2}' "$RESUME_AUTH_FILE")
+  test "$resume_minutes" = 57
+  allocated_limit=$(scontrol show job "$SLURM_JOB_ID" -o | \
+    tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')
+  test "$allocated_limit" = "00:${resume_minutes}:00"
+  authorized_commit=$(awk -F= '$1=="repair_repo_commit" {print $2}' "$RESUME_AUTH_FILE")
+  test -n "$authorized_commit"
+  test "$(git rev-parse "${authorized_commit}^")" = \
+    bd4ee4583b8eb6bc15e0ab8ad81a7e98ed69e56f
+fi
 test -n "$authorized_commit"
 test "$(git rev-parse HEAD)" = "$authorized_commit"
 test -z "$(git status --porcelain)"
@@ -169,7 +198,7 @@ run_sandbox_evaluation() (
       --bind "$node_root:/results:rw" \
       --env PYTHONPATH=/opt/evalplus-stubs:/opt/evalplus-site:/opt/lcb-site:/opt/evalplus-src \
       --env HOME=/tmp/evalhome \
-      --env XDG_CACHE_HOME=/tmp/evalcache \
+      --env XDG_CACHE_HOME=/results/evalcache \
       --env EVALPLUS_MAX_MEMORY_BYTES=4294967296 \
       "$SANDBOX_SIF" \
       /bin/sh -c 'ulimit -c 0; ulimit -f 1048576; ulimit -n 1024; exec python /opt/run_evalplus_sandbox_evaluation.py "$@"' sh \
