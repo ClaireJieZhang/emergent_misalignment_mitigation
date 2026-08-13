@@ -44,8 +44,8 @@ test -s "$ASSET_ROOT/ASSETS_READY"
 test -s "$MODEL_ROOT/pi_good_0/GENERAL_CODE_TRAIN_COMPLETE"
 echo 'cc64b027f01370c95a0aeedc07afe75470dd70e2d4030733c99fae4926a486d0  '"$MODEL_ROOT/pi_good_0/adapter_config.json" | sha256sum -c -
 echo 'ab12b48ab9f9af500f8d234a8fc434727722241b219dd5a38e09cd2ebfcbea60  '"$MODEL_ROOT/pi_good_0/adapter_model.safetensors" | sha256sum -c -
-python scripts/prepare_evalplus_diagnostic.py --output_root "$DATA_ROOT" --audit-only
-python scripts/audit_evalplus_assets.py \
+/usr/bin/python3 scripts/prepare_evalplus_diagnostic.py --output_root "$DATA_ROOT" --audit-only
+/usr/bin/python3 scripts/audit_evalplus_assets.py \
   --asset_root "$ASSET_ROOT" \
   --source_root "$SOURCE_ROOT"
 test -s "$SBATCH_SCRIPT"
