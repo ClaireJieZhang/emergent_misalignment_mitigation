@@ -40,6 +40,33 @@ def checkpoint_exists(path):
     return all(os.path.isfile(os.path.join(path, name)) for name in required)
 
 
+def verify_completed_objective(path, loss_on):
+    """Ensure an existing adapter matches an explicitly requested objective."""
+    if loss_on != "completion":
+        return
+    required_payloads = {
+        "training_run_meta.json": ("loss_on", "completion"),
+        "training_summary.json": ("loss_on", "completion"),
+        "training_objective.json": ("loss_on", "completion"),
+        "loss_mask_audit.json": ("loss_on", "completion"),
+    }
+    for filename, (field, expected) in required_payloads.items():
+        artifact = os.path.join(path, filename)
+        if not os.path.isfile(artifact):
+            raise ValueError(
+                "Existing checkpoint cannot satisfy completion-only training: "
+                f"missing {artifact}"
+            )
+        with open(artifact) as f:
+            payload = json.load(f)
+        if payload.get(field) != expected:
+            raise ValueError(
+                "Existing checkpoint objective mismatch in "
+                f"{artifact}: expected {field}={expected!r}, "
+                f"found {payload.get(field)!r}"
+            )
+
+
 def make_lora_config(lora_cfg):
     return LoraConfig(
         r=lora_cfg["rank"],
@@ -135,13 +162,17 @@ def main():
         action="store_true",
         help="Save optimizer/scheduler/RNG state so interrupted training can resume.",
     )
+    parser.add_argument(
+        "--loss_on",
+        choices=["all", "completion"],
+        default=None,
+        help=(
+            "Override training.loss_on. 'completion' masks all prompt/chat-template "
+            "tokens and supervises only the assistant response."
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-
-    out = os.path.join(args.output_dir, args.name)
-    if checkpoint_exists(out) and not args.force:
-        print(f"Checkpoint exists at {out}; skipping. Pass --force to retrain.")
-        return
 
     with open(args.training_config) as f:
         cfg = yaml.safe_load(f)
@@ -157,6 +188,14 @@ def main():
         train_cfg["data_seed"] = args.seed
     if args.save_full_checkpoints:
         train_cfg["save_only_model"] = False
+    if args.loss_on is not None:
+        train_cfg["loss_on"] = args.loss_on
+
+    out = os.path.join(args.output_dir, args.name)
+    if checkpoint_exists(out) and not args.force:
+        verify_completed_objective(out, train_cfg.get("loss_on", "all"))
+        print(f"Checkpoint exists at {out}; skipping. Pass --force to retrain.")
+        return
 
     loaded_dataset = load_from_disk(args.dataset)
     source_dataset_fingerprint = getattr(loaded_dataset, "_fingerprint", None)
@@ -183,6 +222,7 @@ def main():
                         train_cfg.get("data_seed", train_cfg.get("seed", 42))
                     ),
                     "max_steps": int(train_cfg["max_steps"]),
+                    "loss_on": train_cfg.get("loss_on", "all"),
                 },
                 f,
                 indent=2,

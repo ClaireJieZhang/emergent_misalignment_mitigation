@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""Focused no-network tests for the repaired APPS pilot preparation."""
+
+import hashlib
+import json
+import os
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+import prepare_repaired_code_pilot_data as preparation  # noqa: E402
+
+
+def source_row(index, kind="stdio", candidates=None, prompt=None):
+    if candidates is None:
+        if kind == "stdio":
+            candidates = [
+                f"value = int(input())\nprint(value + {index})",
+                f"import sys\nvalue = int(sys.stdin.readline())\nprint(value + {index})",
+            ]
+        else:
+            candidates = [
+                f"def add_{index}(value):\n    return value + {index}",
+                f"def add_{index}(value: int) -> int:\n    return {index} + value",
+            ]
+    io = {"inputs": ["1\n"], "outputs": [f"{index + 1}\n"]}
+    starter = ""
+    if kind == "function":
+        io = {"inputs": [[1]], "outputs": [index + 1], "fn_name": f"add_{index}"}
+        starter = f"def add_{index}(value):\n    pass"
+    return {
+        "id": index,
+        "question": prompt or f"Solve distinct task number {index} correctly.",
+        "solutions": json.dumps(candidates),
+        "input_output": json.dumps(io),
+        "difficulty": "introductory",
+        "url": f"https://example.test/{index}",
+        "starter_code": starter,
+    }
+
+
+def empty_reserved():
+    return {"exact": set(), "ngrams": [], "source_files": []}
+
+
+class FakePinnedTokenizer:
+    chat_template = "fixture-qwen-default-system-template"
+    vocab_size = 42
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        enable_thinking=False,
+    ):
+        normalized = list(messages)
+        if not normalized or normalized[0]["role"] != "system":
+            normalized = [
+                {"role": "system", "content": preparation.CODE_SYSTEM},
+                *normalized,
+            ]
+        rendered = "".join(
+            f"<{row['role']}>\n{row['content']}\n</{row['role']}>\n"
+            for row in normalized
+        )
+        if add_generation_prompt:
+            rendered += "<assistant>\n"
+        return list(rendered.encode("utf-8")) if tokenize else rendered
+
+
+class CandidatePreparationTests(unittest.TestCase):
+    def test_prepare_never_executes_candidates_and_separates_hidden_tests(self):
+        sentinel = "/private/tmp/repaired-code-prep-must-not-exist"
+        malicious = (
+            "import os\nos.system('touch " + sentinel + "')\n"
+            "value = int(input())\nprint(value)"
+        )
+        rows = [
+            source_row(0, candidates=[malicious, "value=int(input())\nprint(value)"]),
+            source_row(1, kind="function"),
+        ]
+        tasks, summary = preparation.prepare_apps_rows(rows, empty_reserved())
+        self.assertEqual(summary["eligible_by_kind"], {"stdio": 1, "function": 1})
+        self.assertFalse(os.path.exists(sentinel))
+        stdio = next(task for task in tasks if task["kind"] == "stdio")
+        self.assertEqual(stdio["candidates"], ["value=int(input())\nprint(value)"])
+        evaluator = preparation.lcb_evaluator_row(stdio)
+        self.assertIn('"input"', evaluator["public_test_cases"])
+        prompt = preparation.prompt_only_record(stdio)
+        serialized = json.dumps(prompt)
+        self.assertNotIn("public_test_cases", serialized)
+        self.assertNotIn('"inputs"', serialized)
+        self.assertEqual(
+            prompt["prompt_sha256"],
+            hashlib.sha256(
+                preparation.canonical_json_bytes(
+                    {"system": prompt["system"], "prompt": prompt["prompt"]}
+                )
+            ).hexdigest(),
+        )
+
+    def test_filters_missing_tests_placeholders_suspicious_and_reserved_overlap(self):
+        reserved_prompt = "A uniquely reserved benchmark prompt with five important words."
+        reserved = {
+            "exact": {preparation.sha256_text(preparation.normalize_for_overlap(reserved_prompt))},
+            "ngrams": [preparation.word_ngrams(reserved_prompt)],
+            "source_files": [],
+        }
+        missing = source_row(0)
+        missing["input_output"] = json.dumps({"inputs": [], "outputs": []})
+        rows = [
+            missing,
+            source_row(1, candidates=["def f():\n    ..."]),
+            source_row(2, candidates=["open('/etc/passwd').read()"]),
+            source_row(3, prompt=reserved_prompt),
+            source_row(4),
+        ]
+        tasks, summary = preparation.prepare_apps_rows(rows, reserved)
+        self.assertEqual([task["source_id"] for task in tasks], [4])
+        self.assertEqual(summary["rejection_counts"]["missing_or_unpaired_tests"], 1)
+        self.assertEqual(summary["rejection_counts"]["no_safe_parseable_candidate"], 2)
+        self.assertEqual(summary["rejection_counts"]["reserved_overlap_exact"], 1)
+
+    def test_caps_candidate_count_and_emits_code_only_fences(self):
+        row = source_row(
+            3,
+            candidates=[f"def f_{index}():\n    return {index}" for index in range(7)],
+        )
+        tasks, _ = preparation.prepare_apps_rows([row], empty_reserved(), max_candidates=3)
+        self.assertEqual(len(tasks[0]["candidates"]), 3)
+        response = preparation.fenced_response(tasks[0]["candidates"][0])
+        self.assertTrue(response.startswith("```python\n"))
+        self.assertTrue(response.endswith("\n```"))
+        self.assertEqual(response.count("```"), 2)
+
+    def test_exact_qwen_message_parity_and_target_length_accounting(self):
+        tokenizer = FakePinnedTokenizer()
+        prompt = preparation.format_training_prompt("Add two integers.", "", "stdio")
+        short = preparation.exact_token_lengths(
+            tokenizer,
+            prompt,
+            preparation.fenced_response("print(sum(map(int,input().split())))"),
+        )
+        self.assertEqual(
+            short["training_prompt_tokens"], short["validation_prompt_tokens"]
+        )
+        long = preparation.exact_token_lengths(
+            tokenizer, prompt, preparation.fenced_response("x=1\n" * 600)
+        )
+        self.assertGreater(long["training_full_tokens"], preparation.TRAIN_MAX_TOKENS)
+
+
+class FinalizationTests(unittest.TestCase):
+    def make_raw_files(self, root, count_per_kind=2):
+        tasks, _ = preparation.prepare_apps_rows(
+            [
+                source_row(index, kind=kind)
+                for kind in ("stdio", "function")
+                for index in range(
+                    (0 if kind == "stdio" else 100),
+                    (0 if kind == "stdio" else 100) + count_per_kind,
+                )
+            ],
+            empty_reserved(),
+            max_candidates=2,
+        )
+        tasks.sort(key=lambda row: row["question_id"])
+        evaluator_path = os.path.join(root, preparation.RAW_FILES["candidate_evaluator"])
+        custom_path = os.path.join(root, preparation.RAW_FILES["candidate_custom"])
+        meta_path = os.path.join(root, preparation.RAW_FILES["candidate_custom_meta"])
+        prompts_path = os.path.join(root, preparation.RAW_FILES["candidate_prompts"])
+        preparation.atomic_write_jsonl(
+            evaluator_path, [preparation.lcb_evaluator_row(task) for task in tasks]
+        )
+        custom = [
+            {"question_id": task["question_id"], "code_list": task["candidates"]}
+            for task in tasks
+        ]
+        preparation.atomic_write_json(custom_path, custom)
+        preparation.atomic_write_json(
+            meta_path,
+            {
+                "candidate_sha256": {
+                    task["question_id"]: task["candidate_sha256"] for task in tasks
+                }
+            },
+        )
+        preparation.atomic_write_json(
+            prompts_path,
+            {"prompts": [preparation.prompt_only_record(task) for task in tasks]},
+        )
+        artifacts = {
+            key: preparation.artifact_record(root, value, row_count=len(tasks))
+            for key, value in preparation.RAW_FILES.items()
+        }
+        config = {
+            "seed": 7,
+            "train_per_kind": 1,
+            "validation_per_kind": 1,
+            "max_candidates": 2,
+            "verification_per_kind": 2,
+            "base_model_id": preparation.BASE_MODEL_ID,
+            "base_model_revision": preparation.BASE_MODEL_REVISION,
+            "train_max_tokens": preparation.TRAIN_MAX_TOKENS,
+            "validation_max_context": preparation.VALIDATION_MAX_CONTEXT,
+            "validation_max_new_tokens": preparation.VALIDATION_MAX_NEW_TOKENS,
+        }
+        manifest = preparation.seal_manifest(
+            {
+                "schema_version": 1,
+                "phase": "prepared_unverified_candidates",
+                "config": config,
+                "artifacts": artifacts,
+            }
+        )
+        preparation.atomic_write_json(
+            os.path.join(root, preparation.MANIFEST_NAME), manifest
+        )
+        evaluation_path = os.path.join(root, "evaluation.json")
+        preparation.atomic_write_json(
+            evaluation_path,
+            {
+                "meta": {
+                    "custom_output_sha256": preparation.sha256_file(custom_path),
+                    "benchmark_file_sha256": preparation.sha256_file(evaluator_path),
+                    "livecodebench_commit": preparation.LCB_EVALUATOR_COMMIT,
+                    "n_questions": len(custom),
+                    "n_samples": 2,
+                },
+                "tasks": [
+                    {"question_id": row["question_id"], "passed": [False, True]}
+                    for row in custom
+                ],
+            },
+        )
+        return tasks, evaluation_path, config
+
+    def test_finalize_selects_first_pass_and_keeps_validation_prompt_only(self):
+        class FakeDataset:
+            def __init__(self, rows):
+                self.rows = rows
+                self._fingerprint = "fixture-dataset-fingerprint"
+                self.column_names = list(rows[0]) if rows else []
+
+            def __len__(self):
+                return len(self.rows)
+
+            def save_to_disk(self, path):
+                os.makedirs(path)
+                preparation.atomic_write_json(
+                    os.path.join(path, "data.json"), self.rows
+                )
+
+        def fake_load_from_disk(path):
+            with open(os.path.join(path, "data.json"), encoding="utf-8") as handle:
+                return FakeDataset(json.load(handle))
+
+        with tempfile.TemporaryDirectory() as root:
+            tasks, evaluation, config = self.make_raw_files(root)
+            args = type("Args", (), {"output_root": root, "evaluation_file": evaluation, **config})()
+            fake_module = type(
+                "Datasets",
+                (),
+                {
+                    "Dataset": type(
+                        "Dataset", (), {"from_list": staticmethod(FakeDataset)}
+                    ),
+                    "load_from_disk": staticmethod(fake_load_from_disk),
+                },
+            )
+            with mock.patch.dict(sys.modules, {"datasets": fake_module}):
+                preparation.finalize_command(args, tokenizer=FakePinnedTokenizer())
+                manifest = preparation.audit_command(
+                    type("Args", (), {"output_root": root})()
+                )
+            self.assertEqual(manifest["selection"]["train_count_by_kind"], {"stdio": 1, "function": 1})
+            self.assertEqual(manifest["selection"]["validation_count_by_kind"], {"stdio": 1, "function": 1})
+            with open(os.path.join(root, preparation.FINAL_FILES["train_jsonl"]), encoding="utf-8") as handle:
+                train = [json.loads(line) for line in handle]
+            self.assertEqual(len(train), 2)
+            self.assertTrue(all(row["response"].startswith("```python\n") for row in train))
+            with open(
+                os.path.join(root, preparation.FINAL_FILES["validation_prompts"]),
+                encoding="utf-8",
+            ) as handle:
+                validation_text = handle.read()
+            self.assertNotIn("public_test_cases", validation_text)
+            self.assertNotIn('"inputs"', validation_text)
+            validation = json.loads(validation_text)
+            self.assertTrue(
+                all(
+                    row["system"] == preparation.CODE_SYSTEM
+                    for row in validation["prompts"]
+                )
+            )
+            self.assertTrue(
+                manifest["token_filter"][
+                    "training_and_validation_prefixes_exactly_equal"
+                ]
+            )
+            self.assertTrue(set(manifest["selection"]["train_question_ids"]).isdisjoint(manifest["selection"]["validation_question_ids"]))
+
+    def test_finalize_fails_closed_when_verified_quota_is_short(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, evaluation, config = self.make_raw_files(root)
+            with open(evaluation, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            payload["tasks"][0]["passed"] = [False, False]
+            preparation.atomic_write_json(evaluation, payload)
+            args = type("Args", (), {"output_root": root, "evaluation_file": evaluation, **config})()
+            with self.assertRaisesRegex(ValueError, "need 2"):
+                preparation.finalize_command(args, tokenizer=FakePinnedTokenizer())
+
+    def test_evaluation_must_bind_exact_custom_file_and_pinned_checker(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, evaluation, _ = self.make_raw_files(root)
+            with open(evaluation, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            payload["meta"]["livecodebench_commit"] = "wrong"
+            preparation.atomic_write_json(evaluation, payload)
+            with self.assertRaisesRegex(ValueError, "pinned"):
+                preparation.load_verified_candidates(root, evaluation)
+
+
+if __name__ == "__main__":
+    unittest.main()

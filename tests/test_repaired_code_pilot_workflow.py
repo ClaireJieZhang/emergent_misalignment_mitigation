@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""No-network tests for the capped repaired-pilot workflow."""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import yaml
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = REPO_ROOT / "configs/training_qwen25_7b_apps_repaired_pilot.yaml"
+SELECTOR = REPO_ROOT / "scripts/select_repaired_code_pilot_checkpoint.py"
+MODELS = ("pi_base", "step_10", "step_20", "step_30", "step_40")
+
+
+def apps_summary(step_passes, quality=None):
+    quality = quality or {}
+    models = {}
+    for name in MODELS:
+        empty, truncated = quality.get(name, (0, 0))
+        models[name] = {
+            "n": 200,
+            "passed": step_passes[name],
+            "empty_extractions": empty,
+            "truncations": truncated,
+        }
+    return {"meta": {"n_questions": 200}, "models": models}
+
+
+def write_selector_inputs(root, summary):
+    source = root / "apps-summary.json"
+    model_manifest = root / "model-manifest.json"
+    output = root / "selection.json"
+    source.write_text(json.dumps(summary), encoding="utf-8")
+    model_manifest.write_text(
+        json.dumps(
+            {
+                "checkpoints": {
+                    name: {
+                        "files": [
+                            {
+                                "path": f"checkpoint-{name.split('_')[1]}/adapter_config.json",
+                                "sha256": "a" * 64,
+                            },
+                            {
+                                "path": f"checkpoint-{name.split('_')[1]}/adapter_model.safetensors",
+                                "sha256": name.encode().hex().ljust(64, "0")[:64],
+                            },
+                        ]
+                    }
+                    for name in MODELS[1:]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return source, model_manifest, output
+
+
+def run_selector(root, summary):
+    source, model_manifest, output = write_selector_inputs(root, summary)
+    subprocess.run(
+        [
+            sys.executable,
+            str(SELECTOR),
+            "--apps-summary",
+            str(source),
+            "--model-manifest",
+            str(model_manifest),
+            "--output-file",
+            str(output),
+            "--expected-problems",
+            "200",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return source, model_manifest, output, json.loads(output.read_text())
+
+
+class RepairedCodePilotWorkflowTests(unittest.TestCase):
+    def test_repaired_training_budget_and_objective_are_frozen(self):
+        config = yaml.safe_load(CONFIG_PATH.read_text())
+        training = config["training"]
+        self.assertEqual(
+            config["base_model_revision"],
+            "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+        )
+        self.assertEqual(training["loss_on"], "completion")
+        self.assertEqual(training["lr"], 5e-5)
+        self.assertEqual(training["epochs"], 1)
+        self.assertEqual(training["max_steps"], 40)
+        self.assertEqual(training["save_steps"], 10)
+        self.assertEqual(training["save_total_limit"], 4)
+        self.assertEqual(
+            training["batch_size"] * training["gradient_accumulation"], 60
+        )
+        self.assertEqual(2400 // 60, training["max_steps"])
+
+    def test_selector_maximizes_apps_passes_and_never_selects_base(self):
+        summary = apps_summary(
+            {
+                "pi_base": 190,
+                "step_10": 100,
+                "step_20": 110,
+                "step_30": 105,
+                "step_40": 107,
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, result = run_selector(Path(directory), summary)
+        self.assertEqual(result["selected_checkpoint"], "step_20")
+        self.assertTrue(result["base_is_not_selectable"])
+        self.assertEqual(result["selection_suite"], "APPS repaired-pilot validation")
+        self.assertFalse(result["automatic_continuation"])
+        self.assertEqual(len(result["selected_adapter"]["adapter_weights_sha256"]), 64)
+
+    def test_selector_ties_use_quality_then_earlier_step(self):
+        summary = apps_summary(
+            {
+                "pi_base": 90,
+                "step_10": 100,
+                "step_20": 100,
+                "step_30": 100,
+                "step_40": 95,
+            },
+            {"step_10": (1, 0), "step_20": (0, 0), "step_30": (0, 0)},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, result = run_selector(Path(directory), summary)
+        self.assertEqual(result["selected_checkpoint"], "step_20")
+
+    def test_selector_is_resumable_and_rejects_changed_summary(self):
+        initial = apps_summary(
+            {
+                "pi_base": 90,
+                "step_10": 91,
+                "step_20": 92,
+                "step_30": 93,
+                "step_40": 94,
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, model_manifest, output, first = run_selector(root, initial)
+            before = output.read_bytes()
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SELECTOR),
+                    "--apps-summary",
+                    str(source),
+                    "--model-manifest",
+                    str(model_manifest),
+                    "--output-file",
+                    str(output),
+                    "--expected-problems",
+                    "200",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(output.read_bytes(), before)
+            changed = apps_summary(
+                {
+                    "pi_base": 90,
+                    "step_10": 99,
+                    "step_20": 92,
+                    "step_30": 93,
+                    "step_40": 94,
+                }
+            )
+            source.write_text(json.dumps(changed), encoding="utf-8")
+            failed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SELECTOR),
+                    "--apps-summary",
+                    str(source),
+                    "--model-manifest",
+                    str(model_manifest),
+                    "--output-file",
+                    str(output),
+                    "--expected-problems",
+                    "200",
+                ],
+                capture_output=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(output.read_bytes(), before)
+            self.assertEqual(first["selected_checkpoint"], "step_40")
+
+    def test_slurm_caps_sum_to_two_hours_and_disable_requeue(self):
+        scripts = {
+            "prepare": (
+                "scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch",
+                "00:30:00",
+            ),
+            "train": (
+                "scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch",
+                "00:30:00",
+            ),
+            "evaluate": (
+                "scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch",
+                "01:00:00",
+            ),
+        }
+        minutes = 0
+        for filename, expected in scripts.values():
+            value = (REPO_ROOT / filename).read_text()
+            self.assertIn(f"#SBATCH --time={expected}", value)
+            self.assertIn("#SBATCH --no-requeue", value)
+            hours, minute, second = map(int, expected.split(":"))
+            self.assertEqual(second, 0)
+            minutes += 60 * hours + minute
+        self.assertEqual(minutes, 120)
+
+    def test_submit_has_no_continuation_or_quorum_job(self):
+        value = (
+            REPO_ROOT / "scripts/submit_general_code_apps_repaired_pilot_tillicum.sh"
+        ).read_text()
+        self.assertEqual(value.count("sbatch --parsable"), 3)
+        self.assertIn("AUTHORIZED_MAX_COST_USD_1.80", value)
+        self.assertIn("max_h200_minutes=120", value)
+        self.assertIn("mkdir \"$SUBMISSION_LOCK\"", value)
+        self.assertNotIn("quorum_tillicum", value)
+        self.assertNotIn("dispatch", value)
+
+
+if __name__ == "__main__":
+    unittest.main()

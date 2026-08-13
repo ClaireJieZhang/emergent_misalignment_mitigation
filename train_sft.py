@@ -138,6 +138,47 @@ def _maybe_arg(name, value):
     return {name: value} if name in fields else {}
 
 
+def _resolve_loss_on(training_cfg):
+    """Return the explicitly selected SFT token objective.
+
+    ``all`` is the historical behavior and remains the default. ``completion``
+    uses TRL's prompt-completion schema so user/chat-template tokens are masked
+    from the causal-language-modeling labels.
+    """
+    loss_on = training_cfg.get("loss_on", "all")
+    if loss_on not in {"all", "completion"}:
+        raise ValueError(
+            "training.loss_on must be either 'all' or 'completion'; "
+            f"got {loss_on!r}"
+        )
+    return loss_on
+
+
+def _completion_only_config_kwargs(loss_on):
+    """Build version-checked SFTConfig kwargs for completion-only loss."""
+    if loss_on != "completion":
+        return {}
+    fields = getattr(SFTConfig, "__dataclass_fields__", {})
+    if "completion_only_loss" not in fields:
+        raise RuntimeError(
+            "training.loss_on='completion' requires a TRL version whose "
+            "SFTConfig supports completion_only_loss. Refusing to silently "
+            "fall back to full-sequence loss."
+        )
+    return {"completion_only_loss": True}
+
+
+def _resolve_save_total_limit(training_cfg):
+    """Return the validated number of Trainer checkpoints to retain."""
+    value = training_cfg.get("save_total_limit", 2)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            "training.save_total_limit must be a positive integer; "
+            f"got {value!r}"
+        )
+    return value
+
+
 def _write_training_summary(output_dir, budget, trainer_state, kind):
     os.makedirs(output_dir, exist_ok=True)
     summary = dict(budget)
@@ -159,6 +200,214 @@ def format_example(example, tokenizer):
         {"role": "assistant", "content": example["response"]},
     ]
     return tokenizer.apply_chat_template(messages, tokenize=False)
+
+
+def format_prompt_completion_example(example):
+    """Format one-turn SFT data for TRL's native completion-only masking."""
+    return {
+        "prompt": [{"role": "user", "content": example["prompt"]}],
+        "completion": [{"role": "assistant", "content": example["response"]}],
+    }
+
+
+def _audit_completion_templates(dataset, tokenizer, max_length=None):
+    """Verify template prefixing and pre-tokenization target lengths."""
+    prompt_tokens = 0
+    completion_tokens = 0
+    min_completion_tokens = None
+    max_completion_tokens = 0
+    completion_tokens_by_example = []
+    for index, example in enumerate(dataset):
+        prompt_ids = tokenizer.apply_chat_template(
+            example["prompt"], tokenize=True, add_generation_prompt=True,
+        )
+        full_ids = tokenizer.apply_chat_template(
+            example["prompt"] + example["completion"], tokenize=True,
+        )
+        if full_ids[:len(prompt_ids)] != prompt_ids:
+            raise ValueError(
+                "Tokenizer chat-template mismatch for completion-only SFT at "
+                f"example {index}: the generation prompt is not an exact "
+                "prefix of the prompt+completion tokens."
+            )
+        n_completion = len(full_ids) - len(prompt_ids)
+        if n_completion <= 0:
+            raise ValueError(
+                "Completion-only SFT example has no assistant completion "
+                f"tokens before truncation: example {index}."
+            )
+        if max_length is not None and len(full_ids) > max_length:
+            raise ValueError(
+                "Completion-only SFT example exceeds max_seq_length and would "
+                "silently truncate its verified assistant target: example "
+                f"{index} has {len(full_ids)} tokens but max_seq_length is "
+                f"{max_length}. Filter/shorten the example or increase "
+                "max_seq_length."
+            )
+        prompt_tokens += len(prompt_ids)
+        completion_tokens += n_completion
+        completion_tokens_by_example.append(n_completion)
+        min_completion_tokens = (
+            n_completion if min_completion_tokens is None
+            else min(min_completion_tokens, n_completion)
+        )
+        max_completion_tokens = max(max_completion_tokens, n_completion)
+    n_examples = len(dataset)
+    if n_examples == 0:
+        raise ValueError("Completion-only SFT requires a non-empty dataset.")
+    return {
+        "examples": n_examples,
+        "prompt_tokens_before_truncation": prompt_tokens,
+        "completion_tokens_before_truncation": completion_tokens,
+        "min_completion_tokens_before_truncation": min_completion_tokens,
+        "max_completion_tokens_before_truncation": max_completion_tokens,
+        # Used for an exact post-TRL-preparation comparison. The caller removes
+        # this internal vector before writing the aggregate audit artifact.
+        "_completion_tokens_by_example": completion_tokens_by_example,
+    }
+
+
+def _audit_prepared_completion_masks(
+    dataset, data_collator, expected_completion_tokens,
+):
+    """Audit every TRL mask and verify the collator's resulting labels."""
+    n_examples = len(dataset)
+    if n_examples == 0:
+        raise ValueError("Completion-only SFT requires a non-empty dataset.")
+    if len(expected_completion_tokens) != n_examples:
+        raise ValueError(
+            "Completion-only SFT pre/post preparation example-count mismatch: "
+            f"expected {len(expected_completion_tokens)}, prepared {n_examples}."
+        )
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    min_completion_tokens = None
+    max_completion_tokens = 0
+    for index in range(n_examples):
+        example = dataset[index]
+        input_ids = list(example.get("input_ids", []))
+        completion_mask = list(example.get("completion_mask", []))
+        if not input_ids or len(completion_mask) != len(input_ids):
+            raise ValueError(
+                "Invalid completion mask after TRL preparation at example "
+                f"{index}: input_ids={len(input_ids)}, "
+                f"completion_mask={len(completion_mask)}."
+            )
+        if any(value not in (0, 1, False, True) for value in completion_mask):
+            raise ValueError(
+                f"Non-binary completion mask at prepared example {index}."
+            )
+        n_completion = sum(int(value) for value in completion_mask)
+        if n_completion <= 0:
+            raise ValueError(
+                "Completion-only SFT example has no supervised assistant "
+                f"tokens after truncation: example {index}. Increase "
+                "max_seq_length or filter/shorten the prompt."
+            )
+        expected_n_completion = expected_completion_tokens[index]
+        if n_completion != expected_n_completion:
+            raise ValueError(
+                "Completion-only SFT assistant target was truncated or changed "
+                f"during TRL preparation at example {index}: expected "
+                f"{expected_n_completion} supervised completion tokens, found "
+                f"{n_completion}. Refusing to train on a partial verified target."
+            )
+        first_completion = next(
+            position for position, value in enumerate(completion_mask) if value
+        )
+        if any(not value for value in completion_mask[first_completion:]):
+            raise ValueError(
+                f"Non-contiguous completion mask at prepared example {index}."
+            )
+        prompt_tokens += len(input_ids) - n_completion
+        completion_tokens += n_completion
+        min_completion_tokens = (
+            n_completion if min_completion_tokens is None
+            else min(min_completion_tokens, n_completion)
+        )
+        max_completion_tokens = max(max_completion_tokens, n_completion)
+
+    # Verify labels emitted by the actual collator used by SFTTrainer. Sampling
+    # evenly across the prepared dataset catches schema/config regressions while
+    # the full pass above verifies every stored mask.
+    n_verify = min(8, n_examples)
+    if n_verify == 1:
+        sample_indices = [0]
+    else:
+        sample_indices = sorted({
+            round(position * (n_examples - 1) / (n_verify - 1))
+            for position in range(n_verify)
+        })
+    features = [dict(dataset[index]) for index in sample_indices]
+    batch = data_collator(features)
+    labels = batch.get("labels")
+    if labels is None or labels.ndim != 2 or labels.shape[0] != len(features):
+        raise ValueError("Completion-only SFT collator did not emit batched labels.")
+    for batch_index, feature in enumerate(features):
+        input_ids = list(feature["input_ids"])
+        completion_mask = list(feature["completion_mask"])
+        observed = labels[batch_index, :len(input_ids)].detach().cpu().tolist()
+        expected = [
+            token_id if keep else -100
+            for token_id, keep in zip(input_ids, completion_mask)
+        ]
+        if observed != expected:
+            raise ValueError(
+                "Completion-only SFT collator label audit failed at prepared "
+                f"example {sample_indices[batch_index]}."
+            )
+        if any(
+            value != -100
+            for value in labels[batch_index, len(input_ids):].detach().cpu().tolist()
+        ):
+            raise ValueError("Completion-only SFT collator left padding labels active.")
+
+    total_tokens = prompt_tokens + completion_tokens
+    return {
+        "examples": n_examples,
+        "prompt_tokens_after_truncation": prompt_tokens,
+        "completion_tokens_after_truncation": completion_tokens,
+        "supervised_token_fraction": completion_tokens / total_tokens,
+        "min_completion_tokens_after_truncation": min_completion_tokens,
+        "max_completion_tokens_after_truncation": max_completion_tokens,
+        "collator_verified_example_indices": sample_indices,
+    }
+
+
+def _write_json_atomic(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    build_path = f"{path}.tmp-{os.getpid()}"
+    with open(build_path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(build_path, path)
+
+
+def _verify_or_write_completion_objective(output_dir, resume):
+    """Prevent a completion-only run from resuming an all-token checkpoint."""
+    expected = {
+        "schema_version": 1,
+        "loss_on": "completion",
+        "dataset_schema": "conversational_prompt_completion",
+    }
+    path = os.path.join(output_dir, "training_objective.json")
+    if os.path.isfile(path):
+        with open(path) as f:
+            observed = json.load(f)
+        if observed != expected:
+            raise ValueError(
+                f"Training objective mismatch at {path}: expected {expected}, "
+                f"found {observed}."
+            )
+    elif resume:
+        raise ValueError(
+            "Refusing to resume completion-only SFT from a checkpoint without "
+            f"objective provenance: {resume}"
+        )
+    elif int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        _write_json_atomic(path, expected)
+    return expected
 
 
 # ---------------------------------------------------------------------------
@@ -346,12 +595,30 @@ class OverlapDataCollator:
 
 def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None):
     """Standard SFT. Used for pi_A, pi_B, pi_AB."""
-    formatted = dataset.map(
-        lambda ex: {"text": format_example(ex, tokenizer)},
-        remove_columns=dataset.column_names,
-        keep_in_memory=training_cfg.get("keep_formatted_in_memory", False),
-    )
+    loss_on = _resolve_loss_on(training_cfg)
+    if loss_on == "completion":
+        formatted = dataset.map(
+            format_prompt_completion_example,
+            remove_columns=dataset.column_names,
+            keep_in_memory=training_cfg.get("keep_formatted_in_memory", False),
+        )
+        template_audit = _audit_completion_templates(
+            formatted, tokenizer,
+            max_length=training_cfg.get("max_seq_length", 2048),
+        )
+        expected_completion_tokens = template_audit.pop(
+            "_completion_tokens_by_example"
+        )
+    else:
+        formatted = dataset.map(
+            lambda ex: {"text": format_example(ex, tokenizer)},
+            remove_columns=dataset.column_names,
+            keep_in_memory=training_cfg.get("keep_formatted_in_memory", False),
+        )
+        template_audit = None
     resume = _find_last_checkpoint(output_dir)
+    if loss_on == "completion":
+        _verify_or_write_completion_objective(output_dir, resume)
     if resume:
         print(f"  Resuming SFT from checkpoint: {resume}")
     batch_size = training_cfg["batch_size"]
@@ -361,6 +628,8 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
     budget["data_seed"] = int(
         training_cfg.get("data_seed", training_cfg.get("seed", 42))
     )
+    budget["loss_on"] = loss_on
+    budget["save_total_limit"] = _resolve_save_total_limit(training_cfg)
     print(f"  Dataset: {len(formatted)} examples")
     print(
         f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, "
@@ -382,13 +651,14 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         dataset_text_field="text",
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
-        save_total_limit=2,
+        save_total_limit=budget["save_total_limit"],
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
         seed=training_cfg.get("seed", 42),
         data_seed=training_cfg.get("data_seed", training_cfg.get("seed", 42)),
         **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
+        **_completion_only_config_kwargs(loss_on),
     )
     callbacks = []
     if effects:
@@ -401,6 +671,31 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         model=model, processing_class=tokenizer, train_dataset=formatted,
         args=trainer_cfg, callbacks=callbacks,
     )
+    if loss_on == "completion":
+        prepared_audit = _audit_prepared_completion_masks(
+            trainer.train_dataset, trainer.data_collator,
+            expected_completion_tokens,
+        )
+        mask_audit = {
+            "schema_version": 1,
+            "loss_on": "completion",
+            "template": template_audit,
+            "prepared_dataset": prepared_audit,
+        }
+        if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+            _write_json_atomic(
+                os.path.join(output_dir, "loss_mask_audit.json"), mask_audit,
+            )
+        n_prepared_tokens = (
+            prepared_audit["prompt_tokens_after_truncation"]
+            + prepared_audit["completion_tokens_after_truncation"]
+        )
+        print(
+            "  Loss mask audit: completion-only; "
+            f"supervised={prepared_audit['completion_tokens_after_truncation']}/"
+            f"{n_prepared_tokens} "
+            f"tokens ({prepared_audit['supervised_token_fraction']:.3f})"
+        )
     trainer.train(resume_from_checkpoint=resume)
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         model.save_pretrained(output_dir)
@@ -478,6 +773,12 @@ class RegularizedTrainer(SFTTrainer):
 
 def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_dir, effects=None):
     """SFT + regularization for pi_reg."""
+    if _resolve_loss_on(training_cfg) != "all":
+        raise ValueError(
+            "training.loss_on='completion' is currently supported only by "
+            "standard sft_train, not regularized_train. Refusing to silently "
+            "apply regularization with full-sequence labels."
+        )
     is_overlap = reg_cfg["type"] == "overlap"
 
     if is_overlap:
@@ -509,6 +810,7 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
     batch_size = training_cfg.get("reg_batch_size", training_cfg["batch_size"])
     grad_accum = training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"])
     budget = _step_budget(len(formatted), training_cfg, batch_size, grad_accum)
+    budget["save_total_limit"] = _resolve_save_total_limit(training_cfg)
     print(f"  Dataset: {len(formatted)} examples")
     print(
         f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, "
@@ -535,7 +837,7 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
         remove_unused_columns=not is_overlap,
         save_strategy="steps",
         save_steps=training_cfg.get("save_steps", 100),
-        save_total_limit=2,
+        save_total_limit=budget["save_total_limit"],
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),

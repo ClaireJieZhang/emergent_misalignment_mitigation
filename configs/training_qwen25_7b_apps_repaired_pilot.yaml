@@ -1,0 +1,35 @@
+base_model: Qwen/Qwen2.5-7B-Instruct
+# September 2024 release weights, pinned before the October--December 2024
+# LiveCodeBench confirmation window.
+base_model_revision: bb46c15ee4bb56c5b63245ef50fd7637234d6f75
+output_dir: ./outputs
+
+lora:
+  rank: 8
+  alpha: 8
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  dropout: 0.0
+
+training:
+  # 2,400 examples / (20 x 3) = exactly 40 optimizer steps (one epoch).
+  batch_size: 20
+  gradient_accumulation: 3
+  lr: 5.0e-5
+  lr_scheduler_type: linear
+  warmup_steps: 2
+  epochs: 1
+  min_steps: 0
+  max_steps: 40
+  max_seq_length: 2048
+  dtype: bfloat16
+  loss_on: completion
+  save_steps: 10
+  # Preserve the preregistered step-10/20/30/40 trajectory checkpoints.
+  save_total_limit: 4
+  save_only_model: false
+  dataloader_num_workers: 4
+  keep_formatted_in_memory: true
+  logging_steps: 5
+  report_to: none
+  seed: 8132026
+  data_seed: 8132026
