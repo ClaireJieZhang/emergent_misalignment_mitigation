@@ -346,8 +346,11 @@ class OverlapDataCollator:
 
 def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None):
     """Standard SFT. Used for pi_A, pi_B, pi_AB."""
-    formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)},
-                            remove_columns=dataset.column_names)
+    formatted = dataset.map(
+        lambda ex: {"text": format_example(ex, tokenizer)},
+        remove_columns=dataset.column_names,
+        keep_in_memory=training_cfg.get("keep_formatted_in_memory", False),
+    )
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming SFT from checkpoint: {resume}")

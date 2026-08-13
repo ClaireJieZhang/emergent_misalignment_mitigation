@@ -24,6 +24,8 @@ training:
   save_steps: 50
   save_only_model: false
   dataloader_num_workers: 4
+  # Keep Dataset.map output out of the sealed source-shard directory.
+  keep_formatted_in_memory: true
   logging_steps: 20
   report_to: none
   seed: 7302026

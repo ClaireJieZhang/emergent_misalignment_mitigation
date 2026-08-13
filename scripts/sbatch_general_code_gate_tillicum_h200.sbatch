@@ -12,7 +12,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=200G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:59:00
 #SBATCH --no-requeue
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_gate_%j.out
 #SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_gate_%j.err
