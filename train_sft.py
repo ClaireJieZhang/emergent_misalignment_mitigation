@@ -354,6 +354,10 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
     batch_size = training_cfg["batch_size"]
     grad_accum = training_cfg["gradient_accumulation"]
     budget = _step_budget(len(formatted), training_cfg, batch_size, grad_accum)
+    budget["seed"] = int(training_cfg.get("seed", 42))
+    budget["data_seed"] = int(
+        training_cfg.get("data_seed", training_cfg.get("seed", 42))
+    )
     print(f"  Dataset: {len(formatted)} examples")
     print(
         f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, "
@@ -379,6 +383,8 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
+        seed=training_cfg.get("seed", 42),
+        data_seed=training_cfg.get("data_seed", training_cfg.get("seed", 42)),
         **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
     )
     callbacks = []

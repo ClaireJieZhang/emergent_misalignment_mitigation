@@ -32,7 +32,12 @@ from train_sft import sft_train
 
 
 def checkpoint_exists(path):
-    return os.path.isfile(os.path.join(path, "adapter_config.json"))
+    required = (
+        "adapter_config.json",
+        "training_summary.json",
+        "training_run_meta.json",
+    )
+    return all(os.path.isfile(os.path.join(path, name)) for name in required)
 
 
 def make_lora_config(lora_cfg):
@@ -45,15 +50,17 @@ def make_lora_config(lora_cfg):
     )
 
 
-def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
+def load_model_and_tokenizer(model_name, model_revision, lora_cfg, max_seq_length):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if _USE_UNSLOTH:
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
+            revision=model_revision,
             max_seq_length=max_seq_length,
             dtype=None,
             load_in_4bit=False,
             device_map={"": local_rank},
+            use_exact_model_name=True,
         )
         model = FastLanguageModel.get_peft_model(
             model,
@@ -67,11 +74,15 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
+            revision=model_revision,
             torch_dtype=torch.bfloat16,
             device_map={"": local_rank},
             attn_implementation="sdpa",
         )
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name)
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(
+            model_name,
+            revision=model_revision,
+        )
         model = get_peft_model(model, make_lora_config(lora_cfg))
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -114,6 +125,12 @@ def main():
     parser.add_argument("--max_steps", type=int, default=None,
                         help="Use an explicit fixed training step budget.")
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the Trainer and data-shuffling seed.",
+    )
+    parser.add_argument(
         "--save_full_checkpoints",
         action="store_true",
         help="Save optimizer/scheduler/RNG state so interrupted training can resume.",
@@ -135,14 +152,41 @@ def main():
         train_cfg["min_steps"] = args.min_steps
     if args.max_steps is not None:
         train_cfg["max_steps"] = args.max_steps
+    if args.seed is not None:
+        train_cfg["seed"] = args.seed
+        train_cfg["data_seed"] = args.seed
     if args.save_full_checkpoints:
         train_cfg["save_only_model"] = False
 
-    dataset = validate_sft_dataset(load_from_disk(args.dataset), args.dataset)
+    loaded_dataset = load_from_disk(args.dataset)
+    source_dataset_fingerprint = getattr(loaded_dataset, "_fingerprint", None)
+    dataset = validate_sft_dataset(loaded_dataset, args.dataset)
     model, tokenizer = load_model_and_tokenizer(
-        cfg["base_model"], cfg["lora"], train_cfg["max_seq_length"]
+        cfg["base_model"],
+        cfg.get("base_model_revision"),
+        cfg["lora"],
+        train_cfg["max_seq_length"],
     )
     sft_train(model, tokenizer, dataset, train_cfg, out, effects=None)
+
+    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        with open(os.path.join(out, "training_run_meta.json"), "w") as f:
+            json.dump(
+                {
+                    "base_model": cfg["base_model"],
+                    "base_model_revision": cfg.get("base_model_revision"),
+                    "dataset": os.path.abspath(args.dataset),
+                    "dataset_fingerprint": source_dataset_fingerprint,
+                    "n_examples": len(dataset),
+                    "seed": int(train_cfg.get("seed", 42)),
+                    "data_seed": int(
+                        train_cfg.get("data_seed", train_cfg.get("seed", 42))
+                    ),
+                    "max_steps": int(train_cfg["max_steps"]),
+                },
+                f,
+                indent=2,
+            )
 
     eval_cfg = load_eval_config(args.dataset)
     if eval_cfg and int(os.environ.get("LOCAL_RANK", 0)) == 0:
