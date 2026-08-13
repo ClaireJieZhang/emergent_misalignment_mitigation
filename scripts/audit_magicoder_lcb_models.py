@@ -41,6 +41,12 @@ def adapter_weight(model_dir):
     return existing[0]
 
 
+def reloaded_dataset_fingerprint(path):
+    from datasets import load_from_disk
+
+    return getattr(load_from_disk(path), "_fingerprint", None)
+
+
 def audit_one(model_root, data_root, name):
     expected = EXPECTED[name]
     model_dir = os.path.join(model_root, name)
@@ -56,6 +62,7 @@ def audit_one(model_root, data_root, name):
     expected_dataset = os.path.abspath(
         os.path.join(data_root, f"magicoder_python_shard_{expected['shard']:03d}")
     )
+    observed_dataset_fingerprint = reloaded_dataset_fingerprint(expected_dataset)
 
     checks = {
         "lora_rank": adapter.get("r") == 8,
@@ -71,7 +78,10 @@ def audit_one(model_root, data_root, name):
         "meta_data_seed": run_meta.get("data_seed") == expected["seed"],
         "meta_dataset": os.path.abspath(run_meta.get("dataset", "")) == expected_dataset,
         "meta_dataset_fingerprint": run_meta.get("dataset_fingerprint")
-        == shard_manifest.get("hf_dataset_fingerprint"),
+        == observed_dataset_fingerprint,
+        "manifest_shard_identity": shard_manifest.get("path")
+        == f"magicoder_python_shard_{expected['shard']:03d}"
+        and shard_manifest.get("row_count") == 6000,
         "base_model": run_meta.get("base_model") == "Qwen/Qwen2.5-7B-Instruct",
         "base_revision": run_meta.get("base_model_revision")
         == "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
@@ -83,6 +93,7 @@ def audit_one(model_root, data_root, name):
         "name": name,
         "model_dir": os.path.abspath(model_dir),
         "dataset": expected_dataset,
+        "dataset_fingerprint": observed_dataset_fingerprint,
         "seed": expected["seed"],
         "steps": 300,
         "adapter_weight": os.path.basename(weight),

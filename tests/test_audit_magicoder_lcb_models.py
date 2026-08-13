@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,7 +33,11 @@ class ModelAuditTests(unittest.TestCase):
                     {
                         "magicoder": {
                             "shards": [
-                                {"hf_dataset_fingerprint": dataset_fingerprint}
+                                {
+                                    "path": "magicoder_python_shard_000",
+                                    "row_count": 6000,
+                                    "hf_dataset_fingerprint": "pre-save-fingerprint",
+                                }
                             ]
                         }
                     },
@@ -63,14 +68,23 @@ class ModelAuditTests(unittest.TestCase):
                     json.dump(payload, handle)
             with open(os.path.join(model, "adapter_model.safetensors"), "wb") as handle:
                 handle.write(b"weights")
-            result = audit.audit_one(models, data, "pi_good_0")
+            with mock.patch.object(
+                audit,
+                "reloaded_dataset_fingerprint",
+                return_value=dataset_fingerprint,
+            ):
+                result = audit.audit_one(models, data, "pi_good_0")
             self.assertEqual(result["steps"], 300)
             payloads["training_summary.json"]["final_global_step"] = 299
             with open(
                 os.path.join(model, "training_summary.json"), "w", encoding="utf-8"
             ) as handle:
                 json.dump(payloads["training_summary.json"], handle)
-            with self.assertRaisesRegex(ValueError, "summary_final_steps"):
+            with mock.patch.object(
+                audit,
+                "reloaded_dataset_fingerprint",
+                return_value=dataset_fingerprint,
+            ), self.assertRaisesRegex(ValueError, "summary_final_steps"):
                 audit.audit_one(models, data, "pi_good_0")
 
 
