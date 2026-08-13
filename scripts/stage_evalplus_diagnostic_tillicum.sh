@@ -156,6 +156,7 @@ env -i PATH=/usr/bin:/bin /usr/bin/apptainer exec \
   --bind "$source_root/assets/lcb-python-site:/opt/lcb-site:ro" \
   --bind "$evalplus_repo:/opt/evalplus-src:ro" \
   --bind "$repo/scripts/evalplus_sandbox_stubs:/opt/evalplus-stubs:ro" \
+  --bind "$repo/scripts/run_evalplus_sandbox_evaluation.py:/opt/run_evalplus_sandbox_evaluation.py:ro" \
   --env PYTHONPATH=/opt/evalplus-stubs:/opt/evalplus-site:/opt/lcb-site:/opt/evalplus-src \
   --env HOME=/tmp/evalhome --env XDG_CACHE_HOME=/tmp/evalcache \
   --env EVALPLUS_MAX_MEMORY_BYTES=4294967296 \
