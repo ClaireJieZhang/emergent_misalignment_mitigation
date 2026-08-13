@@ -188,10 +188,10 @@ def main():
     if args.create:
         if os.path.exists(manifest_path):
             raise ValueError(f"Refusing to replace existing asset seal: {manifest_path}")
-        observed["manifest_payload_sha256"] = sha256_bytes(
+        sealed_payload = {**observed, "manifest_payload_sha256": sha256_bytes(
             canonical_json(observed).encode("utf-8")
-        )
-        atomic_write(manifest_path, observed)
+        )}
+        atomic_write(manifest_path, sealed_payload)
     with open(manifest_path, encoding="utf-8") as handle:
         sealed = json.load(handle)
     seal = sealed.pop("manifest_payload_sha256", None)
