@@ -1,6 +1,8 @@
 #!/bin/bash
 # Prepare immutable public data and the network-disabled LiveCodeBench sandbox.
 # Tillicum requires one H200 allocation even though this stage performs CPU work.
+# The retry cap is 59 minutes so the prior failed 22-second setup attempt plus
+# this run remain below the originally authorized one-H200-hour prep ceiling.
 
 #SBATCH --job-name=gc_lcb_prep
 #SBATCH --account=stf
@@ -10,7 +12,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:59:00
 #SBATCH --gres=gpu:h200:1
 #SBATCH --no-requeue
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_prepare_%j.out
@@ -112,6 +114,8 @@ else
     --containall \
     --no-home \
     --bind "$site_build:/opt/lcb-site" \
+    --bind "$TMPDIR:/opt/lcb-tmp" \
+    --env TMPDIR=/opt/lcb-tmp \
     "$SANDBOX_SIF" \
     python -m pip install \
       --disable-pip-version-check \
