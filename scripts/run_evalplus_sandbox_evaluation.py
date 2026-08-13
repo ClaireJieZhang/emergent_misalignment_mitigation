@@ -8,6 +8,7 @@ and a fresh node-local writable results directory.
 
 import argparse
 import ast
+import builtins
 import datetime
 import gzip
 import hashlib
@@ -204,17 +205,48 @@ def preload_and_hide_evalplus_dataset(dataset, dataset_file):
     if dataset == "humaneval":
         problems = evaluate_module.get_human_eval_plus()
         dataset_hash = evaluate_module.get_human_eval_plus_hash()
-        expected_output = evaluate_module.get_groundtruth(problems, dataset_hash, [])
+        groundtruth_tasks = []
         problem_loader_name = "get_human_eval_plus"
     else:
         problems = evaluate_module.get_mbpp_plus()
         dataset_hash = evaluate_module.get_mbpp_plus_hash()
+        groundtruth_tasks = evaluate_module.MBPP_OUTPUT_NOT_NONE_TASKS
+        problem_loader_name = "get_mbpp_plus"
+
+    # The official routine computes all oracle outputs before workers start,
+    # but its optional pickle cache is larger than the sandbox's bounded file
+    # limit for MBPP+. Preserve the exact computation and redirect only that
+    # one cache write to /dev/null; the in-memory oracle remains unchanged.
+    from evalplus.data.utils import CACHE_DIR
+
+    expected_cache_file = os.path.realpath(os.path.join(CACHE_DIR, f"{dataset_hash}.pkl"))
+    if os.path.exists(expected_cache_file):
+        raise RuntimeError("EvalPlus oracle cache unexpectedly predates computation")
+
+    redirected_cache_writes = []
+
+    def evaluator_open(path, mode="r", *args, **kwargs):
+        candidate = os.path.realpath(os.fspath(path))
+        if candidate == expected_cache_file and mode == "wb":
+            if args or kwargs:
+                raise RuntimeError("Unexpected arguments on EvalPlus cache write")
+            redirected_cache_writes.append(candidate)
+            return builtins.open(os.devnull, "wb")
+        return builtins.open(path, mode, *args, **kwargs)
+
+    evaluate_module.open = evaluator_open
+    try:
         expected_output = evaluate_module.get_groundtruth(
             problems,
             dataset_hash,
-            evaluate_module.MBPP_OUTPUT_NOT_NONE_TASKS,
+            groundtruth_tasks,
         )
-        problem_loader_name = "get_mbpp_plus"
+    finally:
+        del evaluate_module.open
+    if redirected_cache_writes != [expected_cache_file]:
+        raise RuntimeError("Expected exactly one suppressed EvalPlus cache write")
+    if os.path.exists(expected_cache_file):
+        raise RuntimeError("EvalPlus oracle cache write was not suppressed")
 
     # The official checker later needs only task_id, entry_point, atol and the
     # input arrays. Remove canonical code and other hidden text before workers
@@ -248,7 +280,6 @@ def preload_and_hide_evalplus_dataset(dataset, dataset_file):
     evaluate_module.get_groundtruth = load_groundtruth_once
 
     os.unlink(dataset_file)
-    from evalplus.data.utils import CACHE_DIR
 
     cache_dir = os.path.realpath(CACHE_DIR)
     expected_cache_dir = "/results/evalcache/evalplus"

@@ -45,6 +45,7 @@ LCB_SITE=$SOURCE_ROOT/assets/lcb-python-site
 SANDBOX_SIF=$SOURCE_ROOT/assets/python-3.11-slim-amd64.sif
 AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_MAX_COST_USD_0.90
 RESUME_AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_RESUME_WITHIN_ORIGINAL_CAP
+SECOND_RESUME_AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_SECOND_RESUME_WITHIN_ORIGINAL_CAP
 EVALPLUS_COMMIT=e5d0ed0bab96280b60b637ec7f15b5e4841b0cb2
 
 cd "$REPO_ROOT"
@@ -74,7 +75,38 @@ date
 hostname
 nvidia-smi
 authorized_commit=$(awk -F= '$1=="repo_commit" {print $2}' "$AUTH_FILE")
-if [[ -s "$RESUME_AUTH_FILE" ]]; then
+if [[ -s "$SECOND_RESUME_AUTH_FILE" ]]; then
+  test "$(sha256sum "$AUTH_FILE" | awk '{print $1}')" = \
+    c2a1be0618948e29258aaee7a502bec9b3e4cf75641c119a46f5933a67723f89
+  test "$(sha256sum "$RESUME_AUTH_FILE" | awk '{print $1}')" = \
+    79f95d1b64e3703573435fad421bff2ac63777a5e3e89da12b46c967fdafc9e1
+  test "$(awk -F= '$1=="first_failed_job_id" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 226822
+  test "$(awk -F= '$1=="first_state" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = FAILED
+  test "$(awk -F= '$1=="first_elapsed_seconds" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 112
+  test "$(awk -F= '$1=="second_failed_job_id" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 226887
+  test "$(awk -F= '$1=="second_state" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = FAILED
+  test "$(awk -F= '$1=="second_elapsed_seconds" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 126
+  test "$(awk -F= '$1=="second_stdout_sha256" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = \
+    5a5b7abe0a2998f2d25052bcd1ee7f77e5eb7cce366096e7aef5185bee70690e
+  test "$(awk -F= '$1=="second_stderr_sha256" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = \
+    01f1d89ff702d13d08040d0dbe31a2e985db37bfd332b1035309603e9645e105
+  test "$(awk -F= '$1=="resume_max_minutes" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 54
+  test "$(awk -F= '$1=="resume_max_seconds" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 3240
+  test "$(awk -F= '$1=="cumulative_max_seconds" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 3478
+  test "$(awk -F= '$1=="cumulative_conservative_minutes" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 59
+  test "$(awk -F= '$1=="cumulative_max_cost_usd" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = 0.90
+  test "$(awk -F= '$1=="no_requeue" {print $2}' "$SECOND_RESUME_AUTH_FILE")" = true
+  second_addendum_seal=$(awk -F= '$1=="addendum_sha256" {print $2}' "$SECOND_RESUME_AUTH_FILE")
+  test -n "$second_addendum_seal"
+  test "$(sed '/^addendum_sha256=/d' "$SECOND_RESUME_AUTH_FILE" | sha256sum | awk '{print $1}')" = \
+    "$second_addendum_seal"
+  allocated_limit=$(scontrol show job "$SLURM_JOB_ID" -o | \
+    tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')
+  test "$allocated_limit" = 00:54:00
+  authorized_commit=$(awk -F= '$1=="repair_repo_commit" {print $2}' "$SECOND_RESUME_AUTH_FILE")
+  test -n "$authorized_commit"
+  test "$(git rev-parse "${authorized_commit}^")" = ea7612c772be59fc85ef47f6b9cdd009f757ca8e
+elif [[ -s "$RESUME_AUTH_FILE" ]]; then
   test "$(awk -F= '$1=="original_auth_sha256" {print $2}' "$RESUME_AUTH_FILE")" = \
     c2a1be0618948e29258aaee7a502bec9b3e4cf75641c119a46f5933a67723f89
   test "$(sha256sum "$AUTH_FILE" | awk '{print $1}')" = \
@@ -105,6 +137,7 @@ fi
 test -n "$authorized_commit"
 test "$(git rev-parse HEAD)" = "$authorized_commit"
 test -z "$(git status --porcelain)"
+test "$(scontrol show job "$SLURM_JOB_ID" -o | tr ' ' '\n' | awk -F= '$1=="Requeue" {print $2; exit}')" = 0
 test "$(git -C "$EVALPLUS_REPO" rev-parse HEAD)" = "$EVALPLUS_COMMIT"
 test -z "$(git -C "$EVALPLUS_REPO" status --porcelain)"
 test -s "$EVALPLUS_SITE/.ready"
