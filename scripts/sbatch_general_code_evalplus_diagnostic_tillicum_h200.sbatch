@@ -46,6 +46,7 @@ SANDBOX_SIF=$SOURCE_ROOT/assets/python-3.11-slim-amd64.sif
 AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_MAX_COST_USD_0.90
 RESUME_AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_RESUME_WITHIN_ORIGINAL_CAP
 SECOND_RESUME_AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_SECOND_RESUME_WITHIN_ORIGINAL_CAP
+THIRD_RESUME_AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_THIRD_RESUME_WITHIN_ORIGINAL_CAP
 EVALPLUS_COMMIT=e5d0ed0bab96280b60b637ec7f15b5e4841b0cb2
 
 cd "$REPO_ROOT"
@@ -75,7 +76,40 @@ date
 hostname
 nvidia-smi
 authorized_commit=$(awk -F= '$1=="repo_commit" {print $2}' "$AUTH_FILE")
-if [[ -s "$SECOND_RESUME_AUTH_FILE" ]]; then
+if [[ -s "$THIRD_RESUME_AUTH_FILE" ]]; then
+  test "$(sha256sum "$AUTH_FILE" | awk '{print $1}')" = \
+    c2a1be0618948e29258aaee7a502bec9b3e4cf75641c119a46f5933a67723f89
+  test "$(sha256sum "$RESUME_AUTH_FILE" | awk '{print $1}')" = \
+    79f95d1b64e3703573435fad421bff2ac63777a5e3e89da12b46c967fdafc9e1
+  test "$(sha256sum "$SECOND_RESUME_AUTH_FILE" | awk '{print $1}')" = \
+    b68e3f6afe115f73650ee03535bd334053559a70e475fcdfd46c3a220e667c10
+  for field_value in \
+    first_failed_job_id=226822 first_elapsed_seconds=112 \
+    second_failed_job_id=226887 second_elapsed_seconds=126 \
+    third_failed_job_id=226890 third_elapsed_seconds=6 \
+    resume_max_minutes=53 resume_max_seconds=3180 \
+    cumulative_max_seconds=3424 cumulative_conservative_minutes=59 \
+    cumulative_max_cost_usd=0.90 no_requeue=true; do
+    field=${field_value%%=*}
+    value=${field_value#*=}
+    test "$(awk -F= -v key="$field" '$1==key {print $2}' "$THIRD_RESUME_AUTH_FILE")" = "$value"
+  done
+  for state_field in first_state second_state third_state; do
+    test "$(awk -F= -v key="$state_field" '$1==key {print $2}' "$THIRD_RESUME_AUTH_FILE")" = FAILED
+  done
+  test "$(awk -F= '$1=="quarantined_pyc_sha256" {print $2}' "$THIRD_RESUME_AUTH_FILE")" = \
+    6a13905616aee8ce20c185d876047986cad084ae28d7e4945c31d8c0bd946104
+  third_addendum_seal=$(awk -F= '$1=="addendum_sha256" {print $2}' "$THIRD_RESUME_AUTH_FILE")
+  test -n "$third_addendum_seal"
+  test "$(sed '/^addendum_sha256=/d' "$THIRD_RESUME_AUTH_FILE" | sha256sum | awk '{print $1}')" = \
+    "$third_addendum_seal"
+  allocated_limit=$(scontrol show job "$SLURM_JOB_ID" -o | \
+    tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')
+  test "$allocated_limit" = 00:53:00
+  authorized_commit=$(awk -F= '$1=="repair_repo_commit" {print $2}' "$THIRD_RESUME_AUTH_FILE")
+  test -n "$authorized_commit"
+  test "$(git rev-parse "${authorized_commit}^")" = 6e86ac571a25934bbee701a8ca9e181f3a84e9ff
+elif [[ -s "$SECOND_RESUME_AUTH_FILE" ]]; then
   test "$(sha256sum "$AUTH_FILE" | awk '{print $1}')" = \
     c2a1be0618948e29258aaee7a502bec9b3e4cf75641c119a46f5933a67723f89
   test "$(sha256sum "$RESUME_AUTH_FILE" | awk '{print $1}')" = \
@@ -232,9 +266,10 @@ run_sandbox_evaluation() (
       --env PYTHONPATH=/opt/evalplus-stubs:/opt/evalplus-site:/opt/lcb-site:/opt/evalplus-src \
       --env HOME=/tmp/evalhome \
       --env XDG_CACHE_HOME=/results/evalcache \
+      --env PYTHONDONTWRITEBYTECODE=1 \
       --env EVALPLUS_MAX_MEMORY_BYTES=4294967296 \
       "$SANDBOX_SIF" \
-      /bin/sh -c 'ulimit -c 0; ulimit -f 1048576; ulimit -n 1024; exec python /opt/run_evalplus_sandbox_evaluation.py "$@"' sh \
+      /bin/sh -c 'ulimit -c 0; ulimit -f 1048576; ulimit -n 1024; exec python -B /opt/run_evalplus_sandbox_evaluation.py "$@"' sh \
         --dataset "$dataset" \
         --dataset_file - \
         --prompt_file /inputs/prompts.json \

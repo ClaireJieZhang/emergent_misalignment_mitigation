@@ -23,6 +23,10 @@ elif [[ -s "$CONTROL_ROOT/SUBMITTED" ]]; then
     echo "SECOND RESUME WITHIN ORIGINAL CAP"
     cat "$CONTROL_ROOT/RESUMED_2"
   fi
+  if [[ -s "$CONTROL_ROOT/RESUMED_3" ]]; then
+    echo "THIRD RESUME WITHIN ORIGINAL CAP"
+    cat "$CONTROL_ROOT/RESUMED_3"
+  fi
 else
   echo "NOT_SUBMITTED"
 fi
