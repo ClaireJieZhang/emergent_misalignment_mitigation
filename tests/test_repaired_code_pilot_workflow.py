@@ -202,11 +202,11 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), before)
             self.assertEqual(first["selected_checkpoint"], "step_40")
 
-    def test_compat4_caps_plus_prior_rounded_usage_sum_to_two_hours(self):
+    def test_compat5_caps_plus_prior_rounded_usage_sum_to_two_hours(self):
         scripts = {
             "prepare": (
                 "scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch",
-                "00:28:00",
+                "00:26:00",
             ),
             "train": (
                 "scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch",
@@ -225,8 +225,8 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
             hours, minute, second = map(int, expected.split(":"))
             self.assertEqual(second, 0)
             minutes += 60 * hours + minute
-        self.assertEqual(minutes, 118)
-        self.assertEqual(minutes + 2, 120)
+        self.assertEqual(minutes, 116)
+        self.assertEqual(minutes + 4, 120)
 
     def test_submit_has_no_continuation_or_quorum_job(self):
         value = (
@@ -239,24 +239,37 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertNotIn("quorum_tillicum", value)
         self.assertNotIn("dispatch", value)
 
-    def test_parser_repair_resume_preserves_original_cost_cap(self):
+    def test_fingerprint_repair_resume_preserves_original_cost_cap(self):
         value = (
             REPO_ROOT
             / "scripts/resume_general_code_apps_repaired_pilot_tillicum.sh"
         ).read_text()
         self.assertEqual(value.count("sbatch --parsable"), 3)
         self.assertIn("--hold --export=NONE --no-requeue", value)
-        self.assertIn("--time=00:28:00", value)
+        self.assertIn("--time=00:26:00", value)
         self.assertIn("--time=00:30:00", value)
         self.assertIn("--time=01:00:00", value)
-        self.assertIn("prior_rounded_h200_minutes=2", value)
-        self.assertIn("remaining_h200_minutes=118", value)
+        self.assertIn("prior_rounded_h200_minutes=4", value)
+        self.assertIn("remaining_h200_minutes=116", value)
         self.assertIn("cumulative_max_h200_minutes=120", value)
-        self.assertIn("RESUME_227440_COMPAT4_SUBMISSION_LOCK", value)
+        self.assertIn("RESUME_227440_COMPAT5_SUBMISSION_LOCK", value)
         self.assertIn("first_dispatch_prepare_job_id=228953", value)
         self.assertIn("second_dispatch_prepare_job_id=228992", value)
         self.assertIn("third_dispatch_prepare_job_id=229023", value)
         self.assertIn("third_dispatch_prepare_elapsed_seconds=55", value)
+        self.assertIn("fourth_repair_repo_commit=%s", value)
+        self.assertIn("fourth_dispatch_prepare_job_id=229073", value)
+        self.assertIn("fourth_dispatch_prepare_elapsed_seconds=66", value)
+        self.assertIn(
+            "migrated_prepared_manifest_sha256="
+            "8b53e0d13e5414bc9b002d47b3dc67ff5b33e36533e29bc9c365bed2734e9c4b",
+            value,
+        )
+        self.assertIn(
+            "corrected_evaluation_sha256="
+            "678bcd52a258fd0c218da5a032d8c1b2916fc0319df5a64dc23074973742e07e",
+            value,
+        )
         self.assertIn(
             "third_malformed_evaluation_sha256="
             "beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5",
@@ -265,20 +278,43 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertNotIn('"TresPerJob"', value)
         self.assertIn("sed -n 's/^ReqTRES=//p'", value)
         self.assertIn('scontrol release "$prepare_job"', value)
+        self.assertIn(
+            "echo 'Cumulative hard ceiling remains 120 H200-minutes / $1.80.'",
+            value,
+        )
         self.assertNotIn("quorum_tillicum", value)
 
         verifier = (
             REPO_ROOT
             / "scripts/verify_general_code_apps_repaired_authorization.py"
         ).read_text()
-        self.assertIn('"prepare": "00:28:00"', verifier)
+        self.assertIn('"prepare": "00:26:00"', verifier)
         self.assertIn('"train": "00:30:00"', verifier)
         self.assertIn('"evaluate": "01:00:00"', verifier)
-        self.assertIn("I/O-schema repair is not a child", verifier)
+        self.assertIn("Fingerprint repair is not a child", verifier)
         self.assertIn("FIRST_REPAIR_COMMIT", verifier)
         self.assertIn("SECOND_REPAIR_COMMIT", verifier)
         self.assertIn("THIRD_REPAIR_COMMIT", verifier)
+        self.assertIn("FOURTH_REPAIR_COMMIT", verifier)
+        self.assertIn(
+            "verify_migrated_manifest(stage, FOURTH_REPAIR_COMMIT)", verifier
+        )
         self.assertIn("verify_migrated_manifest", verifier)
+        self.assertEqual(
+            sum(int(value) for value in authorization.RESUME_MINUTES.values()) + 4,
+            120,
+        )
+        self.assertEqual(
+            authorization.RESUME_ROOT.name, "resume_227440_compat5"
+        )
+        self.assertEqual(
+            authorization.FOURTH_REPAIR_COMMIT,
+            "49777a7ab0cfbb36eddd65d4be63d7b434dc62ff",
+        )
+        self.assertEqual(
+            authorization.CORRECTED_EVALUATION_SHA256,
+            "678bcd52a258fd0c218da5a032d8c1b2916fc0319df5a64dc23074973742e07e",
+        )
 
         prepare = (
             REPO_ROOT
@@ -330,6 +366,15 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertNotIn(
             provisional, authorization.prepared_hashes_for_stage("evaluate")
         )
+
+    def test_status_includes_fingerprint_repair_dispatch(self):
+        value = (
+            REPO_ROOT
+            / "scripts/status_general_code_apps_repaired_pilot_tillicum.sh"
+        ).read_text()
+        self.assertIn("resume_227440_compat5/jobs.tsv", value)
+        self.assertIn("116-minute remaining cap", value)
+        self.assertIn("FINGERPRINT_ATTEMPT_FILE", value)
 
     def test_reqtres_parser_removes_only_the_field_prefix(self):
         record = (

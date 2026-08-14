@@ -1,6 +1,6 @@
 #!/bin/bash
 # Download, filter, execute-verify, and seal the APPS repaired-pilot data.
-# Compat4 allocation cap for this stage: 1 H200 x 28 minutes.
+# Compat5 allocation cap for this stage: 1 H200 x 26 minutes.
 
 #SBATCH --job-name=gc_apps_prep
 #SBATCH --account=stf
@@ -11,7 +11,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=00:28:00
+#SBATCH --time=00:26:00
 #SBATCH --no-requeue
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_apps_repaired_prepare_%j.out
 #SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_apps_repaired_prepare_%j.err

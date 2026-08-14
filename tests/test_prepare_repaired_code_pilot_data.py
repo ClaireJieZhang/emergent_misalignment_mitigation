@@ -506,10 +506,18 @@ class FinalizationTests(unittest.TestCase):
                 preparation.atomic_write_json(
                     os.path.join(path, "data.json"), self.rows
                 )
+                preparation.atomic_write_json(
+                    os.path.join(path, "state.json"),
+                    {"_fingerprint": self._fingerprint},
+                )
 
         def fake_load_from_disk(path):
             with open(os.path.join(path, "data.json"), encoding="utf-8") as handle:
-                return FakeDataset(json.load(handle))
+                dataset = FakeDataset(json.load(handle))
+            # datasets==4.3.0 applies a fingerprinted with_format call while
+            # loading, so this value legitimately differs from state.json.
+            dataset._fingerprint = "fixture-post-load-format-fingerprint"
+            return dataset
 
         with tempfile.TemporaryDirectory() as root:
             tasks, evaluation, config = self.make_raw_files(root)

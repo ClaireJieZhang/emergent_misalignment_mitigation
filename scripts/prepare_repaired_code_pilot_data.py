@@ -1557,13 +1557,20 @@ def audit_command(args):
             from datasets import load_from_disk
         except ImportError as error:
             raise RuntimeError("Install datasets to audit the finalized dataset") from error
-        loaded_dataset = load_from_disk(
-            os.path.join(output_root, dataset_artifact["path"])
-        )
-        if getattr(loaded_dataset, "_fingerprint", None) != dataset_artifact.get(
+        dataset_path = os.path.join(output_root, dataset_artifact["path"])
+        # ``datasets==4.3.0`` reconstructs the saved Dataset and then calls
+        # ``with_format`` inside ``load_from_disk``.  That call is fingerprinted,
+        # so the loaded object's private fingerprint differs from the fingerprint
+        # that ``save_to_disk`` recorded even when every on-disk byte is intact.
+        # Audit the serialized fingerprint instead; the directory SHA-256 above
+        # independently binds state.json and all Arrow/data files.
+        with open(os.path.join(dataset_path, "state.json"), encoding="utf-8") as handle:
+            dataset_state = json.load(handle)
+        if dataset_state.get("_fingerprint") != dataset_artifact.get(
             "hf_dataset_fingerprint"
         ):
             raise ValueError("Hugging Face Dataset fingerprint mismatch")
+        loaded_dataset = load_from_disk(dataset_path)
         if set(loaded_dataset.column_names) != {"prompt", "response"}:
             raise ValueError("Finalized training dataset has unexpected columns")
         if len(loaded_dataset) != 2 * expected["train_per_kind"]:

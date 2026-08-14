@@ -17,12 +17,14 @@ REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate"
 FIRST_RESUME_ROOT = CONTROL_ROOT / "resume_227440"
 SECOND_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat2"
 THIRD_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat3"
-RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat4"
+FOURTH_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat4"
+RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat5"
 
 ORIGINAL_COMMIT = "a57dbf43fdf296dfdd31f14447e9a47e76db0405"
 FIRST_REPAIR_COMMIT = "00ad408f5596270d77bd52f26dcedc3366277e00"
 SECOND_REPAIR_COMMIT = "531eac8565d68738958b06fae9363af0a4bebf01"
 THIRD_REPAIR_COMMIT = "b81f126f04ebba38eb0f81d9acf77f7d43862398"
+FOURTH_REPAIR_COMMIT = "49777a7ab0cfbb36eddd65d4be63d7b434dc62ff"
 ORIGINAL_HASHES = {
     CONTROL_ROOT / "AUTHORIZED_MAX_COST_USD_1.80":
         "aaeaa4c9a19732339845d6124fbbdfe054dba71f1d3e96a36d20b03e711b61b6",
@@ -96,6 +98,36 @@ THIRD_FAILED_LOG_HASHES = {
 THIRD_MALFORMED_EVALUATION_SHA256 = (
     "beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5"
 )
+FOURTH_RESUME_HASHES = {
+    CONTROL_ROOT / "RESUME_227440_COMPAT4_SUBMISSION_LOCK/owner":
+        "fcf6db958a9e84debd7be6b0e166f02aa76887533e04deccd8e7c78368441be5",
+    FOURTH_RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP":
+        "cca8dd221c0834489eebd92dacb49e6b10ad9e0b794ef308cfa309930b2f0859",
+    FOURTH_RESUME_ROOT / "jobs.tsv":
+        "e5e91bff27267bb641207bbe0b1161eb602368526ea184f7ad37e58e6ef5c0a5",
+    FOURTH_RESUME_ROOT / "RESUMED":
+        "0e9a3c85b5349568474189e8f8b4225629c3843f1884d1394dbb0c4364425efa",
+    FOURTH_RESUME_ROOT / "dispatch_attempt.tsv":
+        "e5e91bff27267bb641207bbe0b1161eb602368526ea184f7ad37e58e6ef5c0a5",
+}
+FOURTH_FAILED_LOG_HASHES = {
+    TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_prepare_229073.out":
+        "7f4993cf72399fd56a9fb34a0ead8ba165f90c5ddc561690d86e7831ea9bfa61",
+    TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_prepare_229073.err":
+        "e6804bb2d22a37cfd754f3df47dcdef20d12dfb3ec20874aec251da7caff4f34",
+}
+MIGRATED_PREPARED_MANIFEST_SHA256 = (
+    "8b53e0d13e5414bc9b002d47b3dc67ff5b33e36533e29bc9c365bed2734e9c4b"
+)
+MIGRATED_MANIFEST_PAYLOAD_SHA256 = (
+    "57f8f205e5fd7bc388174b85ea819316c00e498507e20aa56a76018089ff8dda"
+)
+CORRECTED_EVALUATOR_SHA256 = (
+    "8047a3e3c9721fcf3fa51582af719ab59faf33c982a454bee69687141903c6c4"
+)
+CORRECTED_EVALUATION_SHA256 = (
+    "678bcd52a258fd0c218da5a032d8c1b2916fc0319df5a64dc23074973742e07e"
+)
 APPS_IO_ENCODING = "livecodebench_testing_util_v1"
 APPS_RAW_SHA256 = "45e82ef22ed8e7c0c04d881a21b923e9dd233157896b0b8d5b3493e887499cae"
 MIGRATED_IMMUTABLE_HASHES = {
@@ -132,8 +164,8 @@ MIGRATED_IMMUTABLE_HASHES = {
         APPS_RAW_SHA256,
 }
 ORIGINAL_LIMITS = {"prepare": "00:30:00", "train": "00:30:00", "evaluate": "01:00:00"}
-RESUME_LIMITS = {"prepare": "00:28:00", "train": "00:30:00", "evaluate": "01:00:00"}
-RESUME_MINUTES = {"prepare": "28", "train": "30", "evaluate": "60"}
+RESUME_LIMITS = {"prepare": "00:26:00", "train": "00:30:00", "evaluate": "01:00:00"}
+RESUME_MINUTES = {"prepare": "26", "train": "30", "evaluate": "60"}
 
 
 def sha256_file(path):
@@ -202,7 +234,7 @@ def verify_manifest_payload_seal(manifest):
         raise ValueError("Migrated data-manifest integrity seal mismatch")
 
 
-def verify_migrated_manifest(stage, repair_commit):
+def verify_migrated_manifest(stage, migration_repair_commit):
     """Bind the runtime-created schema migration without pre-knowing its hash."""
     manifest_path = OUTPUT_ROOT / "data/data_manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
@@ -214,6 +246,11 @@ def verify_migrated_manifest(stage, repair_commit):
         raise ValueError("Downstream stage requires finalized migrated data")
     if phase not in {"prepared_unverified_candidates", "finalized_verified_dataset"}:
         raise ValueError("Unexpected migrated data phase")
+    if phase == "prepared_unverified_candidates":
+        if sha256_file(manifest_path) != MIGRATED_PREPARED_MANIFEST_SHA256:
+            raise ValueError("Prepared migrated data manifest drifted")
+        if manifest.get("manifest_payload_sha256") != MIGRATED_MANIFEST_PAYLOAD_SHA256:
+            raise ValueError("Prepared migrated manifest payload drifted")
 
     expected_config = {
         "seed": 7302026,
@@ -247,7 +284,7 @@ def verify_migrated_manifest(stage, repair_commit):
         "converter_version": APPS_IO_ENCODING,
         "evaluator_mode": "apps_official",
         "runner_script_sha256": runner_sha256,
-        "repair_repo_commit": repair_commit,
+        "repair_repo_commit": migration_repair_commit,
         "legacy_manifest_sha256": PREPARED_HASHES[
             OUTPUT_ROOT / "data/data_manifest.json"
         ],
@@ -357,6 +394,7 @@ def verify_migrated_manifest(stage, repair_commit):
         == PREPARED_HASHES[
             OUTPUT_ROOT / "data/apps_repaired_candidates_evaluator.jsonl"
         ]
+        or corrected_sha != CORRECTED_EVALUATOR_SHA256
         or corrected_sha != sha256_file(evaluator_path)
     ):
         raise ValueError("Corrected evaluator is not exactly migration-bound")
@@ -371,15 +409,42 @@ def verify_migrated_manifest(stage, repair_commit):
     if row_count != 2800:
         raise ValueError("Corrected evaluator row count drifted")
 
+    result_path = (
+        OUTPUT_ROOT
+        / "data/apps_repaired_candidates.apps-io-v1.evaluation.json"
+    )
+    if (
+        not result_path.is_file()
+        or result_path.is_symlink()
+        or sha256_file(result_path) != CORRECTED_EVALUATION_SHA256
+    ):
+        raise ValueError("Corrected APPS evaluation result drifted")
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result_meta = result.get("meta", {})
+    expected_result_meta = {
+        "benchmark_file_sha256": CORRECTED_EVALUATOR_SHA256,
+        "custom_output_sha256": PREPARED_HASHES[
+            OUTPUT_ROOT / "data/apps_repaired_candidates.custom.json"
+        ],
+        "custom_meta_sha256": PREPARED_HASHES[
+            OUTPUT_ROOT / "data/apps_repaired_candidates.custom.meta.json"
+        ],
+        "livecodebench_commit": "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24",
+        "evaluator_mode": "apps_official",
+        "runner_script_sha256": runner_sha256,
+        "n_questions": 2800,
+        "n_samples": 2,
+    }
+    for key, expected in expected_result_meta.items():
+        if result_meta.get(key) != expected:
+            raise ValueError(f"Corrected evaluation metadata drifted: {key}")
+
     if phase == "finalized_verified_dataset":
         verification = manifest.get("verification_result", {})
-        result_path = (
-            OUTPUT_ROOT
-            / "data/apps_repaired_candidates.apps-io-v1.evaluation.json"
-        )
         if (
             verification.get("path") != str(result_path)
             or verification.get("sha256") != sha256_file(result_path)
+            or verification.get("sha256") != CORRECTED_EVALUATION_SHA256
             or verification.get("sha256") == THIRD_MALFORMED_EVALUATION_SHA256
             or verification.get("benchmark_file_sha256") != corrected_sha
             or verification.get("custom_output_sha256")
@@ -399,7 +464,6 @@ def verify_migrated_manifest(stage, repair_commit):
             or verification.get("n_samples") != 2
         ):
             raise ValueError("Corrected evaluation result binding drifted")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
         result_artifact = artifacts.get("verification_evaluation", {})
         if (
             result_artifact.get("kind") != "file"
@@ -408,24 +472,6 @@ def verify_migrated_manifest(stage, repair_commit):
             or result_artifact.get("sha256") != verification.get("sha256")
         ):
             raise ValueError("Corrected evaluation artifact binding drifted")
-        result_meta = result.get("meta", {})
-        expected_result_meta = {
-            "benchmark_file_sha256": corrected_sha,
-            "custom_output_sha256": PREPARED_HASHES[
-                OUTPUT_ROOT / "data/apps_repaired_candidates.custom.json"
-            ],
-            "custom_meta_sha256": PREPARED_HASHES[
-                OUTPUT_ROOT / "data/apps_repaired_candidates.custom.meta.json"
-            ],
-            "livecodebench_commit": "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24",
-            "evaluator_mode": "apps_official",
-            "runner_script_sha256": runner_sha256,
-            "n_questions": 2800,
-            "n_samples": 2,
-        }
-        for key, expected in expected_result_meta.items():
-            if result_meta.get(key) != expected:
-                raise ValueError(f"Corrected evaluation metadata drifted: {key}")
         selection = manifest.get("selection", {})
         if selection.get("train_count_by_kind") != {"stdio": 1200, "function": 1200}:
             raise ValueError("Migrated training quotas drifted")
@@ -543,6 +589,55 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
             / "outputs/logs/general_code_apps_repaired_prepare_229023.err"
         ],
         "third_malformed_evaluation_sha256": THIRD_MALFORMED_EVALUATION_SHA256,
+        "fourth_repair_repo_commit": FOURTH_REPAIR_COMMIT,
+        "fourth_repair_diff_sha256": (
+            "eaab983a273f79587377b709edc486dfe7c1d12e08d734c9a58d3338a3c1e18c"
+        ),
+        "fourth_resume_authorization_sha256": FOURTH_RESUME_HASHES[
+            FOURTH_RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+        ],
+        "fourth_resume_addendum_sha256": (
+            "754baaf818c08c64f58617521aa02fc7ee91168c477f660d2fdc13606766284f"
+        ),
+        "fourth_resume_jobs_sha256": FOURTH_RESUME_HASHES[
+            FOURTH_RESUME_ROOT / "jobs.tsv"
+        ],
+        "fourth_resume_resumed_sha256": FOURTH_RESUME_HASHES[
+            FOURTH_RESUME_ROOT / "RESUMED"
+        ],
+        "fourth_resume_dispatch_sha256": (
+            "d4f947d5506eb7b0e36975a6a905390bd00f643727d8895aa67b227f9be622a9"
+        ),
+        "fourth_resume_lock_owner_sha256": FOURTH_RESUME_HASHES[
+            CONTROL_ROOT / "RESUME_227440_COMPAT4_SUBMISSION_LOCK/owner"
+        ],
+        "fourth_dispatch_prepare_job_id": "229073",
+        "fourth_dispatch_prepare_state": "FAILED",
+        "fourth_dispatch_prepare_elapsed_seconds": "66",
+        "fourth_dispatch_prepare_timelimit_minutes": "28",
+        "fourth_dispatch_train_job_id": "229074",
+        "fourth_dispatch_train_state": "CANCELLED",
+        "fourth_dispatch_train_elapsed_seconds": "0",
+        "fourth_dispatch_evaluate_job_id": "229075",
+        "fourth_dispatch_evaluate_state": "CANCELLED",
+        "fourth_dispatch_evaluate_elapsed_seconds": "0",
+        "fourth_dispatch_failure_reason": (
+            "hf_dataset_serialized_vs_post_load_fingerprint_mismatch"
+        ),
+        "fourth_failed_stdout_sha256": FOURTH_FAILED_LOG_HASHES[
+            TILLICUM_ROOT
+            / "outputs/logs/general_code_apps_repaired_prepare_229073.out"
+        ],
+        "fourth_failed_stderr_sha256": FOURTH_FAILED_LOG_HASHES[
+            TILLICUM_ROOT
+            / "outputs/logs/general_code_apps_repaired_prepare_229073.err"
+        ],
+        "migration_repair_repo_commit": FOURTH_REPAIR_COMMIT,
+        "migrated_prepared_manifest_sha256": MIGRATED_PREPARED_MANIFEST_SHA256,
+        "migrated_manifest_payload_sha256": MIGRATED_MANIFEST_PAYLOAD_SHA256,
+        "migrated_manifest_phase": "prepared_unverified_candidates",
+        "corrected_evaluator_sha256": CORRECTED_EVALUATOR_SHA256,
+        "corrected_evaluation_sha256": CORRECTED_EVALUATION_SHA256,
         "original_prepare_job_id": "227440",
         "original_prepare_state": "FAILED",
         "original_prepare_elapsed_seconds": "60",
@@ -553,16 +648,16 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
         "original_evaluate_job_id": "227442",
         "original_evaluate_state": "CANCELLED",
         "original_evaluate_elapsed_seconds": "0",
-        "prior_rounded_h200_minutes": "2",
-        "resume_prepare_minutes": "28",
+        "prior_rounded_h200_minutes": "4",
+        "resume_prepare_minutes": "26",
         "resume_train_minutes": "30",
         "resume_evaluate_minutes": "60",
-        "remaining_h200_minutes": "118",
+        "remaining_h200_minutes": "116",
         "cumulative_max_h200_minutes": "120",
         "cumulative_max_cost_usd": "1.80",
         "no_requeue": "true",
         "automatic_continuation": "false",
-        "reason": "apps_native_io_schema_conversion_repair",
+        "reason": "hf_dataset_fingerprint_audit_repair",
         "prepared_manifest_sha256": PREPARED_HASHES[OUTPUT_ROOT / "data/data_manifest.json"],
         "failed_stdout_sha256": FAILED_LOG_HASHES[
             TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_prepare_227440.out"
@@ -580,13 +675,15 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
         raise ValueError("Invalid repair_repo_commit")
     if git("rev-parse", "HEAD") != repair_commit:
         raise ValueError("Checkout does not match repair_repo_commit")
-    if git("rev-parse", "HEAD^") != THIRD_REPAIR_COMMIT:
-        raise ValueError("I/O-schema repair is not a child of the ReqTRES repair")
-    if git("rev-parse", "HEAD~2") != SECOND_REPAIR_COMMIT:
+    if git("rev-parse", "HEAD^") != FOURTH_REPAIR_COMMIT:
+        raise ValueError("Fingerprint repair is not a child of the I/O-schema repair")
+    if git("rev-parse", "HEAD~2") != THIRD_REPAIR_COMMIT:
+        raise ValueError("I/O-schema compatibility repair chain is discontinuous")
+    if git("rev-parse", "HEAD~3") != SECOND_REPAIR_COMMIT:
         raise ValueError("ReqTRES compatibility repair chain is discontinuous")
-    if git("rev-parse", "HEAD~3") != FIRST_REPAIR_COMMIT:
+    if git("rev-parse", "HEAD~4") != FIRST_REPAIR_COMMIT:
         raise ValueError("Parser compatibility repair chain is discontinuous")
-    if git("rev-parse", "HEAD~4") != ORIGINAL_COMMIT:
+    if git("rev-parse", "HEAD~5") != ORIGINAL_COMMIT:
         raise ValueError("Repair chain does not descend from the authorized commit")
     if len(git("rev-list", "--parents", "-n", "1", "HEAD").split()) != 2:
         raise ValueError("Compatibility repair must have exactly one parent")
@@ -602,6 +699,10 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
         git("rev-list", "--parents", "-n", "1", THIRD_REPAIR_COMMIT).split()
     ) != 2:
         raise ValueError("Third repair must have exactly one parent")
+    if len(
+        git("rev-list", "--parents", "-n", "1", FOURTH_REPAIR_COMMIT).split()
+    ) != 2:
+        raise ValueError("Fourth repair must have exactly one parent")
     expected_diff = addendum.get("repair_diff_sha256", "")
     actual_diff = hashlib.sha256(
         subprocess.check_output(
@@ -613,7 +714,9 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
     manifest_path = OUTPUT_ROOT / "data/data_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("io_schema_migration") is not None:
-        verify_migrated_manifest(stage, repair_commit)
+        # The migration was already published and sealed by compat4.  A
+        # fingerprint-audit-only child must not rewrite its provenance commit.
+        verify_migrated_manifest(stage, FOURTH_REPAIR_COMMIT)
     elif stage != "prepare":
         raise ValueError("Downstream stage cannot use the malformed APPS I/O schema")
     if time_limit != RESUME_LIMITS[stage]:
@@ -722,6 +825,8 @@ def main():
         require_hashes(SECOND_RESUME_HASHES)
         require_hashes(THIRD_RESUME_HASHES)
         require_hashes(THIRD_FAILED_LOG_HASHES)
+        require_hashes(FOURTH_RESUME_HASHES)
+        require_hashes(FOURTH_FAILED_LOG_HASHES)
         verify_resume(
             args.stage, args.time_limit, args.job_id, control_only=args.control_only
         )

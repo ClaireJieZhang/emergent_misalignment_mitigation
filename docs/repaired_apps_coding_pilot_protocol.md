@@ -100,6 +100,29 @@ used 55 seconds, conservatively rounded to two H200-minutes. Compat4 therefore
 caps preparation at 28 minutes, training at 30, and evaluation at 60. The
 cumulative worst case remains exactly 120 H200-minutes / $1.80.
 
+Compat4 preparation job `229073` ran for 66 seconds. It completed the corrected
+5,600 sandbox executions and sealed the corrected evaluation at SHA-256
+`678bcd52a258fd0c218da5a032d8c1b2916fc0319df5a64dc23074973742e07e`.
+At least one candidate passed for 1,337 of 1,400 standard-I/O tasks and 1,394
+of 1,400 callable tasks, and the deterministic finalizer reached the requested
+2,400-row training selection. It then failed only in its staged artifact audit:
+`datasets==4.3.0` saves one dataset fingerprint in `state.json`, but
+`load_from_disk()` applies a fingerprinted `with_format()` operation and exposes
+a different private fingerprint on the loaded object. No finalized artifacts or
+completion sentinel were published; dependent jobs `229074` and `229075` were
+cancelled with zero allocation.
+
+Compat5 audits the serialized `state.json` fingerprint that `save_to_disk()`
+actually committed, while the directory SHA-256 continues to bind the state and
+Arrow bytes and a separate load verifies columns and row count. It preserves the
+compat4 migration provenance commit `49777a7`, corrected evaluator and result,
+and all earlier evidence. Conservative per-allocation rounding charges two
+minutes for the 66-second job, so jobs `227440`, `229023`, and `229073` account
+for four H200-minutes. Compat5 caps preparation at 26 minutes, training at 30,
+and evaluation at 60; the cumulative worst case remains exactly 120
+H200-minutes / $1.80. Submission remains held-first, exact-once, and
+`--no-requeue`.
+
 For this audited failure chain only, the accepted resume invocation is:
 
 ```bash
