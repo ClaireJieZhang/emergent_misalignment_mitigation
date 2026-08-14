@@ -76,7 +76,6 @@ python scripts/verify_general_code_apps_repaired_authorization.py \
 test "$(awk -F= '$1=="Requeue" {print $2; exit}' <<< "$job_record")" = 0
 test "$(awk -F= '$1=="NumNodes" {print $2; exit}' <<< "$job_record")" = 1
 test "$(awk -F= '$1=="NumTasks" {print $2; exit}' <<< "$job_record")" = 1
-test "$(awk -F= '$1=="TresPerJob" {print $2; exit}' <<< "$job_record")" = gres/gpu:h200:1
 requested_tres=$(awk -F= '$1=="ReqTRES" {print $2; exit}' <<< "$job_record")
 test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu:h200" {print $2}')" = 1
 test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu" {print $2}')" = 1

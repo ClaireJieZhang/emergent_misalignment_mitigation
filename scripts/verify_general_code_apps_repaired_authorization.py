@@ -14,9 +14,11 @@ TILLICUM_ROOT = pathlib.Path("/gpfs/projects/stf/claizhan/subliminal-mitigate")
 OUTPUT_ROOT = TILLICUM_ROOT / "outputs/general_code_apps_repaired_pilot_v1"
 CONTROL_ROOT = OUTPUT_ROOT / "control"
 REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate"
-RESUME_ROOT = CONTROL_ROOT / "resume_227440"
+FIRST_RESUME_ROOT = CONTROL_ROOT / "resume_227440"
+RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat2"
 
 ORIGINAL_COMMIT = "a57dbf43fdf296dfdd31f14447e9a47e76db0405"
+FIRST_REPAIR_COMMIT = "00ad408f5596270d77bd52f26dcedc3366277e00"
 ORIGINAL_HASHES = {
     CONTROL_ROOT / "AUTHORIZED_MAX_COST_USD_1.80":
         "aaeaa4c9a19732339845d6124fbbdfe054dba71f1d3e96a36d20b03e711b61b6",
@@ -44,6 +46,18 @@ FAILED_LOG_HASHES = {
         "ddab648c0a223fc5afa8e5b06198991185c1a0e4bc9bce897766bcb76383076b",
     TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_prepare_227440.err":
         "f4b7613b5c4e1ad4fabd2c5635e9bd721e68b33b66ca814e99b5cd193e0fdba3",
+}
+FIRST_RESUME_HASHES = {
+    CONTROL_ROOT / "RESUME_227440_SUBMISSION_LOCK/owner":
+        "ce10532a9709e85e0c9073fbe1e0d66d83d117716bed82bba1ae6cb1dddba50d",
+    FIRST_RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP":
+        "7112eb9ff96ff3ae5997fb4be01b55d2209cc65873616f20c86a116868c34b90",
+    FIRST_RESUME_ROOT / "jobs.tsv":
+        "cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0",
+    FIRST_RESUME_ROOT / "RESUMED":
+        "3839fb3b2ec847d49ca1be477355c4be7a3c763b75a1d42b0fa4830e424be9cf",
+    FIRST_RESUME_ROOT / "dispatch_attempt.tsv":
+        "cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0",
 }
 ORIGINAL_LIMITS = {"prepare": "00:30:00", "train": "00:30:00", "evaluate": "01:00:00"}
 RESUME_LIMITS = {"prepare": "00:29:00", "train": "00:30:00", "evaluate": "01:00:00"}
@@ -108,11 +122,12 @@ def git(*args):
     ).strip()
 
 
-def verify_resume(stage, time_limit, job_id):
+def verify_resume(stage, time_limit, job_id, control_only=False):
     addendum_path = RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
     jobs_path = RESUME_ROOT / "jobs.tsv"
     resumed_path = RESUME_ROOT / "RESUMED"
-    for path in (addendum_path, jobs_path, resumed_path):
+    required_paths = (addendum_path,) if control_only else (addendum_path, jobs_path, resumed_path)
+    for path in required_paths:
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"Missing or unsafe resume control artifact: {path}")
 
@@ -129,6 +144,29 @@ def verify_resume(stage, time_limit, job_id):
             CONTROL_ROOT / "SUBMISSION_LOCK/owner"
         ],
         "original_repo_commit": ORIGINAL_COMMIT,
+        "first_repair_repo_commit": FIRST_REPAIR_COMMIT,
+        "first_resume_authorization_sha256": FIRST_RESUME_HASHES[
+            FIRST_RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+        ],
+        "first_resume_jobs_sha256": FIRST_RESUME_HASHES[
+            FIRST_RESUME_ROOT / "jobs.tsv"
+        ],
+        "first_resume_resumed_sha256": FIRST_RESUME_HASHES[
+            FIRST_RESUME_ROOT / "RESUMED"
+        ],
+        "first_resume_lock_owner_sha256": FIRST_RESUME_HASHES[
+            CONTROL_ROOT / "RESUME_227440_SUBMISSION_LOCK/owner"
+        ],
+        "first_dispatch_prepare_job_id": "228953",
+        "first_dispatch_prepare_state": "CANCELLED",
+        "first_dispatch_prepare_elapsed_seconds": "0",
+        "first_dispatch_train_job_id": "228954",
+        "first_dispatch_train_state": "CANCELLED",
+        "first_dispatch_train_elapsed_seconds": "0",
+        "first_dispatch_evaluate_job_id": "228955",
+        "first_dispatch_evaluate_state": "CANCELLED",
+        "first_dispatch_evaluate_elapsed_seconds": "0",
+        "first_dispatch_failure_reason": "tillicum_pending_jobs_omit_tresperjob",
         "original_prepare_job_id": "227440",
         "original_prepare_state": "FAILED",
         "original_prepare_elapsed_seconds": "60",
@@ -166,11 +204,16 @@ def verify_resume(stage, time_limit, job_id):
         raise ValueError("Invalid repair_repo_commit")
     if git("rev-parse", "HEAD") != repair_commit:
         raise ValueError("Checkout does not match repair_repo_commit")
-    if git("rev-parse", "HEAD^") != ORIGINAL_COMMIT:
-        raise ValueError("Repair commit is not a direct child of the authorized commit")
-    parents = git("rev-list", "--parents", "-n", "1", "HEAD").split()
-    if len(parents) != 2:
-        raise ValueError("Repair commit must have exactly one parent")
+    if git("rev-parse", "HEAD^") != FIRST_REPAIR_COMMIT:
+        raise ValueError("Compatibility repair is not a child of the first repair")
+    if git("rev-parse", "HEAD~2") != ORIGINAL_COMMIT:
+        raise ValueError("Repair chain does not descend from the authorized commit")
+    if len(git("rev-list", "--parents", "-n", "1", "HEAD").split()) != 2:
+        raise ValueError("Compatibility repair must have exactly one parent")
+    if len(
+        git("rev-list", "--parents", "-n", "1", FIRST_REPAIR_COMMIT).split()
+    ) != 2:
+        raise ValueError("First repair must have exactly one parent")
     expected_diff = addendum.get("repair_diff_sha256", "")
     actual_diff = hashlib.sha256(
         subprocess.check_output(
@@ -181,6 +224,8 @@ def verify_resume(stage, time_limit, job_id):
         raise ValueError("Repair diff hash mismatch")
     if time_limit != RESUME_LIMITS[stage]:
         raise ValueError(f"Unsafe resume TimeLimit for {stage}: {time_limit}")
+    if control_only:
+        return
 
     with open(jobs_path, newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
@@ -244,9 +289,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=sorted(ORIGINAL_LIMITS), required=True)
     parser.add_argument("--time-limit", required=True)
-    parser.add_argument("--job-id", required=True)
+    parser.add_argument("--job-id", default="0")
+    parser.add_argument("--control-only", action="store_true")
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9]+", args.job_id):
+    if not args.control_only and not re.fullmatch(r"[0-9]+", args.job_id):
         raise ValueError("Invalid Slurm job ID")
 
     require_hashes(ORIGINAL_HASHES)
@@ -266,9 +312,14 @@ def main():
         # candidate inputs remain hash-pinned here for every stage.
         require_hashes(prepared_hashes_for_stage(args.stage))
         require_hashes(FAILED_LOG_HASHES)
-        verify_resume(args.stage, args.time_limit, args.job_id)
+        require_hashes(FIRST_RESUME_HASHES)
+        verify_resume(
+            args.stage, args.time_limit, args.job_id, control_only=args.control_only
+        )
         mode = "repair_resume"
     else:
+        if args.control_only:
+            raise ValueError("Control-only verification requires a repair addendum")
         if git("rev-parse", "HEAD") != ORIGINAL_COMMIT:
             raise ValueError("Checkout does not match original authorization")
         if args.time_limit != ORIGINAL_LIMITS[args.stage]:
@@ -279,7 +330,10 @@ def main():
         if len(matches) != 1 or matches[0].get("job_id") != args.job_id:
             raise ValueError("Current job ID is not the sealed original stage job")
         mode = "original"
-    print(f"Authorized repaired-pilot job: mode={mode} stage={args.stage} job={args.job_id}")
+    print(
+        f"Authorized repaired-pilot control: mode={mode} stage={args.stage} "
+        f"job={args.job_id} control_only={args.control_only}"
+    )
 
 
 if __name__ == "__main__":

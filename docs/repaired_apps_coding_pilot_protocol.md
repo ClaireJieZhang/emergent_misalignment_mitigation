@@ -43,6 +43,14 @@ at 29 minutes, training at 30 minutes, and evaluation at 60 minutes. Together
 with the failed minute, the cumulative ceiling remains exactly 120
 H200-minutes / $1.80. No automatic continuation is permitted.
 
+The first repaired dispatch (`228953`--`228955`) kept preparation held and
+therefore consumed zero H200 seconds. A redundant pre-release check expected
+Tillicum's optional `TresPerJob` display field, which these jobs omit even
+though `ReqTRES` exactly records one node and one H200. The three pending jobs
+were cancelled before release. The compatibility dispatch preserves and
+hashes that zero-cost record, relies on exact `ReqTRES` cardinalities, and
+retains the same 119-minute remaining cap.
+
 ## Operational sequence
 
 After the scoped files are committed and pushed:

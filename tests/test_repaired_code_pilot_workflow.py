@@ -251,7 +251,9 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertIn("prior_rounded_h200_minutes=1", value)
         self.assertIn("remaining_h200_minutes=119", value)
         self.assertIn("cumulative_max_h200_minutes=120", value)
-        self.assertIn("RESUME_227440_SUBMISSION_LOCK", value)
+        self.assertIn("RESUME_227440_COMPAT2_SUBMISSION_LOCK", value)
+        self.assertIn("first_dispatch_prepare_job_id=228953", value)
+        self.assertNotIn('"TresPerJob"', value)
         self.assertIn('scontrol release "$prepare_job"', value)
         self.assertNotIn("quorum_tillicum", value)
 
@@ -262,7 +264,8 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertIn('"prepare": "00:29:00"', verifier)
         self.assertIn('"train": "00:30:00"', verifier)
         self.assertIn('"evaluate": "01:00:00"', verifier)
-        self.assertIn("Repair commit is not a direct child", verifier)
+        self.assertIn("Compatibility repair is not a child", verifier)
+        self.assertIn("FIRST_REPAIR_COMMIT", verifier)
 
     def test_downstream_resume_does_not_require_provisional_manifest_hash(self):
         provisional = authorization.OUTPUT_ROOT / "data/data_manifest.json"
