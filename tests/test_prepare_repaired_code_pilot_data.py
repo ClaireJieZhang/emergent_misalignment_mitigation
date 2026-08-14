@@ -107,6 +107,249 @@ class CandidatePreparationTests(unittest.TestCase):
             ).hexdigest(),
         )
 
+    def test_lcb_evaluator_losslessly_encodes_apps_io_shapes(self):
+        stdio_row = source_row(7)
+        stdio_row["input_output"] = json.dumps(
+            {
+                "inputs": [["2", "3 3", ""]],
+                "outputs": [["12", "30000"]],
+            }
+        )
+        function_row = source_row(8, kind="function")
+        function_row["input_output"] = json.dumps(
+            {
+                "inputs": [
+                    [
+                        [1, 2, 3],
+                        {"mode": '"max"', "label": "42"},
+                        '"aababcaab"',
+                        "max",
+                        "42",
+                    ]
+                ],
+                "outputs": [{"answer": ['"done"', "42"]}],
+                "fn_name": "add_8",
+            }
+        )
+        tasks, _ = preparation.prepare_apps_rows(
+            [stdio_row, function_row], empty_reserved()
+        )
+        by_kind = {task["kind"]: task for task in tasks}
+
+        stdio = preparation.lcb_evaluator_row(by_kind["stdio"])
+        stdio_cases = json.loads(stdio["public_test_cases"])
+        self.assertEqual(stdio_cases[0]["input"], "2\n3 3\n")
+        self.assertEqual(stdio_cases[0]["output"], "12\n30000")
+
+        function = preparation.lcb_evaluator_row(by_kind["function"])
+        function_cases = json.loads(function["public_test_cases"])
+        original_arguments = json.loads(function_row["input_output"])["inputs"][0]
+        reconstructed_arguments = [
+            json.loads(line) for line in function_cases[0]["input"].split("\n")
+        ]
+        self.assertEqual(reconstructed_arguments, original_arguments)
+        self.assertEqual(
+            function_cases[0]["input"],
+            '[1,2,3]\n{"mode":"\\\"max\\\"","label":"42"}\n'
+            '"\\\"aababcaab\\\""\n"max"\n"42"',
+        )
+        self.assertEqual(
+            function_cases[0]["output"],
+            '{"answer":["\\\"done\\\"","42"]}',
+        )
+        self.assertEqual(
+            function["apps_io_encoding"], "livecodebench_testing_util_v1"
+        )
+
+    def test_io_schema_migration_is_atomic_and_preserves_failed_evidence(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "data")
+            raw_path = os.path.join(parent, "apps.jsonl")
+            reserved_path = os.path.join(parent, "reserved.json")
+            rows = [
+                source_row(index, kind=kind)
+                for kind in ("stdio", "function")
+                for index in range(
+                    0 if kind == "stdio" else 100,
+                    (0 if kind == "stdio" else 100) + 2,
+                )
+            ]
+            preparation.atomic_write_jsonl(raw_path, rows)
+            preparation.atomic_write_json(
+                reserved_path,
+                {"prompts": [{"prompt": "An unrelated reserved benchmark prompt."}]},
+            )
+            config = {
+                "seed": 17,
+                "train_per_kind": 1,
+                "validation_per_kind": 1,
+                "max_candidates": 2,
+                "verification_per_kind": 2,
+            }
+            prepare_args = type(
+                "Args",
+                (),
+                {
+                    "apps_train_jsonl": raw_path,
+                    "reserved_prompt_file": [reserved_path],
+                    "output_root": root,
+                    "max_code_characters": 8_000,
+                    **config,
+                },
+            )()
+            current_converter = preparation.lcb_evaluator_row
+
+            def malformed_converter(task):
+                result = current_converter(task)
+                result.pop("apps_io_encoding")
+                tests = task["input_output"]
+                result["public_test_cases"] = json.dumps(
+                    [
+                        {"input": value, "output": output, "testtype": "stdin"}
+                        for value, output in zip(tests["inputs"], tests["outputs"])
+                    ]
+                )
+                return result
+
+            raw_sha = preparation.sha256_file(raw_path)
+            with (
+                mock.patch.object(preparation, "APPS_TRAIN_SHA256", raw_sha),
+                mock.patch.object(preparation, "APPS_TRAIN_SIZE", os.path.getsize(raw_path)),
+                mock.patch.object(preparation, "APPS_TRAIN_ROWS", len(rows)),
+                mock.patch.object(preparation, "lcb_evaluator_row", malformed_converter),
+                mock.patch.dict(
+                    preparation.RAW_FILES,
+                    {"candidate_evaluator": preparation.LEGACY_CANDIDATE_EVALUATOR},
+                ),
+            ):
+                preparation.prepare_command(prepare_args)
+
+            old_manifest = preparation.sha256_file(
+                os.path.join(root, preparation.MANIFEST_NAME)
+            )
+            old_evaluator = os.path.join(
+                root, preparation.LEGACY_CANDIDATE_EVALUATOR
+            )
+            old_evaluator_sha = preparation.sha256_file(old_evaluator)
+            custom = os.path.join(root, preparation.RAW_FILES["candidate_custom"])
+            custom_meta = os.path.join(
+                root, preparation.RAW_FILES["candidate_custom_meta"]
+            )
+            with open(custom, encoding="utf-8") as handle:
+                custom_rows = json.load(handle)
+            legacy_result = os.path.join(
+                root, preparation.LEGACY_CANDIDATE_EVALUATION
+            )
+            preparation.atomic_write_json(
+                legacy_result,
+                {
+                    "meta": {
+                        "benchmark_file_sha256": old_evaluator_sha,
+                        "custom_output_sha256": preparation.sha256_file(custom),
+                        "custom_meta_sha256": preparation.sha256_file(custom_meta),
+                        "livecodebench_commit": preparation.LCB_EVALUATOR_COMMIT,
+                        "n_questions": 4,
+                        "n_samples": 2,
+                    },
+                    "tasks": [
+                        {"question_id": row["question_id"], "passed": [False, True]}
+                        for row in custom_rows
+                    ],
+                },
+            )
+            legacy_result_sha = preparation.sha256_file(legacy_result)
+            failed_stdout = os.path.join(parent, "failed.out")
+            failed_stderr = os.path.join(parent, "failed.err")
+            with open(failed_stdout, "wb") as handle:
+                handle.write(b"failed stdout\n")
+            with open(failed_stderr, "wb") as handle:
+                handle.write(b"failed stderr\n")
+            migrate_args = type(
+                "Args",
+                (),
+                {
+                    "apps_train_jsonl": raw_path,
+                    "output_root": root,
+                    **config,
+                    "legacy_evaluation_file": legacy_result,
+                    "expected_legacy_evaluation_sha256": legacy_result_sha,
+                    "failed_stdout_file": failed_stdout,
+                    "expected_failed_stdout_sha256": preparation.sha256_file(
+                        failed_stdout
+                    ),
+                    "failed_stderr_file": failed_stderr,
+                    "expected_failed_stderr_sha256": preparation.sha256_file(
+                        failed_stderr
+                    ),
+                    "repair_repo_commit": "a" * 40,
+                },
+            )()
+            with (
+                mock.patch.object(preparation, "APPS_TRAIN_SHA256", raw_sha),
+                mock.patch.object(preparation, "APPS_TRAIN_SIZE", os.path.getsize(raw_path)),
+                mock.patch.object(preparation, "APPS_TRAIN_ROWS", len(rows)),
+            ):
+                original_atomic_write_json = preparation.atomic_write_json
+
+                def interrupt_before_manifest_commit(path, value):
+                    if (
+                        os.path.abspath(path)
+                        == os.path.join(root, preparation.MANIFEST_NAME)
+                        and value.get("io_schema_migration")
+                    ):
+                        raise RuntimeError("simulated interruption before commit")
+                    return original_atomic_write_json(path, value)
+
+                with mock.patch.object(
+                    preparation,
+                    "atomic_write_json",
+                    side_effect=interrupt_before_manifest_commit,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "before commit"):
+                        preparation.migrate_io_schema_command(migrate_args)
+                # Versioned/evidence files may exist, but the canonical old
+                # manifest remains byte-identical and fully auditable.
+                self.assertEqual(
+                    preparation.sha256_file(
+                        os.path.join(root, preparation.MANIFEST_NAME)
+                    ),
+                    old_manifest,
+                )
+                preparation.audit_command(type("Args", (), {"output_root": root})())
+                preparation.migrate_io_schema_command(migrate_args)
+                migrated = preparation.audit_command(
+                    type("Args", (), {"output_root": root})()
+                )
+                # A completed migration is exactly resumable and audit-only.
+                preparation.migrate_io_schema_command(migrate_args)
+
+            self.assertEqual(
+                migrated["io_schema_migration"]["legacy_manifest_sha256"],
+                old_manifest,
+            )
+            self.assertEqual(
+                migrated["io_schema_migration"]["legacy_evaluator_sha256"],
+                old_evaluator_sha,
+            )
+            self.assertEqual(
+                migrated["io_schema_migration"]["legacy_evaluation_sha256"],
+                legacy_result_sha,
+            )
+            self.assertTrue(os.path.exists(legacy_result))
+            self.assertTrue(
+                os.path.exists(
+                    os.path.join(root, preparation.RAW_FILES["candidate_evaluator"])
+                )
+            )
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(
+                        root,
+                        migrated["artifacts"]["legacy_malformed_evaluation"]["path"],
+                    )
+                )
+            )
+
     def test_filters_missing_tests_placeholders_suspicious_and_reserved_overlap(self):
         reserved_prompt = "A uniquely reserved benchmark prompt with five important words."
         reserved = {
@@ -224,14 +467,19 @@ class FinalizationTests(unittest.TestCase):
         preparation.atomic_write_json(
             os.path.join(root, preparation.MANIFEST_NAME), manifest
         )
-        evaluation_path = os.path.join(root, "evaluation.json")
+        evaluation_path = os.path.join(root, preparation.CANDIDATE_EVALUATION)
         preparation.atomic_write_json(
             evaluation_path,
             {
                 "meta": {
                     "custom_output_sha256": preparation.sha256_file(custom_path),
+                    "custom_meta_sha256": preparation.sha256_file(meta_path),
                     "benchmark_file_sha256": preparation.sha256_file(evaluator_path),
                     "livecodebench_commit": preparation.LCB_EVALUATOR_COMMIT,
+                    "evaluator_mode": preparation.APPS_EVALUATOR_MODE,
+                    "runner_script_sha256": preparation.sha256_file(
+                        preparation.RUNNER_SCRIPT
+                    ),
                     "n_questions": len(custom),
                     "n_samples": 2,
                 },
@@ -277,6 +525,30 @@ class FinalizationTests(unittest.TestCase):
                 },
             )
             with mock.patch.dict(sys.modules, {"datasets": fake_module}):
+                original_atomic_write_json = preparation.atomic_write_json
+
+                def interrupt_final_manifest(path, value):
+                    if (
+                        os.path.abspath(path)
+                        == os.path.join(root, preparation.MANIFEST_NAME)
+                        and value.get("phase") == "finalized_verified_dataset"
+                    ):
+                        raise RuntimeError("simulated final-manifest interruption")
+                    return original_atomic_write_json(path, value)
+
+                with mock.patch.object(
+                    preparation,
+                    "atomic_write_json",
+                    side_effect=interrupt_final_manifest,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "final-manifest"):
+                        preparation.finalize_command(
+                            args, tokenizer=FakePinnedTokenizer()
+                        )
+                prepared = preparation.audit_command(
+                    type("Args", (), {"output_root": root})()
+                )
+                self.assertEqual(prepared["phase"], "prepared_unverified_candidates")
                 preparation.finalize_command(args, tokenizer=FakePinnedTokenizer())
                 manifest = preparation.audit_command(
                     type("Args", (), {"output_root": root})()

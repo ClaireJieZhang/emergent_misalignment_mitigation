@@ -1,5 +1,5 @@
 #!/bin/bash
-# Resume the U+2028 parser failure inside the original 120 H200-minute cap.
+# Resume the APPS native-I/O schema failure inside the original cost cap.
 
 set -euo pipefail
 umask 077
@@ -10,11 +10,12 @@ Usage:
   scripts/resume_general_code_apps_repaired_pilot_tillicum.sh resume \
     --ack-max-total-cost-usd 1.80
 
-The failed preparation job used 60 seconds. This repair may allocate at most:
-  preparation retry: 29 minutes
+The two failed preparation jobs used 60 and 55 seconds (two rounded minutes).
+This repair may allocate at most:
+  preparation retry: 28 minutes
   pilot training:    30 minutes
   evaluation:        60 minutes
-Together with the prior minute, the cumulative ceiling remains exactly
+Together with the two prior rounded minutes, the cumulative ceiling remains
 120 H200-minutes / $1.80. All jobs are --no-requeue.
 EOF
   exit 2
@@ -30,18 +31,20 @@ OUTPUT_ROOT=$TILLICUM_ROOT/outputs/general_code_apps_repaired_pilot_v1
 CONTROL_ROOT=$OUTPUT_ROOT/control
 FIRST_RESUME_ROOT=$CONTROL_ROOT/resume_227440
 SECOND_RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat2
-RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat3
+THIRD_RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat3
+RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat4
 AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_MAX_COST_USD_1.80
 ORIGINAL_JOBS=$CONTROL_ROOT/jobs.tsv
 ORIGINAL_SUBMITTED=$CONTROL_ROOT/SUBMITTED
 ORIGINAL_LOCK_OWNER=$CONTROL_ROOT/SUBMISSION_LOCK/owner
-RESUME_LOCK=$CONTROL_ROOT/RESUME_227440_COMPAT3_SUBMISSION_LOCK
+RESUME_LOCK=$CONTROL_ROOT/RESUME_227440_COMPAT4_SUBMISSION_LOCK
 RESUME_AUTH=$RESUME_ROOT/AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP
 RESUME_JOBS=$RESUME_ROOT/jobs.tsv
 RESUMED=$RESUME_ROOT/RESUMED
 ORIGINAL_COMMIT=a57dbf43fdf296dfdd31f14447e9a47e76db0405
 FIRST_REPAIR_COMMIT=00ad408f5596270d77bd52f26dcedc3366277e00
 SECOND_REPAIR_COMMIT=531eac8565d68738958b06fae9363af0a4bebf01
+THIRD_REPAIR_COMMIT=b81f126f04ebba38eb0f81d9acf77f7d43862398
 PREP_SCRIPT=scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch
 TRAIN_SCRIPT=scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch
 EVALUATE_SCRIPT=scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch
@@ -54,18 +57,22 @@ test -z "$(git status --porcelain)" || {
   exit 3
 }
 repair_commit=$(git rev-parse HEAD)
-test "$(git rev-parse HEAD^)" = "$SECOND_REPAIR_COMMIT"
-test "$(git rev-parse HEAD~2)" = "$FIRST_REPAIR_COMMIT"
-test "$(git rev-parse HEAD~3)" = "$ORIGINAL_COMMIT"
+test "$(git rev-parse HEAD^)" = "$THIRD_REPAIR_COMMIT"
+test "$(git rev-parse HEAD~2)" = "$SECOND_REPAIR_COMMIT"
+test "$(git rev-parse HEAD~3)" = "$FIRST_REPAIR_COMMIT"
+test "$(git rev-parse HEAD~4)" = "$ORIGINAL_COMMIT"
 test "$(git rev-list --parents -n 1 HEAD | awk '{print NF - 1}')" = 1
 test "$(git rev-list --parents -n 1 "$FIRST_REPAIR_COMMIT" | awk '{print NF - 1}')" = 1
 test "$(git rev-list --parents -n 1 "$SECOND_REPAIR_COMMIT" | awk '{print NF - 1}')" = 1
+test "$(git rev-list --parents -n 1 "$THIRD_REPAIR_COMMIT" | awk '{print NF - 1}')" = 1
 
 allowed_repair_path() {
   case "$1" in
     docs/repaired_apps_coding_pilot_protocol.md|\
     scripts/resume_general_code_apps_repaired_pilot_tillicum.sh|\
+    scripts/prepare_repaired_code_pilot_data.py|\
     scripts/run_lcb_sandbox_evaluation.py|\
+    scripts/run_lcb_one_tillicum.sh|\
     scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch|\
     scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch|\
     scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch|\
@@ -74,6 +81,7 @@ allowed_repair_path() {
     scripts/submit_general_code_apps_repaired_pilot_tillicum.sh|\
     scripts/verify_general_code_apps_repaired_authorization.py|\
     tests/test_lcb_evaluation_pipeline.py|\
+    tests/test_prepare_repaired_code_pilot_data.py|\
     tests/test_repaired_code_pilot_workflow.py) return 0 ;;
     *) return 1 ;;
   esac
@@ -112,11 +120,18 @@ check_hash 79bf2d9316312aad8fc004478892d19deba228f757c10abece670f7e9524498f "$SE
 check_hash a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673 "$SECOND_RESUME_ROOT/jobs.tsv"
 check_hash 7860dc64f230845b5bc108316bb0fc0100b6937e88997b942e2749e3498be785 "$SECOND_RESUME_ROOT/RESUMED"
 check_hash a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673 "$SECOND_RESUME_ROOT/dispatch_attempt.tsv"
+check_hash 2ab6715167b33a7f1dc07314189790b72cfbead01fe28d5eb1ecdc09841bd2dc "$CONTROL_ROOT/RESUME_227440_COMPAT3_SUBMISSION_LOCK/owner"
+check_hash ccd6bd140b89db82f5532e008242ee7e353cd4744467241fd864e8fbd4558a13 "$THIRD_RESUME_ROOT/AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+check_hash 1deba4333ea56da7e445ace82f832aa10dfa5ae44c5f3de6f5a8f5740cd42146 "$THIRD_RESUME_ROOT/jobs.tsv"
+check_hash 5843cd2d11686324ad34574d82479ae032b9cf61c677229f2b1a116f11fbd2e9 "$THIRD_RESUME_ROOT/RESUMED"
+check_hash 1deba4333ea56da7e445ace82f832aa10dfa5ae44c5f3de6f5a8f5740cd42146 "$THIRD_RESUME_ROOT/dispatch_attempt.tsv"
+check_hash 16301b591ee3648aa3d36069ebfd4bc58864f73322d06d447d29f4bf98a7f8b8 "$TILLICUM_ROOT/outputs/logs/general_code_apps_repaired_prepare_229023.out"
+check_hash a82091cf7ac38f88a52302dd66ea6f62403e85d8768ce0623a799ca6535dd00b "$TILLICUM_ROOT/outputs/logs/general_code_apps_repaired_prepare_229023.err"
+check_hash beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5 "$OUTPUT_ROOT/data/apps_repaired_candidates.evaluation.json"
 
 test ! -e "$OUTPUT_ROOT/PREP_COMPLETE"
 test ! -e "$OUTPUT_ROOT/model/apps_repaired_pilot/TRAIN_COMPLETE"
 test ! -e "$OUTPUT_ROOT/evaluation/FINAL_EVALUATION_COMPLETE"
-test ! -e "$OUTPUT_ROOT/data/apps_repaired_candidates.evaluation.json"
 
 accounting_row() {
   local job_id=$1
@@ -154,6 +169,18 @@ test "$limit" = 30 && test -z "$allocation"
 IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 228994)"
 test "$id" = 228994 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
 test "$limit" = 60 && test -z "$allocation"
+IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 229023)"
+test "$id" = 229023 && test "$state" = FAILED && test "$elapsed" = 55
+test "$limit" = 29 && test "$exit_code" = 1:0
+test "$(tr ',' '\n' <<< "$allocation" | awk -F= '$1=="gres/gpu:h200" {print $2}')" = 1
+test "$(tr ',' '\n' <<< "$allocation" | awk -F= '$1=="gres/gpu" {print $2}')" = 1
+test "$(tr ',' '\n' <<< "$allocation" | awk -F= '$1=="node" {print $2}')" = 1
+IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 229024)"
+test "$id" = 229024 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
+test "$limit" = 30 && test -z "$allocation"
+IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 229025)"
+test "$id" = 229025 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
+test "$limit" = 60 && test -z "$allocation"
 
 export PYTHONDONTWRITEBYTECODE=1
 "$ENV_ROOT/bin/python" scripts/prepare_repaired_code_pilot_data.py audit \
@@ -176,7 +203,7 @@ PY
 
 echo "=== Slurm admission preflight (no jobs submitted) ==="
 sbatch --test-only --export=NONE --no-requeue --nodes=1 --ntasks=1 \
-  --gres=gpu:h200:1 --time=00:29:00 "$PREP_SCRIPT"
+  --gres=gpu:h200:1 --time=00:28:00 "$PREP_SCRIPT"
 sbatch --test-only --export=NONE --no-requeue --nodes=1 --ntasks=1 \
   --gres=gpu:h200:1 --time=00:30:00 "$TRAIN_SCRIPT"
 sbatch --test-only --export=NONE --no-requeue --nodes=1 --ntasks=1 \
@@ -195,33 +222,60 @@ fi
 mkdir "$RESUME_ROOT"
 
 auth_build=$RESUME_ROOT/.authorization-$$
-printf 'within_original_authorization=true\noriginal_auth_sha256=%s\noriginal_jobs_sha256=%s\noriginal_submitted_sha256=%s\noriginal_submission_lock_owner_sha256=%s\noriginal_repo_commit=%s\nfirst_repair_repo_commit=%s\nfirst_resume_authorization_sha256=%s\nfirst_resume_jobs_sha256=%s\nfirst_resume_resumed_sha256=%s\nfirst_resume_lock_owner_sha256=%s\nfirst_dispatch_prepare_job_id=228953\nfirst_dispatch_prepare_state=CANCELLED\nfirst_dispatch_prepare_elapsed_seconds=0\nfirst_dispatch_train_job_id=228954\nfirst_dispatch_train_state=CANCELLED\nfirst_dispatch_train_elapsed_seconds=0\nfirst_dispatch_evaluate_job_id=228955\nfirst_dispatch_evaluate_state=CANCELLED\nfirst_dispatch_evaluate_elapsed_seconds=0\nrepair_repo_commit=%s\nrepair_diff_sha256=%s\noriginal_prepare_job_id=227440\noriginal_prepare_state=FAILED\noriginal_prepare_elapsed_seconds=60\noriginal_prepare_timelimit_minutes=30\noriginal_train_job_id=227441\noriginal_train_state=CANCELLED\noriginal_train_elapsed_seconds=0\noriginal_evaluate_job_id=227442\noriginal_evaluate_state=CANCELLED\noriginal_evaluate_elapsed_seconds=0\nprior_rounded_h200_minutes=1\nresume_prepare_minutes=29\nresume_train_minutes=30\nresume_evaluate_minutes=60\nremaining_h200_minutes=119\ncumulative_max_h200_minutes=120\ncumulative_max_cost_usd=1.80\nno_requeue=true\nautomatic_continuation=false\nreason=unicode_jsonl_u2028_record_separator_parser_repair\nprepared_manifest_sha256=%s\nfailed_stdout_sha256=%s\nfailed_stderr_sha256=%s\nrecorded_at=%s\n' \
-  aaeaa4c9a19732339845d6124fbbdfe054dba71f1d3e96a36d20b03e711b61b6 \
-  2651789b4a3816e9c80f2deb4f2add2ff3249d1e2efa1978bba128457dfa7565 \
-  f8fbbc7b995ffd1742fa3e75bd665dffddfecb0cb7229fd44cf6bd3725adfb96 \
-  90e14986d8cf5f97525be340b2f47d85fb9715286a58314720921de7ba126f82 \
-  "$ORIGINAL_COMMIT" "$FIRST_REPAIR_COMMIT" \
-  7112eb9ff96ff3ae5997fb4be01b55d2209cc65873616f20c86a116868c34b90 \
-  cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0 \
-  3839fb3b2ec847d49ca1be477355c4be7a3c763b75a1d42b0fa4830e424be9cf \
-  ce10532a9709e85e0c9073fbe1e0d66d83d117716bed82bba1ae6cb1dddba50d \
-  "$repair_commit" "$repair_diff_sha256" \
-  41db818be86dc46c930bbac83a9f5e5d90a9ce476de1aada310b3197e94394f2 \
-  ddab648c0a223fc5afa8e5b06198991185c1a0e4bc9bce897766bcb76383076b \
-  f4b7613b5c4e1ad4fabd2c5635e9bd721e68b33b66ca814e99b5cd193e0fdba3 \
-  "$(date --iso-8601=seconds)" > "$auth_build"
-printf 'first_dispatch_failure_reason=tillicum_pending_jobs_omit_tresperjob\n' >> "$auth_build"
-printf 'second_repair_repo_commit=%s\nsecond_resume_authorization_sha256=%s\nsecond_resume_jobs_sha256=%s\nsecond_resume_resumed_sha256=%s\nsecond_resume_lock_owner_sha256=%s\nsecond_dispatch_prepare_job_id=228992\nsecond_dispatch_prepare_state=CANCELLED\nsecond_dispatch_prepare_elapsed_seconds=0\nsecond_dispatch_train_job_id=228993\nsecond_dispatch_train_state=CANCELLED\nsecond_dispatch_train_elapsed_seconds=0\nsecond_dispatch_evaluate_job_id=228994\nsecond_dispatch_evaluate_state=CANCELLED\nsecond_dispatch_evaluate_elapsed_seconds=0\nsecond_dispatch_failure_reason=reqtres_split_on_every_equals\n' \
-  "$SECOND_REPAIR_COMMIT" \
-  79bf2d9316312aad8fc004478892d19deba228f757c10abece670f7e9524498f \
-  a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673 \
-  7860dc64f230845b5bc108316bb0fc0100b6937e88997b942e2749e3498be785 \
-  99a16e11621d2fbb08e3c361e9431863465933d75314317fc0a7644fe342782d \
-  >> "$auth_build"
+{
+  printf 'within_original_authorization=true\n'
+  printf 'original_auth_sha256=aaeaa4c9a19732339845d6124fbbdfe054dba71f1d3e96a36d20b03e711b61b6\n'
+  printf 'original_jobs_sha256=2651789b4a3816e9c80f2deb4f2add2ff3249d1e2efa1978bba128457dfa7565\n'
+  printf 'original_submitted_sha256=f8fbbc7b995ffd1742fa3e75bd665dffddfecb0cb7229fd44cf6bd3725adfb96\n'
+  printf 'original_submission_lock_owner_sha256=90e14986d8cf5f97525be340b2f47d85fb9715286a58314720921de7ba126f82\n'
+  printf 'original_repo_commit=%s\n' "$ORIGINAL_COMMIT"
+  printf 'first_repair_repo_commit=%s\n' "$FIRST_REPAIR_COMMIT"
+  printf 'first_resume_authorization_sha256=7112eb9ff96ff3ae5997fb4be01b55d2209cc65873616f20c86a116868c34b90\n'
+  printf 'first_resume_jobs_sha256=cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0\n'
+  printf 'first_resume_resumed_sha256=3839fb3b2ec847d49ca1be477355c4be7a3c763b75a1d42b0fa4830e424be9cf\n'
+  printf 'first_resume_lock_owner_sha256=ce10532a9709e85e0c9073fbe1e0d66d83d117716bed82bba1ae6cb1dddba50d\n'
+  printf 'first_dispatch_prepare_job_id=228953\nfirst_dispatch_prepare_state=CANCELLED\nfirst_dispatch_prepare_elapsed_seconds=0\n'
+  printf 'first_dispatch_train_job_id=228954\nfirst_dispatch_train_state=CANCELLED\nfirst_dispatch_train_elapsed_seconds=0\n'
+  printf 'first_dispatch_evaluate_job_id=228955\nfirst_dispatch_evaluate_state=CANCELLED\nfirst_dispatch_evaluate_elapsed_seconds=0\n'
+  printf 'first_dispatch_failure_reason=tillicum_pending_jobs_omit_tresperjob\n'
+  printf 'second_repair_repo_commit=%s\n' "$SECOND_REPAIR_COMMIT"
+  printf 'second_resume_authorization_sha256=79bf2d9316312aad8fc004478892d19deba228f757c10abece670f7e9524498f\n'
+  printf 'second_resume_jobs_sha256=a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673\n'
+  printf 'second_resume_resumed_sha256=7860dc64f230845b5bc108316bb0fc0100b6937e88997b942e2749e3498be785\n'
+  printf 'second_resume_lock_owner_sha256=99a16e11621d2fbb08e3c361e9431863465933d75314317fc0a7644fe342782d\n'
+  printf 'second_dispatch_prepare_job_id=228992\nsecond_dispatch_prepare_state=CANCELLED\nsecond_dispatch_prepare_elapsed_seconds=0\n'
+  printf 'second_dispatch_train_job_id=228993\nsecond_dispatch_train_state=CANCELLED\nsecond_dispatch_train_elapsed_seconds=0\n'
+  printf 'second_dispatch_evaluate_job_id=228994\nsecond_dispatch_evaluate_state=CANCELLED\nsecond_dispatch_evaluate_elapsed_seconds=0\n'
+  printf 'second_dispatch_failure_reason=reqtres_split_on_every_equals\n'
+  printf 'third_repair_repo_commit=%s\n' "$THIRD_REPAIR_COMMIT"
+  printf 'third_resume_authorization_sha256=ccd6bd140b89db82f5532e008242ee7e353cd4744467241fd864e8fbd4558a13\n'
+  printf 'third_resume_jobs_sha256=1deba4333ea56da7e445ace82f832aa10dfa5ae44c5f3de6f5a8f5740cd42146\n'
+  printf 'third_resume_resumed_sha256=5843cd2d11686324ad34574d82479ae032b9cf61c677229f2b1a116f11fbd2e9\n'
+  printf 'third_resume_lock_owner_sha256=2ab6715167b33a7f1dc07314189790b72cfbead01fe28d5eb1ecdc09841bd2dc\n'
+  printf 'third_dispatch_prepare_job_id=229023\nthird_dispatch_prepare_state=FAILED\nthird_dispatch_prepare_elapsed_seconds=55\nthird_dispatch_prepare_timelimit_minutes=29\n'
+  printf 'third_dispatch_train_job_id=229024\nthird_dispatch_train_state=CANCELLED\nthird_dispatch_train_elapsed_seconds=0\n'
+  printf 'third_dispatch_evaluate_job_id=229025\nthird_dispatch_evaluate_state=CANCELLED\nthird_dispatch_evaluate_elapsed_seconds=0\n'
+  printf 'third_dispatch_failure_reason=apps_native_io_values_not_encoded_for_lcb_checker\n'
+  printf 'third_failed_stdout_sha256=16301b591ee3648aa3d36069ebfd4bc58864f73322d06d447d29f4bf98a7f8b8\n'
+  printf 'third_failed_stderr_sha256=a82091cf7ac38f88a52302dd66ea6f62403e85d8768ce0623a799ca6535dd00b\n'
+  printf 'third_malformed_evaluation_sha256=beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5\n'
+  printf 'repair_repo_commit=%s\nrepair_diff_sha256=%s\n' "$repair_commit" "$repair_diff_sha256"
+  printf 'original_prepare_job_id=227440\noriginal_prepare_state=FAILED\noriginal_prepare_elapsed_seconds=60\noriginal_prepare_timelimit_minutes=30\n'
+  printf 'original_train_job_id=227441\noriginal_train_state=CANCELLED\noriginal_train_elapsed_seconds=0\n'
+  printf 'original_evaluate_job_id=227442\noriginal_evaluate_state=CANCELLED\noriginal_evaluate_elapsed_seconds=0\n'
+  printf 'prior_rounded_h200_minutes=2\nresume_prepare_minutes=28\nresume_train_minutes=30\nresume_evaluate_minutes=60\n'
+  printf 'remaining_h200_minutes=118\ncumulative_max_h200_minutes=120\ncumulative_max_cost_usd=1.80\n'
+  printf 'no_requeue=true\nautomatic_continuation=false\n'
+  printf 'reason=apps_native_io_schema_conversion_repair\n'
+  printf 'prepared_manifest_sha256=41db818be86dc46c930bbac83a9f5e5d90a9ce476de1aada310b3197e94394f2\n'
+  printf 'failed_stdout_sha256=ddab648c0a223fc5afa8e5b06198991185c1a0e4bc9bce897766bcb76383076b\n'
+  printf 'failed_stderr_sha256=f4b7613b5c4e1ad4fabd2c5635e9bd721e68b33b66ca814e99b5cd193e0fdba3\n'
+  printf 'recorded_at=%s\n' "$(date --iso-8601=seconds)"
+} > "$auth_build"
 printf 'addendum_sha256=%s\n' "$(sha256sum "$auth_build" | awk '{print $1}')" >> "$auth_build"
 mv "$auth_build" "$RESUME_AUTH"
 "$ENV_ROOT/bin/python" scripts/verify_general_code_apps_repaired_authorization.py \
-  --stage prepare --time-limit 00:29:00 --control-only
+  --stage prepare --time-limit 00:28:00 --control-only
 
 # Hold the first job until every ID and control record is durable. Any
 # mid-dispatch failure therefore remains cost-free and fail-closed.
@@ -229,10 +283,10 @@ dispatch_attempt=$RESUME_ROOT/dispatch_attempt.tsv
 printf 'stage\tjob_id\tmax_minutes\tsubmitted_at\n' > "$dispatch_attempt"
 prepare_job=$(sbatch --parsable --hold --export=NONE --no-requeue \
   --nodes=1 --ntasks=1 --gres=gpu:h200:1 \
-  --time=00:29:00 "$PREP_SCRIPT")
+  --time=00:28:00 "$PREP_SCRIPT")
 prepare_job=${prepare_job%%;*}
 [[ "$prepare_job" =~ ^[0-9]+$ ]]
-printf 'prepare\t%s\t29\t%s\n' "$prepare_job" "$(date --iso-8601=seconds)" >> "$dispatch_attempt"
+printf 'prepare\t%s\t28\t%s\n' "$prepare_job" "$(date --iso-8601=seconds)" >> "$dispatch_attempt"
 train_job=$(sbatch --parsable --export=NONE --no-requeue \
   --nodes=1 --ntasks=1 --gres=gpu:h200:1 --time=00:30:00 \
   --kill-on-invalid-dep=yes --dependency="afterok:$prepare_job" "$TRAIN_SCRIPT")
@@ -248,7 +302,7 @@ printf 'evaluate\t%s\t60\t%s\n' "$evaluate_job" "$(date --iso-8601=seconds)" >> 
 
 submitted_at=$(date --iso-8601=seconds)
 jobs_build=$RESUME_ROOT/.jobs-$$
-printf 'stage\tjob_id\tmax_minutes\tsubmitted_at\nprepare\t%s\t29\t%s\ntrain\t%s\t30\t%s\nevaluate\t%s\t60\t%s\n' \
+printf 'stage\tjob_id\tmax_minutes\tsubmitted_at\nprepare\t%s\t28\t%s\ntrain\t%s\t30\t%s\nevaluate\t%s\t60\t%s\n' \
   "$prepare_job" "$submitted_at" "$train_job" "$submitted_at" \
   "$evaluate_job" "$submitted_at" > "$jobs_build"
 mv "$jobs_build" "$RESUME_JOBS"
@@ -261,7 +315,7 @@ printf 'repair_repo_commit=%s\naddendum_sha256=%s\njobs_sha256=%s\nprepare_job_i
 printf 'dispatch_sha256=%s\n' "$(sha256sum "$resumed_build" | awk '{print $1}')" >> "$resumed_build"
 mv "$resumed_build" "$RESUMED"
 
-test "$(scontrol show job "$prepare_job" -o | tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')" = 00:29:00
+test "$(scontrol show job "$prepare_job" -o | tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')" = 00:28:00
 test "$(scontrol show job "$train_job" -o | tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')" = 00:30:00
 test "$(scontrol show job "$evaluate_job" -o | tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')" = 01:00:00
 for job_id in "$prepare_job" "$train_job" "$evaluate_job"; do

@@ -13,7 +13,7 @@ This is a one-adapter diagnostic. It tests whether the earlier Magicoder pilot's
 - Reserved-prompt exclusion: both existing LiveCodeBench windows and EvalPlus prompts are removed by normalized exact/near-duplicate checks before selection.
 - Objective: completion tokens only. Prompt/chat-template tokens receive no loss.
 - Training: one epoch = 40 optimizer steps, effective batch size 60, linear learning rate `5e-5`, two warmup steps, LoRA rank/alpha 8, and checkpoints at steps 10, 20, 30, and 40.
-- Checkpoint selection: maximize passed APPS validation tasks; then minimize empty plus truncated outputs; then choose the earlier step. The selection file is written atomically before any external suite is generated.
+- Checkpoint selection: maximize passed APPS validation tasks under the same pinned `apps_official` comparison semantics used to verify training targets; then minimize empty plus truncated outputs; then choose the earlier step. The selection file is written atomically before any external suite is generated.
 - External evaluation: base versus the single APPS-selected checkpoint on the existing 157-problem October--December 2024 LiveCodeBench gate and on HumanEval+/MBPP+.
 - Interpretation: LiveCodeBench is the temporally held-out external check. EvalPlus is exploratory because its older tasks may occur in pretraining. The experiment is a pilot and cannot support a confirmatory retention claim by itself.
 
@@ -73,7 +73,34 @@ This updates and audits the clean Tillicum checkout without submitting Slurm wor
 scripts/submit_general_code_apps_repaired_pilot_tillicum.sh pilot --ack-max-cost-usd 1.80
 ```
 
-For the audited `227440` parser failure only, the accepted resume invocation is:
+The next two compatibility dispatches remained held and cost-free. The first
+released compatibility dispatch then ran preparation job `229023` for 55
+seconds. It completed all 5,600 sandbox executions, but exposed a scientific
+schema error: APPS stores native call arguments and some standard-I/O cases as
+JSON arrays, while the pinned LiveCodeBench checker expects newline-encoded
+strings. Consequently all callable candidates and most list-backed standard-I/O
+candidates failed before meaningful comparison. The malformed result is sealed
+at SHA-256
+`beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5`;
+it is evidence, not a capability measurement.
+
+The compat4 repair is a direct child of commit `b81f126`. Before any new
+execution, it publishes a versioned evaluator with a lossless APPS-native value
+to LiveCodeBench string encoding, proves that candidate code, candidate hashes,
+and prompt records are unchanged, and retains the exact malformed evaluator and
+result at their original paths as sealed legacy evidence. The corrected files
+are `apps_repaired_candidates_evaluator.apps-io-v1.jsonl` and
+`apps_repaired_candidates.apps-io-v1.evaluation.json`; the data manifest is the
+last atomic commit point. Candidate execution uses an explicit `apps_official`
+comparison mode while retaining the pinned LiveCodeBench sandbox/timeouts, and
+binds the local runner hash. The corrected evaluator and eventual finalized
+manifest carry the explicit converter marker `livecodebench_testing_util_v1`.
+Job `227440` used 60 seconds and job `229023`
+used 55 seconds, conservatively rounded to two H200-minutes. Compat4 therefore
+caps preparation at 28 minutes, training at 30, and evaluation at 60. The
+cumulative worst case remains exactly 120 H200-minutes / $1.80.
+
+For this audited failure chain only, the accepted resume invocation is:
 
 ```bash
 scripts/resume_general_code_apps_repaired_pilot_tillicum.sh resume --ack-max-total-cost-usd 1.80

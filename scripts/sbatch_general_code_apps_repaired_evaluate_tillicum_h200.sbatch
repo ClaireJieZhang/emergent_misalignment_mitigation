@@ -140,7 +140,7 @@ python scripts/prepare_lcb_evaluation.py \
   --prompt_file "$DATA_ROOT/apps_repaired_validation_prompts.json" \
   --output_dir "$APPS_ROOT/custom"
 for name in pi_base step_10 step_20 step_30 step_40; do
-  bash scripts/run_lcb_one_tillicum.sh \
+  LCB_EVALUATOR_MODE=apps_official bash scripts/run_lcb_one_tillicum.sh \
     "$DATA_ROOT/apps_repaired_validation_evaluator.jsonl" \
     "$APPS_ROOT/custom/$name.custom.json" \
     "$APPS_ROOT/evaluations/$name.json" \

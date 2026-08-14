@@ -23,7 +23,6 @@ import re
 import shutil
 import tempfile
 import unicodedata
-import uuid
 
 
 APPS_DATASET_ID = "codeparrot/apps"
@@ -50,9 +49,17 @@ DEFAULT_MAX_CANDIDATES = 2
 DEFAULT_VERIFICATION_PER_KIND = 1_400
 MANIFEST_NAME = "data_manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
+APPS_IO_ENCODING = "livecodebench_testing_util_v1"
+APPS_EVALUATOR_MODE = "apps_official"
+RUNNER_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "run_lcb_sandbox_evaluation.py"
+)
+LEGACY_CANDIDATE_EVALUATOR = "apps_repaired_candidates_evaluator.jsonl"
+LEGACY_CANDIDATE_EVALUATION = "apps_repaired_candidates.evaluation.json"
+CANDIDATE_EVALUATION = "apps_repaired_candidates.apps-io-v1.evaluation.json"
 
 RAW_FILES = {
-    "candidate_evaluator": "apps_repaired_candidates_evaluator.jsonl",
+    "candidate_evaluator": "apps_repaired_candidates_evaluator.apps-io-v1.jsonl",
     "candidate_custom": "apps_repaired_candidates.custom.json",
     "candidate_custom_meta": "apps_repaired_candidates.custom.meta.json",
     "candidate_prompts": "apps_repaired_candidate_prompts.json",
@@ -201,6 +208,81 @@ def atomic_write_jsonl(path, rows):
             pass
         raise
     return count
+
+
+def publish_bytes_once(path, payload):
+    """Publish immutable evidence without ever overwriting an existing path."""
+    destination = os.path.abspath(path)
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    expected = sha256_bytes(payload)
+    if os.path.lexists(destination):
+        if not os.path.isfile(destination) or os.path.islink(destination):
+            raise ValueError(f"Unsafe preexisting immutable artifact: {destination}")
+        if sha256_file(destination) != expected:
+            raise ValueError(f"Conflicting preexisting immutable artifact: {destination}")
+        return expected
+    fd, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(destination) + ".publishing-",
+        dir=os.path.dirname(destination),
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            if not os.path.isfile(destination) or os.path.islink(destination):
+                raise ValueError(f"Unsafe concurrently published artifact: {destination}")
+            if sha256_file(destination) != expected:
+                raise ValueError(f"Conflicting concurrently published artifact: {destination}")
+        return expected
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def publish_file_once(source, destination, expected_sha256):
+    source = os.path.abspath(source)
+    destination = os.path.abspath(destination)
+    if not os.path.isfile(source) or os.path.islink(source):
+        raise ValueError(f"Missing or unsafe immutable source: {source}")
+    if sha256_file(source) != expected_sha256:
+        raise ValueError(f"Immutable source hash mismatch: {source}")
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    if os.path.lexists(destination):
+        if not os.path.isfile(destination) or os.path.islink(destination):
+            raise ValueError(f"Unsafe preexisting immutable artifact: {destination}")
+        if sha256_file(destination) != expected_sha256:
+            raise ValueError(f"Conflicting preexisting immutable artifact: {destination}")
+        return
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        if not os.path.isfile(destination) or os.path.islink(destination):
+            raise ValueError(f"Unsafe concurrently published artifact: {destination}")
+        if sha256_file(destination) != expected_sha256:
+            raise ValueError(f"Conflicting concurrently published artifact: {destination}")
+
+
+def publish_directory_once(source, destination, expected_sha256):
+    source = os.path.abspath(source)
+    destination = os.path.abspath(destination)
+    if not os.path.isdir(source) or os.path.islink(source):
+        raise ValueError(f"Missing or unsafe immutable directory source: {source}")
+    if hash_directory(source) != expected_sha256:
+        raise ValueError(f"Immutable directory source hash mismatch: {source}")
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    if os.path.lexists(destination):
+        if not os.path.isdir(destination) or os.path.islink(destination):
+            raise ValueError(f"Unsafe preexisting immutable directory: {destination}")
+        if hash_directory(destination) != expected_sha256:
+            raise ValueError(f"Conflicting preexisting immutable directory: {destination}")
+        return
+    os.replace(source, destination)
 
 
 def parse_json_field(row, field, source_index, expected_type):
@@ -586,6 +668,47 @@ def cluster_and_bound_tasks(tasks, seed, per_kind, candidates_per_task):
     }
 
 
+def encode_stdio_value(value, field):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(line, str) for line in value):
+        # This is the exact normalization in hendrycks/apps testing_util.py.
+        return "\n".join(value)
+    raise ValueError(f"Unsupported APPS stdio {field} representation")
+
+
+def encode_call_arguments(value):
+    if not isinstance(value, list):
+        raise ValueError("APPS call-based input must be an argument list")
+    # The pinned LCB parser JSON-decodes one physical line per argument.  This
+    # round-trip preserves every native APPS value, including strings that
+    # themselves contain quote characters.
+    return "\n".join(
+        json.dumps(argument, ensure_ascii=False, separators=(",", ":"))
+        for argument in value
+    )
+
+
+def encode_apps_test_cases(inputs, outputs, kind):
+    if len(inputs) != len(outputs) or not inputs:
+        raise ValueError("APPS inputs/outputs must be nonempty and paired")
+    if kind == "function":
+        encoded_inputs = [encode_call_arguments(value) for value in inputs]
+        encoded_outputs = [
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            for value in outputs
+        ]
+    elif kind == "stdio":
+        encoded_inputs = [encode_stdio_value(value, "input") for value in inputs]
+        encoded_outputs = [encode_stdio_value(value, "output") for value in outputs]
+    else:
+        raise ValueError(f"Unsupported APPS task kind: {kind}")
+    return [
+        {"input": item, "output": output, "testtype": "stdin"}
+        for item, output in zip(encoded_inputs, encoded_outputs)
+    ]
+
+
 def lcb_evaluator_row(task):
     tests = task["input_output"]
     return {
@@ -596,10 +719,7 @@ def lcb_evaluator_row(task):
         "platform": "apps",
         "starter_code": task["starter_code"],
         "public_test_cases": json.dumps(
-            [
-                {"input": item, "output": output, "testtype": "stdin"}
-                for item, output in zip(tests["inputs"], tests["outputs"])
-            ],
+            encode_apps_test_cases(tests["inputs"], tests["outputs"], task["kind"]),
             ensure_ascii=False,
         ),
         "private_test_cases": "[]",
@@ -610,6 +730,7 @@ def lcb_evaluator_row(task):
         "apps_source_id": task["source_id"],
         "apps_source_url": task["source_url"],
         "apps_kind": task["kind"],
+        "apps_io_encoding": APPS_IO_ENCODING,
     }
 
 
@@ -771,6 +892,214 @@ def load_jsonl(path):
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def validate_evaluator_encoding(path, expected_rows=None):
+    rows = load_jsonl(path)
+    if expected_rows is not None and len(rows) != expected_rows:
+        raise ValueError(
+            f"Corrected evaluator has {len(rows)} rows; expected {expected_rows}"
+        )
+    if not rows or any(row.get("apps_io_encoding") != APPS_IO_ENCODING for row in rows):
+        raise ValueError("Evaluator does not use the pinned APPS native-I/O encoding")
+    return rows
+
+
+def corrected_legacy_evaluator_row(row):
+    corrected = dict(row)
+    public = json.loads(row["public_test_cases"])
+    if not isinstance(public, list) or not public:
+        raise ValueError("Legacy evaluator row has no public tests")
+    kind = row.get("apps_kind")
+    if kind not in {"stdio", "function"}:
+        metadata = json.loads(row["metadata"])
+        kind = "function" if metadata.get("func_name") else "stdio"
+    corrected["public_test_cases"] = json.dumps(
+        encode_apps_test_cases(
+            [test["input"] for test in public],
+            [test["output"] for test in public],
+            kind,
+        ),
+        ensure_ascii=False,
+    )
+    corrected["apps_io_encoding"] = APPS_IO_ENCODING
+    return corrected
+
+
+def migrate_io_schema_command(args):
+    """Publish a versioned evaluator/evidence transaction, manifest last."""
+    output_root = os.path.abspath(args.output_root)
+    legacy_evaluation = os.path.abspath(args.legacy_evaluation_file)
+    manifest_path = os.path.join(output_root, MANIFEST_NAME)
+    if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
+        raise ValueError("Prepared manifest is missing or unsafe")
+    with open(manifest_path, "rb") as handle:
+        manifest_bytes = handle.read()
+    manifest_sha256 = sha256_bytes(manifest_bytes)
+    manifest = audit_command(argparse.Namespace(output_root=output_root))
+    if manifest.get("phase") != "prepared_unverified_candidates":
+        raise ValueError("I/O-schema migration requires prepared candidates")
+    existing_migration = manifest.get("io_schema_migration")
+    if existing_migration is not None:
+        expected = {
+            "converter_version": APPS_IO_ENCODING,
+            "evaluator_mode": APPS_EVALUATOR_MODE,
+            "repair_repo_commit": args.repair_repo_commit,
+            "legacy_evaluation_sha256": args.expected_legacy_evaluation_sha256,
+            "legacy_failed_stdout_sha256": args.expected_failed_stdout_sha256,
+            "legacy_failed_stderr_sha256": args.expected_failed_stderr_sha256,
+            "runner_script_sha256": sha256_file(RUNNER_SCRIPT),
+            "source_raw_sha256": APPS_TRAIN_SHA256,
+        }
+        for key, value in expected.items():
+            if existing_migration.get(key) != value:
+                raise ValueError(f"Existing I/O-schema migration differs: {key}")
+        if manifest.get("config") != requested_config(args):
+            raise ValueError("Existing migrated configuration differs")
+        validate_evaluator_encoding(
+            os.path.join(output_root, RAW_FILES["candidate_evaluator"]),
+            expected_rows=2 * manifest["config"]["verification_per_kind"],
+        )
+        print("Existing corrected I/O-schema migration passed exact audit")
+        return
+    if manifest.get("config") != requested_config(args):
+        raise ValueError("Migration configuration differs from prepared manifest")
+    legacy_artifact = manifest["artifacts"].get("candidate_evaluator", {})
+    if legacy_artifact.get("path") != LEGACY_CANDIDATE_EVALUATOR:
+        raise ValueError("Prepared manifest does not reference the known legacy evaluator")
+    expected_legacy_evaluation = os.path.join(
+        output_root, LEGACY_CANDIDATE_EVALUATION
+    )
+    if legacy_evaluation != expected_legacy_evaluation:
+        raise ValueError("Legacy evaluation must be the failed canonical result")
+    if not os.path.isfile(legacy_evaluation) or os.path.islink(legacy_evaluation):
+        raise ValueError("Legacy evaluation is missing or unsafe")
+    legacy_evaluation_sha256 = sha256_file(legacy_evaluation)
+    if legacy_evaluation_sha256 != args.expected_legacy_evaluation_sha256:
+        raise ValueError("Legacy malformed-evaluation hash mismatch")
+    with open(legacy_evaluation, encoding="utf-8") as handle:
+        legacy_result = json.load(handle)
+    legacy_evaluator = os.path.join(output_root, LEGACY_CANDIDATE_EVALUATOR)
+    legacy_evaluator_sha256 = sha256_file(legacy_evaluator)
+    if legacy_evaluator_sha256 != legacy_artifact.get("sha256"):
+        raise ValueError("Legacy evaluator differs from its sealed manifest")
+    custom_path = os.path.join(output_root, RAW_FILES["candidate_custom"])
+    custom_meta_path = os.path.join(output_root, RAW_FILES["candidate_custom_meta"])
+    legacy_meta = legacy_result.get("meta", {})
+    if (
+        legacy_meta.get("benchmark_file_sha256") != legacy_evaluator_sha256
+        or legacy_meta.get("custom_output_sha256") != sha256_file(custom_path)
+        or legacy_meta.get("custom_meta_sha256") != sha256_file(custom_meta_path)
+        or legacy_meta.get("livecodebench_commit") != LCB_EVALUATOR_COMMIT
+        or legacy_meta.get("n_questions")
+        != 2 * manifest["config"]["verification_per_kind"]
+        or legacy_meta.get("n_samples") != manifest["config"]["max_candidates"]
+    ):
+        raise ValueError("Legacy result is not bound to the prepared candidate inputs")
+    with open(custom_path, encoding="utf-8") as handle:
+        custom = json.load(handle)
+    legacy_tasks = legacy_result.get("tasks")
+    custom_ids = [str(row["question_id"]) for row in custom]
+    result_ids = [str(row["question_id"]) for row in legacy_tasks or []]
+    if sorted(custom_ids) != sorted(result_ids) or len(set(result_ids)) != len(result_ids):
+        raise ValueError("Legacy evaluation task IDs do not match the candidate file")
+    for row in legacy_tasks:
+        passed = row.get("passed")
+        if not isinstance(passed, list) or len(passed) != 2 or any(
+            type(value) is not bool for value in passed
+        ):
+            raise ValueError("Legacy evaluation has an invalid two-candidate vector")
+
+    failed_logs = (
+        (
+            os.path.abspath(args.failed_stdout_file),
+            args.expected_failed_stdout_sha256,
+            "legacy_failed_stdout",
+            "general_code_apps_repaired_prepare_229023.out",
+        ),
+        (
+            os.path.abspath(args.failed_stderr_file),
+            args.expected_failed_stderr_sha256,
+            "legacy_failed_stderr",
+            "general_code_apps_repaired_prepare_229023.err",
+        ),
+    )
+    for path, expected, _, _ in failed_logs:
+        if not os.path.isfile(path) or os.path.islink(path) or sha256_file(path) != expected:
+            raise ValueError(f"Failed-job log is missing, unsafe, or changed: {path}")
+
+    raw_source = os.path.abspath(args.apps_train_jsonl)
+    if os.path.getsize(raw_source) != APPS_TRAIN_SIZE:
+        raise ValueError("Pinned APPS source size mismatch during migration")
+    source_relative = f"raw/apps-train-{APPS_REVISION}.jsonl"
+    source_destination = os.path.join(output_root, source_relative)
+    publish_file_once(raw_source, source_destination, APPS_TRAIN_SHA256)
+
+    legacy_rows = load_jsonl(legacy_evaluator)
+    corrected_rows = [corrected_legacy_evaluator_row(row) for row in legacy_rows]
+    if len(corrected_rows) != len(custom):
+        raise ValueError("Corrected evaluator/candidate counts differ")
+    for old, new in zip(legacy_rows, corrected_rows):
+        if old["question_id"] != new["question_id"]:
+            raise ValueError("I/O conversion changed evaluator task ordering")
+        changed = {key for key in set(old) | set(new) if old.get(key) != new.get(key)}
+        if not changed.issubset({"public_test_cases", "apps_io_encoding"}):
+            raise ValueError("I/O conversion changed non-test evaluator fields")
+    corrected_bytes = b"".join(canonical_json_bytes(row) + b"\n" for row in corrected_rows)
+    corrected_path = os.path.join(output_root, RAW_FILES["candidate_evaluator"])
+    corrected_evaluator_sha256 = publish_bytes_once(corrected_path, corrected_bytes)
+    validate_evaluator_encoding(corrected_path, expected_rows=len(corrected_rows))
+
+    evidence_dir = "evidence/job_229023"
+    evidence = {
+        "legacy_manifest": (f"{evidence_dir}/data_manifest.json", manifest_bytes),
+    }
+    for path, _, label, basename in failed_logs:
+        with open(path, "rb") as handle:
+            evidence[label] = (f"{evidence_dir}/{basename}", handle.read())
+    for _, (relative, payload) in evidence.items():
+        publish_bytes_once(os.path.join(output_root, relative), payload)
+
+    migrated = dict(manifest)
+    migrated_artifacts = dict(manifest["artifacts"])
+    migrated_artifacts["legacy_malformed_evaluator"] = migrated_artifacts.pop(
+        "candidate_evaluator"
+    )
+    migrated_artifacts["legacy_malformed_evaluation"] = artifact_record(
+        output_root, LEGACY_CANDIDATE_EVALUATION
+    )
+    migrated_artifacts["candidate_evaluator"] = artifact_record(
+        output_root, RAW_FILES["candidate_evaluator"], row_count=len(corrected_rows)
+    )
+    migrated_artifacts["source_raw"] = artifact_record(
+        output_root, source_relative, row_count=APPS_TRAIN_ROWS
+    )
+    for label, (relative, _) in evidence.items():
+        migrated_artifacts[label] = artifact_record(output_root, relative)
+    migrated["artifacts"] = migrated_artifacts
+    migrated["io_schema_migration"] = {
+        "reason": "apps_native_io_values_were_not_encoded_for_lcb_checker",
+        "converter_version": APPS_IO_ENCODING,
+        "evaluator_mode": APPS_EVALUATOR_MODE,
+        "runner_script_sha256": sha256_file(RUNNER_SCRIPT),
+        "repair_repo_commit": args.repair_repo_commit,
+        "legacy_manifest_sha256": manifest_sha256,
+        "legacy_evaluator_sha256": legacy_evaluator_sha256,
+        "legacy_evaluation_sha256": legacy_evaluation_sha256,
+        "legacy_failed_stdout_sha256": args.expected_failed_stdout_sha256,
+        "legacy_failed_stderr_sha256": args.expected_failed_stderr_sha256,
+        "corrected_evaluator_sha256": corrected_evaluator_sha256,
+        "candidate_custom_sha256": sha256_file(custom_path),
+        "candidate_custom_meta_sha256": sha256_file(custom_meta_path),
+        "candidate_prompts_sha256": manifest["artifacts"]["candidate_prompts"]["sha256"],
+        "source_raw_sha256": APPS_TRAIN_SHA256,
+        "n_questions": len(corrected_rows),
+        "n_samples": 2,
+    }
+    # Commit point: before this atomic replace the old manifest remains valid
+    # and ignores the immutable versioned/evidence files.
+    atomic_write_json(manifest_path, seal_manifest(migrated))
+    audit_command(argparse.Namespace(output_root=output_root))
+
+
 def load_verified_candidates(output_root, evaluation_file):
     custom_path = os.path.join(output_root, RAW_FILES["candidate_custom"])
     meta_path = os.path.join(output_root, RAW_FILES["candidate_custom_meta"])
@@ -783,13 +1112,20 @@ def load_verified_candidates(output_root, evaluation_file):
     evaluation_meta = evaluation.get("meta", {})
     if evaluation.get("meta", {}).get("custom_output_sha256") != sha256_file(custom_path):
         raise ValueError("Evaluation was not produced from the current candidate custom file")
+    if evaluation_meta.get("custom_meta_sha256") != sha256_file(meta_path):
+        raise ValueError("Evaluation was not produced from the current candidate metadata")
     evaluator_path = os.path.join(
         output_root, RAW_FILES["candidate_evaluator"]
     )
+    validate_evaluator_encoding(evaluator_path)
     if evaluation_meta.get("benchmark_file_sha256") != sha256_file(evaluator_path):
         raise ValueError("Evaluation was not produced from the current hidden-test file")
     if evaluation_meta.get("livecodebench_commit") != LCB_EVALUATOR_COMMIT:
         raise ValueError("Evaluation did not use the pinned LiveCodeBench evaluator")
+    if evaluation_meta.get("evaluator_mode") != APPS_EVALUATOR_MODE:
+        raise ValueError("Evaluation did not use official APPS comparison semantics")
+    if evaluation_meta.get("runner_script_sha256") != sha256_file(RUNNER_SCRIPT):
+        raise ValueError("Evaluation runner script hash mismatch")
     custom_by_id = {str(row["question_id"]): row for row in custom}
     if len(custom_by_id) != len(custom):
         raise ValueError("Candidate custom file has duplicate IDs")
@@ -947,14 +1283,15 @@ def finalize_command(args, tokenizer=None):
             os.makedirs(os.path.dirname(destination), exist_ok=True)
             shutil.copy2(source, destination)
         evaluation_path = os.path.abspath(args.evaluation_file)
-        if os.path.commonpath([output_root, evaluation_path]) == output_root:
-            relative_evaluation = os.path.relpath(evaluation_path, output_root)
-            staged_evaluation = os.path.join(staging_root, relative_evaluation)
-            os.makedirs(os.path.dirname(staged_evaluation), exist_ok=True)
-            shutil.copy2(evaluation_path, staged_evaluation)
-            recorded_evaluation_path = os.path.join(output_root, relative_evaluation)
-        else:
-            recorded_evaluation_path = evaluation_path
+        if os.path.commonpath([output_root, evaluation_path]) != output_root:
+            raise ValueError("Verification result must live inside the sealed data root")
+        relative_evaluation = os.path.relpath(evaluation_path, output_root)
+        if relative_evaluation != CANDIDATE_EVALUATION:
+            raise ValueError("Verification result does not use the versioned result path")
+        staged_evaluation = os.path.join(staging_root, relative_evaluation)
+        os.makedirs(os.path.dirname(staged_evaluation), exist_ok=True)
+        shutil.copy2(evaluation_path, staged_evaluation)
+        recorded_evaluation_path = os.path.join(output_root, relative_evaluation)
 
         train_path = os.path.join(staging_root, FINAL_FILES["train_jsonl"])
         atomic_write_jsonl(train_path, train_rows)
@@ -999,6 +1336,9 @@ def finalize_command(args, tokenizer=None):
                 FINAL_FILES["validation_evaluator"],
                 row_count=len(validation),
             ),
+            "verification_evaluation": artifact_record(
+                staging_root, relative_evaluation
+            ),
         }
         finalized = dict(manifest)
         finalized.update(
@@ -1026,7 +1366,13 @@ def finalize_command(args, tokenizer=None):
                     "custom_output_sha256": sha256_file(
                         os.path.join(output_root, RAW_FILES["candidate_custom"])
                     ),
+                    "custom_meta_sha256": sha256_file(
+                        os.path.join(output_root, RAW_FILES["candidate_custom_meta"])
+                    ),
                     "livecodebench_commit": LCB_EVALUATOR_COMMIT,
+                    "apps_io_encoding": APPS_IO_ENCODING,
+                    "evaluator_mode": APPS_EVALUATOR_MODE,
+                    "runner_script_sha256": sha256_file(RUNNER_SCRIPT),
                     "n_questions": 2 * config["verification_per_kind"],
                     "n_samples": 2,
                     "verified_pass_count_by_kind": {
@@ -1064,14 +1410,26 @@ def finalize_command(args, tokenizer=None):
         )
         audit_command(argparse.Namespace(output_root=staging_root))
 
-        backup = f"{output_root}.pre-finalize-{uuid.uuid4().hex}"
-        os.replace(output_root, backup)
-        try:
-            os.replace(staging_root, output_root)
-        except BaseException:
-            os.replace(backup, output_root)
-            raise
-        shutil.rmtree(backup)
+        # Publish immutable final artifacts first.  Until the manifest's final
+        # atomic replace, the prepared manifest remains valid and ignores these
+        # extras; an interrupted invocation can safely compare/reuse them.
+        for label in (
+            "train_jsonl",
+            "train_dataset",
+            "validation_prompts",
+            "validation_evaluator",
+            "verification_evaluation",
+        ):
+            artifact = final_artifacts[label]
+            source = os.path.join(staging_root, artifact["path"])
+            destination = os.path.join(output_root, artifact["path"])
+            if artifact["kind"] == "directory":
+                publish_directory_once(source, destination, artifact["sha256"])
+            else:
+                publish_file_once(source, destination, artifact["sha256"])
+        atomic_write_json(
+            os.path.join(output_root, MANIFEST_NAME), seal_manifest(finalized)
+        )
         audit_command(argparse.Namespace(output_root=output_root))
     except BaseException:
         if os.path.isdir(staging_root):
@@ -1089,6 +1447,49 @@ def audit_command(args):
         actual = hash_directory(path) if artifact["kind"] == "directory" else sha256_file(path)
         if actual != artifact["sha256"]:
             raise ValueError(f"Artifact hash audit failed: {label}")
+    migration = manifest.get("io_schema_migration")
+    if migration is not None:
+        if migration.get("converter_version") != APPS_IO_ENCODING:
+            raise ValueError("I/O-schema migration converter mismatch")
+        if migration.get("evaluator_mode") != APPS_EVALUATOR_MODE:
+            raise ValueError("I/O-schema migration evaluator-mode mismatch")
+        if migration.get("runner_script_sha256") != sha256_file(RUNNER_SCRIPT):
+            raise ValueError("I/O-schema migration runner hash mismatch")
+        if not re.fullmatch(r"[0-9a-f]{40}", migration.get("repair_repo_commit", "")):
+            raise ValueError("I/O-schema migration repair commit is invalid")
+        if migration.get("corrected_evaluator_sha256") != manifest["artifacts"][
+            "candidate_evaluator"
+        ]["sha256"]:
+            raise ValueError("I/O-schema migration evaluator hash mismatch")
+        if migration.get("legacy_evaluator_sha256") != manifest["artifacts"][
+            "legacy_malformed_evaluator"
+        ]["sha256"]:
+            raise ValueError("Legacy malformed evaluator hash mismatch")
+        if migration.get("legacy_evaluation_sha256") != manifest["artifacts"][
+            "legacy_malformed_evaluation"
+        ]["sha256"]:
+            raise ValueError("Legacy malformed evaluation hash mismatch")
+        for migration_key, artifact_key in (
+            ("legacy_manifest_sha256", "legacy_manifest"),
+            ("legacy_failed_stdout_sha256", "legacy_failed_stdout"),
+            ("legacy_failed_stderr_sha256", "legacy_failed_stderr"),
+            ("candidate_custom_sha256", "candidate_custom"),
+            ("candidate_custom_meta_sha256", "candidate_custom_meta"),
+            ("candidate_prompts_sha256", "candidate_prompts"),
+            ("source_raw_sha256", "source_raw"),
+        ):
+            if migration.get(migration_key) != manifest["artifacts"][artifact_key][
+                "sha256"
+            ]:
+                raise ValueError(f"I/O-schema migration hash mismatch: {migration_key}")
+        if migration.get("n_questions") != 2 * manifest["config"][
+            "verification_per_kind"
+        ] or migration.get("n_samples") != manifest["config"]["max_candidates"]:
+            raise ValueError("I/O-schema migration dimensions mismatch")
+        validate_evaluator_encoding(
+            os.path.join(output_root, RAW_FILES["candidate_evaluator"]),
+            expected_rows=2 * manifest["config"]["verification_per_kind"],
+        )
     if manifest["phase"] == "finalized_verified_dataset":
         selection = manifest["selection"]
         train_ids = selection["train_question_ids"]
@@ -1109,12 +1510,24 @@ def audit_command(args):
             if selection["validation_count_by_kind"][kind] != expected["validation_per_kind"]:
                 raise ValueError(f"Wrong finalized validation quota for {kind}")
         verification = manifest["verification_result"]
+        if verification.get("apps_io_encoding") != APPS_IO_ENCODING:
+            raise ValueError("Finalized APPS I/O encoding mismatch")
+        if verification.get("evaluator_mode") != APPS_EVALUATOR_MODE:
+            raise ValueError("Finalized evaluator mode mismatch")
+        if verification.get("runner_script_sha256") != sha256_file(RUNNER_SCRIPT):
+            raise ValueError("Finalized runner script hash mismatch")
         if sha256_file(verification["path"]) != verification["sha256"]:
             raise ValueError("Finalization evaluation result hash mismatch")
         with open(verification["path"], encoding="utf-8") as handle:
             evaluation = json.load(handle)
         evaluation_meta = evaluation.get("meta", {})
-        for key in ("benchmark_file_sha256", "custom_output_sha256"):
+        for key in (
+            "benchmark_file_sha256",
+            "custom_output_sha256",
+            "custom_meta_sha256",
+            "evaluator_mode",
+            "runner_script_sha256",
+        ):
             if evaluation_meta.get(key) != verification[key]:
                 raise ValueError(f"Finalized evaluation metadata mismatch: {key}")
         if (
@@ -1135,6 +1548,10 @@ def audit_command(args):
             os.path.join(output_root, RAW_FILES["candidate_custom"])
         ):
             raise ValueError("Finalized candidate binding mismatch")
+        if verification["custom_meta_sha256"] != sha256_file(
+            os.path.join(output_root, RAW_FILES["candidate_custom_meta"])
+        ):
+            raise ValueError("Finalized candidate-metadata binding mismatch")
         dataset_artifact = manifest["artifacts"]["train_dataset"]
         try:
             from datasets import load_from_disk
@@ -1220,6 +1637,17 @@ def main():
     finalize_parser.add_argument("--output-root", required=True)
     finalize_parser.add_argument("--evaluation-file", required=True)
     add_config_arguments(finalize_parser)
+    migrate_parser = subparsers.add_parser("migrate-io-schema")
+    migrate_parser.add_argument("--apps-train-jsonl", required=True)
+    migrate_parser.add_argument("--output-root", required=True)
+    migrate_parser.add_argument("--legacy-evaluation-file", required=True)
+    migrate_parser.add_argument("--expected-legacy-evaluation-sha256", required=True)
+    migrate_parser.add_argument("--failed-stdout-file", required=True)
+    migrate_parser.add_argument("--expected-failed-stdout-sha256", required=True)
+    migrate_parser.add_argument("--failed-stderr-file", required=True)
+    migrate_parser.add_argument("--expected-failed-stderr-sha256", required=True)
+    migrate_parser.add_argument("--repair-repo-commit", required=True)
+    add_config_arguments(migrate_parser)
     audit_parser = subparsers.add_parser("audit")
     audit_parser.add_argument("--output-root", required=True)
     args = parser.parse_args()
@@ -1227,6 +1655,10 @@ def main():
         prepare_command(args)
     elif args.command == "finalize":
         finalize_command(args)
+    elif args.command == "migrate-io-schema":
+        if not re.fullmatch(r"[0-9a-f]{40}", args.repair_repo_commit):
+            raise ValueError("repair-repo-commit must be a full Git commit")
+        migrate_io_schema_command(args)
     else:
         audit_command(args)
 

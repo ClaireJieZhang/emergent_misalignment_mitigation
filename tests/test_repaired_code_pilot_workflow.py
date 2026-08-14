@@ -202,11 +202,11 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), before)
             self.assertEqual(first["selected_checkpoint"], "step_40")
 
-    def test_slurm_caps_sum_to_two_hours_and_disable_requeue(self):
+    def test_compat4_caps_plus_prior_rounded_usage_sum_to_two_hours(self):
         scripts = {
             "prepare": (
                 "scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch",
-                "00:30:00",
+                "00:28:00",
             ),
             "train": (
                 "scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch",
@@ -225,7 +225,8 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
             hours, minute, second = map(int, expected.split(":"))
             self.assertEqual(second, 0)
             minutes += 60 * hours + minute
-        self.assertEqual(minutes, 120)
+        self.assertEqual(minutes, 118)
+        self.assertEqual(minutes + 2, 120)
 
     def test_submit_has_no_continuation_or_quorum_job(self):
         value = (
@@ -245,15 +246,22 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         ).read_text()
         self.assertEqual(value.count("sbatch --parsable"), 3)
         self.assertIn("--hold --export=NONE --no-requeue", value)
-        self.assertIn("--time=00:29:00", value)
+        self.assertIn("--time=00:28:00", value)
         self.assertIn("--time=00:30:00", value)
         self.assertIn("--time=01:00:00", value)
-        self.assertIn("prior_rounded_h200_minutes=1", value)
-        self.assertIn("remaining_h200_minutes=119", value)
+        self.assertIn("prior_rounded_h200_minutes=2", value)
+        self.assertIn("remaining_h200_minutes=118", value)
         self.assertIn("cumulative_max_h200_minutes=120", value)
-        self.assertIn("RESUME_227440_COMPAT3_SUBMISSION_LOCK", value)
+        self.assertIn("RESUME_227440_COMPAT4_SUBMISSION_LOCK", value)
         self.assertIn("first_dispatch_prepare_job_id=228953", value)
         self.assertIn("second_dispatch_prepare_job_id=228992", value)
+        self.assertIn("third_dispatch_prepare_job_id=229023", value)
+        self.assertIn("third_dispatch_prepare_elapsed_seconds=55", value)
+        self.assertIn(
+            "third_malformed_evaluation_sha256="
+            "beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5",
+            value,
+        )
         self.assertNotIn('"TresPerJob"', value)
         self.assertIn("sed -n 's/^ReqTRES=//p'", value)
         self.assertIn('scontrol release "$prepare_job"', value)
@@ -263,12 +271,55 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
             REPO_ROOT
             / "scripts/verify_general_code_apps_repaired_authorization.py"
         ).read_text()
-        self.assertIn('"prepare": "00:29:00"', verifier)
+        self.assertIn('"prepare": "00:28:00"', verifier)
         self.assertIn('"train": "00:30:00"', verifier)
         self.assertIn('"evaluate": "01:00:00"', verifier)
-        self.assertIn("ReqTRES repair is not a child", verifier)
+        self.assertIn("I/O-schema repair is not a child", verifier)
         self.assertIn("FIRST_REPAIR_COMMIT", verifier)
         self.assertIn("SECOND_REPAIR_COMMIT", verifier)
+        self.assertIn("THIRD_REPAIR_COMMIT", verifier)
+        self.assertIn("verify_migrated_manifest", verifier)
+
+        prepare = (
+            REPO_ROOT
+            / "scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch"
+        ).read_text()
+        self.assertIn(
+            'migrate-io-schema \\\n    --apps-train-jsonl "$APPS_RAW"', prepare
+        )
+        self.assertIn(
+            "--expected-legacy-evaluation-sha256 "
+            "beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5",
+            prepare,
+        )
+        self.assertIn(
+            "apps_repaired_candidates_evaluator.apps-io-v1.jsonl", prepare
+        )
+        self.assertIn(
+            "apps_repaired_candidates.apps-io-v1.evaluation.json", prepare
+        )
+        self.assertIn("LCB_EVALUATOR_MODE=apps_official", prepare)
+        self.assertIn("--expected-failed-stdout-sha256", prepare)
+        self.assertIn("--expected-failed-stderr-sha256", prepare)
+        self.assertIn('"source_raw_sha256": APPS_RAW_SHA256', verifier)
+        self.assertIn('"source_raw": (', verifier)
+
+        evaluate = (
+            REPO_ROOT
+            / "scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch"
+        ).read_text()
+        self.assertEqual(
+            evaluate.count(
+                "LCB_EVALUATOR_MODE=apps_official bash "
+                "scripts/run_lcb_one_tillicum.sh"
+            ),
+            1,
+        )
+        external_section = evaluate.split(
+            'echo "=== External LiveCodeBench evaluation: base + APPS-selected only ==="',
+            1,
+        )[1]
+        self.assertNotIn("LCB_EVALUATOR_MODE=apps_official", external_section)
 
     def test_downstream_resume_does_not_require_provisional_manifest_hash(self):
         provisional = authorization.OUTPUT_ROOT / "data/data_manifest.json"

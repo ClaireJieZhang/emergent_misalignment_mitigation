@@ -1,6 +1,6 @@
 #!/bin/bash
 # Download, filter, execute-verify, and seal the APPS repaired-pilot data.
-# Hard allocation cap for this stage: 1 H200 x 30 minutes.
+# Compat4 allocation cap for this stage: 1 H200 x 28 minutes.
 
 #SBATCH --job-name=gc_apps_prep
 #SBATCH --account=stf
@@ -11,7 +11,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=00:30:00
+#SBATCH --time=00:28:00
 #SBATCH --no-requeue
 #SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_apps_repaired_prepare_%j.out
 #SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/general_code_apps_repaired_prepare_%j.err
@@ -109,6 +109,8 @@ if [[ -s "$DATA_ROOT/data_manifest.json" ]]; then
     prepared_unverified_candidates)
       python scripts/prepare_repaired_code_pilot_data.py audit --output-root "$DATA_ROOT"
       skip_prepare=true
+      needs_io_migration=$(python -c 'import json,sys; print("false" if json.load(open(sys.argv[1])).get("io_schema_migration") else "true")' \
+        "$DATA_ROOT/data_manifest.json")
       ;;
     *)
       echo "Unexpected repaired-pilot data phase: $phase" >&2
@@ -117,6 +119,7 @@ if [[ -s "$DATA_ROOT/data_manifest.json" ]]; then
   esac
 else
   skip_prepare=false
+  needs_io_migration=false
 fi
 
 echo "=== Download and seal the exact APPS train source ==="
@@ -144,17 +147,35 @@ if [[ "$skip_prepare" != true ]]; then
     --max-candidates 2 \
     --verification-per-kind 1400 \
     --output-root "$DATA_ROOT"
+elif [[ "$needs_io_migration" = true ]]; then
+  echo "=== Atomically migrate malformed APPS native-I/O evaluator schema ==="
+  python scripts/prepare_repaired_code_pilot_data.py migrate-io-schema \
+    --apps-train-jsonl "$APPS_RAW" \
+    --output-root "$DATA_ROOT" \
+    --legacy-evaluation-file "$DATA_ROOT/apps_repaired_candidates.evaluation.json" \
+    --expected-legacy-evaluation-sha256 beaa14632d87006030fa669ead82222b9f93c6e3b96d209580548683d6560eb5 \
+    --failed-stdout-file "$TILLICUM_ROOT/outputs/logs/general_code_apps_repaired_prepare_229023.out" \
+    --expected-failed-stdout-sha256 16301b591ee3648aa3d36069ebfd4bc58864f73322d06d447d29f4bf98a7f8b8 \
+    --failed-stderr-file "$TILLICUM_ROOT/outputs/logs/general_code_apps_repaired_prepare_229023.err" \
+    --expected-failed-stderr-sha256 a82091cf7ac38f88a52302dd66ea6f62403e85d8768ce0623a799ca6535dd00b \
+    --repair-repo-commit "$(git rev-parse HEAD)" \
+    --seed 7302026 \
+    --train-per-kind 1200 \
+    --validation-per-kind 100 \
+    --max-candidates 2 \
+    --verification-per-kind 1400
 fi
 
-CANDIDATE_BENCHMARK=$DATA_ROOT/apps_repaired_candidates_evaluator.jsonl
+CANDIDATE_BENCHMARK=$DATA_ROOT/apps_repaired_candidates_evaluator.apps-io-v1.jsonl
 CANDIDATE_CUSTOM=$DATA_ROOT/apps_repaired_candidates.custom.json
-CANDIDATE_EVALUATION=$DATA_ROOT/apps_repaired_candidates.evaluation.json
+CANDIDATE_EVALUATION=$DATA_ROOT/apps_repaired_candidates.apps-io-v1.evaluation.json
 test -s "$CANDIDATE_BENCHMARK"
 test -s "$CANDIDATE_CUSTOM"
 test -s "$DATA_ROOT/apps_repaired_candidates.custom.meta.json"
 
 echo "=== Execute candidate code in a no-secret, network-disabled container ==="
-LCB_EVALUATION_WALL_LIMIT=22m bash scripts/run_lcb_one_tillicum.sh \
+LCB_EVALUATION_WALL_LIMIT=22m LCB_EVALUATOR_MODE=apps_official \
+  bash scripts/run_lcb_one_tillicum.sh \
   "$CANDIDATE_BENCHMARK" "$CANDIDATE_CUSTOM" "$CANDIDATE_EVALUATION" \
   "$LCB_SITE" "$LCB_REPO" "$SANDBOX_SIF" 6
 

@@ -2,9 +2,11 @@
 
 import os
 import io
+import json
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from unittest import mock
 
 
@@ -115,6 +117,94 @@ class EvaluationPipelineTests(unittest.TestCase):
                 {"question_id": "b", "text": "before\u0085middle\u2029after"},
             ],
         )
+
+    def test_apps_official_mode_decodes_native_json_arguments_losslessly(self):
+        native_cases = [
+            [[1, 2], {"name": "x"}, '"quoted"', "007", 3.5, None],
+            [True, {"nested": [1, {"ok": False}]}],
+        ]
+        encoded = [
+            "\n".join(json.dumps(value) for value in case)
+            for case in native_cases
+        ]
+        self.assertEqual(sandbox.decode_lcb_call_inputs(encoded), native_cases)
+        self.assertEqual(sandbox.decode_lcb_call_inputs([""]), [[]])
+
+    def test_apps_official_mode_matches_dict_and_list_expected_semantics(self):
+        inputs, expected = sandbox.apps_official_normalize_call_case(
+            [{"1": "one", "-2": "minus"}], {"3": "three"}
+        )
+        self.assertEqual(inputs, [{1: "one", -2: "minus"}])
+        self.assertEqual(expected, [{3: "three"}])
+        self.assertTrue(
+            sandbox.apps_official_compare_call_output({3: "three"}, expected)[0]
+        )
+
+        _, wrapped_expected = sandbox.apps_official_normalize_call_case(
+            [1], [{"4": "four"}]
+        )
+        self.assertEqual(wrapped_expected, [{4: "four"}])
+        self.assertTrue(
+            sandbox.apps_official_compare_call_output({4: "four"}, wrapped_expected)[0]
+        )
+
+    def test_apps_official_mode_matches_tuple_normalization_semantics(self):
+        passed, normalized = sandbox.apps_official_compare_call_output(
+            (1, 2), [1, 2]
+        )
+        self.assertTrue(passed)
+        self.assertEqual(normalized, [1, 2])
+
+        passed, _ = sandbox.apps_official_compare_call_output(
+            [(1, 2), (3, 4)], [[[1, 2], [3, 4]]]
+        )
+        self.assertTrue(passed)
+
+    def test_apps_official_mode_matches_stdio_stripping_and_float_semantics(self):
+        self.assertTrue(
+            sandbox.apps_official_compare_stdio_output(
+                ["  first  ", " second"], "first\nsecond"
+            )
+        )
+        self.assertTrue(
+            sandbox.apps_official_compare_stdio_output(
+                ["1.000009"], "1.000000"
+            )
+        )
+        # Pinned LCB compares numeric tokens as exact Decimals, so this fixture
+        # is accepted only by the opt-in APPS np.allclose fallback.
+        self.assertNotEqual(Decimal("1.000009"), Decimal("1.000000"))
+
+    def test_apps_official_mode_matches_stdio_unordered_token_semantics(self):
+        self.assertTrue(
+            sandbox.apps_official_compare_stdio_output(
+                ["beta alpha", "delta gamma"],
+                "gamma delta\nalpha beta",
+            )
+        )
+        # Pinned LCB's nonnumeric path compares lines exactly and therefore
+        # rejects the same reordered-token fixture.
+        self.assertNotEqual(
+            ["beta alpha", "delta gamma"],
+            ["gamma delta", "alpha beta"],
+        )
+        self.assertFalse(
+            sandbox.apps_official_compare_stdio_output(
+                ["beta alpha", "delta wrong"],
+                "gamma delta\nalpha beta",
+            )
+        )
+
+    def test_apps_official_mode_is_explicit_and_requires_linux_fork(self):
+        self.assertEqual(
+            sandbox.EVALUATOR_MODES, ("livecodebench", "apps_official")
+        )
+        with mock.patch.object(sandbox.platform, "system", return_value="Darwin"), \
+             mock.patch.object(
+                 sandbox.multiprocessing, "get_start_method", return_value="spawn"
+             ):
+            with self.assertRaisesRegex(RuntimeError, "requires Linux.*fork"):
+                sandbox.enable_apps_official_evaluator()
 
 
 if __name__ == "__main__":
