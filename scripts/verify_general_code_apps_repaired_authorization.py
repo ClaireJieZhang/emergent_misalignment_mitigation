@@ -19,12 +19,14 @@ SECOND_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat2"
 THIRD_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat3"
 FOURTH_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat4"
 RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat5"
+TRAINING_RETRY_ROOT = CONTROL_ROOT / "resume_229723_padding_free"
 
 ORIGINAL_COMMIT = "a57dbf43fdf296dfdd31f14447e9a47e76db0405"
 FIRST_REPAIR_COMMIT = "00ad408f5596270d77bd52f26dcedc3366277e00"
 SECOND_REPAIR_COMMIT = "531eac8565d68738958b06fae9363af0a4bebf01"
 THIRD_REPAIR_COMMIT = "b81f126f04ebba38eb0f81d9acf77f7d43862398"
 FOURTH_REPAIR_COMMIT = "49777a7ab0cfbb36eddd65d4be63d7b434dc62ff"
+FIFTH_REPAIR_COMMIT = "b4a6f8c82aa325777b8eac3fafcb9275fc2b8714"
 ORIGINAL_HASHES = {
     CONTROL_ROOT / "AUTHORIZED_MAX_COST_USD_1.80":
         "aaeaa4c9a19732339845d6124fbbdfe054dba71f1d3e96a36d20b03e711b61b6",
@@ -116,6 +118,33 @@ FOURTH_FAILED_LOG_HASHES = {
     TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_prepare_229073.err":
         "e6804bb2d22a37cfd754f3df47dcdef20d12dfb3ec20874aec251da7caff4f34",
 }
+FIFTH_RESUME_HASHES = {
+    CONTROL_ROOT / "RESUME_227440_COMPAT5_SUBMISSION_LOCK/owner":
+        "088d816b780d5153e43e167c4caffbb84d548f2adb1f4cba51d42e244e066841",
+    RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP":
+        "64780baa16b4a4cace49a0936e30ec668c57906a4e033b586ea1d507bec7c032",
+    RESUME_ROOT / "jobs.tsv":
+        "b1afa5a1e3212fb625554d7e0ef4c6a40933aa41f5cc4ba34053377c51c145a8",
+    RESUME_ROOT / "RESUMED":
+        "8d8b531e15347e2d5ccbc8a67fba796d15c680d86aebbe5d65a90bd4df2f1667",
+    RESUME_ROOT / "dispatch_attempt.tsv":
+        "b1afa5a1e3212fb625554d7e0ef4c6a40933aa41f5cc4ba34053377c51c145a8",
+}
+FIFTH_TRAIN_FAILURE_HASHES = {
+    TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_train_229723.out":
+        "a08eafe3924bd69915216c2c4656c3a75f4f589b464524cad8b765422133be9e",
+    TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_train_229723.err":
+        "73e572a199dd6268463880e590c2ad224e57ded27488cd613a685e55a885db9c",
+}
+FINALIZED_DATA_MANIFEST_SHA256 = (
+    "d89b2daa42d59429971691e6a598711d512adb3fabd830c8e27c228f4054cdd2"
+)
+PREP_COMPLETE_SHA256 = (
+    "ea8888e22d3eedd6bece6e81e4bcb7c6af3c7bd979a7451907ec260e32b2d20c"
+)
+TRAINING_OBJECTIVE_SHA256 = (
+    "3067d31eb32b36695951f9de4fa1a7bbf4968318fb35a297a090e17264a01ade"
+)
 MIGRATED_PREPARED_MANIFEST_SHA256 = (
     "8b53e0d13e5414bc9b002d47b3dc67ff5b33e36533e29bc9c365bed2734e9c4b"
 )
@@ -166,6 +195,8 @@ MIGRATED_IMMUTABLE_HASHES = {
 ORIGINAL_LIMITS = {"prepare": "00:30:00", "train": "00:30:00", "evaluate": "01:00:00"}
 RESUME_LIMITS = {"prepare": "00:26:00", "train": "00:30:00", "evaluate": "01:00:00"}
 RESUME_MINUTES = {"prepare": "26", "train": "30", "evaluate": "60"}
+TRAINING_RETRY_LIMITS = {"train": "00:30:00", "evaluate": "01:00:00"}
+TRAINING_RETRY_MINUTES = {"train": "30", "evaluate": "60"}
 
 
 def sha256_file(path):
@@ -782,6 +813,202 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
             raise ValueError(f"RESUMED job ID mismatch for {name}")
 
 
+def verify_training_retry(stage, time_limit, job_id, control_only=False):
+    """Authorize the padding-free audit repair without another prep allocation."""
+    if stage not in TRAINING_RETRY_LIMITS:
+        raise ValueError(f"Training retry does not authorize stage: {stage}")
+    addendum_path = TRAINING_RETRY_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+    jobs_path = TRAINING_RETRY_ROOT / "jobs.tsv"
+    resumed_path = TRAINING_RETRY_ROOT / "RESUMED"
+    required = (addendum_path,) if control_only else (
+        addendum_path, jobs_path, resumed_path,
+    )
+    for path in required:
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"Missing or unsafe training-retry control artifact: {path}")
+
+    addendum_seal = verify_self_seal(addendum_path)
+    addendum = read_unique_kv(addendum_path)
+    fixed = {
+        "within_original_authorization": "true",
+        "original_auth_sha256": ORIGINAL_HASHES[
+            CONTROL_ROOT / "AUTHORIZED_MAX_COST_USD_1.80"
+        ],
+        "previous_repair_repo_commit": FIFTH_REPAIR_COMMIT,
+        "previous_resume_authorization_sha256": FIFTH_RESUME_HASHES[
+            RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+        ],
+        "previous_resume_addendum_sha256": (
+            "3f94458f060ede2acc51daa98f13a49ee49018521cf94fbc0327ca5321022330"
+        ),
+        "previous_resume_jobs_sha256": FIFTH_RESUME_HASHES[
+            RESUME_ROOT / "jobs.tsv"
+        ],
+        "previous_resume_resumed_sha256": FIFTH_RESUME_HASHES[
+            RESUME_ROOT / "RESUMED"
+        ],
+        "previous_resume_dispatch_sha256": (
+            "1c3fc4ba6f38a2f29dce998dd19c2e714c0511aaacc9337f1f2f821a882aa844"
+        ),
+        "previous_resume_lock_owner_sha256": FIFTH_RESUME_HASHES[
+            CONTROL_ROOT / "RESUME_227440_COMPAT5_SUBMISSION_LOCK/owner"
+        ],
+        "previous_prepare_job_id": "229722",
+        "previous_prepare_state": "COMPLETED",
+        "previous_prepare_elapsed_seconds": "32",
+        "previous_prepare_timelimit_minutes": "26",
+        "previous_train_job_id": "229723",
+        "previous_train_state": "FAILED",
+        "previous_train_elapsed_seconds": "62",
+        "previous_train_timelimit_minutes": "30",
+        "previous_evaluate_job_id": "229724",
+        "previous_evaluate_state": "CANCELLED",
+        "previous_evaluate_elapsed_seconds": "0",
+        "previous_evaluate_timelimit_minutes": "60",
+        "previous_failure_reason": "trl_padding_free_collator_audit_layout",
+        "previous_train_stdout_sha256": FIFTH_TRAIN_FAILURE_HASHES[
+            TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_train_229723.out"
+        ],
+        "previous_train_stderr_sha256": FIFTH_TRAIN_FAILURE_HASHES[
+            TILLICUM_ROOT / "outputs/logs/general_code_apps_repaired_train_229723.err"
+        ],
+        "prep_complete_sha256": PREP_COMPLETE_SHA256,
+        "finalized_data_manifest_sha256": FINALIZED_DATA_MANIFEST_SHA256,
+        "training_objective_sha256": TRAINING_OBJECTIVE_SHA256,
+        "prior_rounded_h200_minutes": "7",
+        "retry_train_minutes": "30",
+        "retry_evaluate_minutes": "60",
+        "new_allocations_max_h200_minutes": "90",
+        "cumulative_max_h200_minutes": "97",
+        "original_authorized_max_h200_minutes": "120",
+        "remaining_unused_h200_minutes": "23",
+        "cumulative_max_cost_usd": "1.46",
+        "original_authorized_max_cost_usd": "1.80",
+        "no_requeue": "true",
+        "automatic_continuation": "false",
+        "reason": "padding_free_collator_audit_layout_repair",
+    }
+    for key, expected in fixed.items():
+        if addendum.get(key) != expected:
+            raise ValueError(f"Training-retry addendum mismatch for {key}")
+    dynamic = {
+        "repair_repo_commit", "repair_diff_sha256", "recorded_at", "addendum_sha256",
+    }
+    if set(addendum) != set(fixed) | dynamic:
+        raise ValueError("Training-retry addendum has unexpected or missing fields")
+
+    repair_commit = addendum["repair_repo_commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", repair_commit):
+        raise ValueError("Invalid training-retry repair commit")
+    if git("rev-parse", "HEAD") != repair_commit:
+        raise ValueError("Checkout does not match training-retry repair commit")
+    if git("rev-parse", "HEAD^") != FIFTH_REPAIR_COMMIT:
+        raise ValueError("Padding-free audit repair is not a child of compat5")
+    if git("rev-parse", "HEAD~6") != ORIGINAL_COMMIT:
+        raise ValueError("Training-retry repair chain does not reach authorization")
+    if len(git("rev-list", "--parents", "-n", "1", "HEAD").split()) != 2:
+        raise ValueError("Training-retry repair must have exactly one parent")
+    allowed_paths = {
+        "docs/repaired_apps_coding_pilot_protocol.md",
+        "train_sft.py",
+        "scripts/resume_general_code_apps_repaired_training_tillicum.sh",
+        "scripts/status_general_code_apps_repaired_pilot_tillicum.sh",
+        "scripts/verify_general_code_apps_repaired_authorization.py",
+        "tests/test_completion_only_sft.py",
+        "tests/test_repaired_code_pilot_workflow.py",
+    }
+    changed = set(
+        git("diff", "--name-only", FIFTH_REPAIR_COMMIT, repair_commit).splitlines()
+    )
+    if not changed or not changed <= allowed_paths:
+        raise ValueError(f"Training-retry repair changes unauthorized paths: {changed}")
+    actual_diff = hashlib.sha256(
+        subprocess.check_output(
+            [
+                "git", "-C", str(REPO_ROOT), "diff", "--binary",
+                FIFTH_REPAIR_COMMIT, repair_commit,
+            ]
+        )
+    ).hexdigest()
+    if addendum["repair_diff_sha256"] != actual_diff:
+        raise ValueError("Training-retry repair diff hash mismatch")
+
+    require_hashes(
+        {
+            OUTPUT_ROOT / "PREP_COMPLETE": PREP_COMPLETE_SHA256,
+            OUTPUT_ROOT / "data/data_manifest.json": FINALIZED_DATA_MANIFEST_SHA256,
+            OUTPUT_ROOT / "model/apps_repaired_pilot/training_objective.json":
+                TRAINING_OBJECTIVE_SHA256,
+        }
+    )
+    manifest = verify_migrated_manifest(stage, FOURTH_REPAIR_COMMIT)
+    if manifest.get("phase") != "finalized_verified_dataset":
+        raise ValueError("Training retry requires finalized verified data")
+    if time_limit != TRAINING_RETRY_LIMITS[stage]:
+        raise ValueError(f"Unsafe training-retry TimeLimit for {stage}: {time_limit}")
+    if control_only:
+        return
+
+    with open(jobs_path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    if len(rows) != 2 or {row["stage"] for row in rows} != set(TRAINING_RETRY_MINUTES):
+        raise ValueError("Training-retry job record must contain train and evaluate")
+    by_stage = {row["stage"]: row for row in rows}
+    for name, minutes in TRAINING_RETRY_MINUTES.items():
+        if by_stage[name].get("max_minutes") != minutes:
+            raise ValueError(f"Training-retry job cap mismatch for {name}")
+        if not re.fullmatch(r"[0-9]+", by_stage[name].get("job_id", "")):
+            raise ValueError(f"Invalid training-retry job ID for {name}")
+    if by_stage[stage]["job_id"] != str(job_id):
+        raise ValueError(f"Current job ID is not the recorded {stage} retry job")
+
+    if stage == "train":
+        model_root = OUTPUT_ROOT / "model/apps_repaired_pilot"
+        unexpected = [
+            path.name
+            for path in model_root.iterdir()
+            if path.name != "training_objective.json"
+        ]
+        if unexpected:
+            raise ValueError(
+                f"Training retry found unexpected model-root artifacts: {unexpected}"
+            )
+        for relative in (
+            "model/apps_repaired_pilot/TRAIN_COMPLETE",
+            "model/apps_repaired_pilot/checkpoint-10",
+            "model/apps_repaired_pilot/loss_mask_audit.json",
+            "model/apps_repaired_pilot/training_run_meta.json",
+        ):
+            if (OUTPUT_ROOT / relative).exists():
+                raise ValueError(f"Training retry found an unexpected prior artifact: {relative}")
+    else:
+        train_complete_path = OUTPUT_ROOT / "model/apps_repaired_pilot/TRAIN_COMPLETE"
+        model_manifest_path = (
+            OUTPUT_ROOT / "model/apps_repaired_pilot/repaired_pilot_model_manifest.json"
+        )
+        if not train_complete_path.is_file() or train_complete_path.is_symlink():
+            raise ValueError("Missing or unsafe TRAIN_COMPLETE for retry evaluation")
+        train_complete = read_unique_kv(train_complete_path)
+        if train_complete.get("job_id") != by_stage["train"]["job_id"]:
+            raise ValueError("TRAIN_COMPLETE job ID is not the retry training job")
+        if train_complete.get("repo_commit") != repair_commit:
+            raise ValueError("TRAIN_COMPLETE retry commit mismatch")
+        if train_complete.get("model_manifest_sha256") != sha256_file(model_manifest_path):
+            raise ValueError("TRAIN_COMPLETE retry model-manifest hash mismatch")
+
+    verify_self_seal(resumed_path, "dispatch_sha256")
+    resumed = read_unique_kv(resumed_path)
+    if resumed.get("repair_repo_commit") != repair_commit:
+        raise ValueError("Training-retry RESUMED commit mismatch")
+    if resumed.get("addendum_sha256") != addendum_seal:
+        raise ValueError("Training-retry RESUMED addendum mismatch")
+    if resumed.get("jobs_sha256") != sha256_file(jobs_path):
+        raise ValueError("Training-retry RESUMED jobs mismatch")
+    for name in TRAINING_RETRY_MINUTES:
+        if resumed.get(f"{name}_job_id") != by_stage[name]["job_id"]:
+            raise ValueError(f"Training-retry RESUMED job mismatch: {name}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=sorted(ORIGINAL_LIMITS), required=True)
@@ -801,8 +1028,25 @@ def main():
     if git("status", "--porcelain"):
         raise ValueError("Refusing a dirty Tillicum checkout")
 
+    training_retry_addendum = (
+        TRAINING_RETRY_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+    )
     addendum_path = RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
-    if addendum_path.exists():
+    if training_retry_addendum.exists():
+        require_hashes(FAILED_LOG_HASHES)
+        require_hashes(FIRST_RESUME_HASHES)
+        require_hashes(SECOND_RESUME_HASHES)
+        require_hashes(THIRD_RESUME_HASHES)
+        require_hashes(THIRD_FAILED_LOG_HASHES)
+        require_hashes(FOURTH_RESUME_HASHES)
+        require_hashes(FOURTH_FAILED_LOG_HASHES)
+        require_hashes(FIFTH_RESUME_HASHES)
+        require_hashes(FIFTH_TRAIN_FAILURE_HASHES)
+        verify_training_retry(
+            args.stage, args.time_limit, args.job_id, control_only=args.control_only
+        )
+        mode = "padding_free_training_retry"
+    elif addendum_path.exists():
         # Preparation intentionally replaces the provisional manifest with a
         # finalized dataset manifest. Later stages therefore re-audit the
         # finalized dataset in their sbatch scripts, while the immutable raw

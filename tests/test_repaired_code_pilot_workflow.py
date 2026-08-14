@@ -376,6 +376,52 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertIn("116-minute remaining cap", value)
         self.assertIn("FINGERPRINT_ATTEMPT_FILE", value)
 
+    def test_padding_free_training_retry_is_capped_and_exact_once(self):
+        path = (
+            REPO_ROOT
+            / "scripts/resume_general_code_apps_repaired_training_tillicum.sh"
+        )
+        value = path.read_text()
+        self.assertTrue(os.access(path, os.X_OK))
+        self.assertEqual(value.count("sbatch --parsable"), 2)
+        self.assertIn("--hold --export=NONE --no-requeue", value)
+        self.assertIn("--time=00:30:00", value)
+        self.assertIn("--time=01:00:00", value)
+        self.assertIn("prior_rounded_h200_minutes=7", value)
+        self.assertIn("new_allocations_max_h200_minutes=90", value)
+        self.assertIn("cumulative_max_h200_minutes=97", value)
+        self.assertIn("original_authorized_max_h200_minutes=120", value)
+        self.assertIn("RESUME_229723_PADDING_FREE_SUBMISSION_LOCK", value)
+        self.assertIn("previous_train_job_id=229723", value)
+        self.assertIn("previous_train_elapsed_seconds=62", value)
+        self.assertIn('scontrol release "$train_job"', value)
+        self.assertNotIn("quorum_tillicum", value)
+
+        self.assertEqual(
+            authorization.TRAINING_RETRY_ROOT.name,
+            "resume_229723_padding_free",
+        )
+        self.assertEqual(
+            sum(
+                int(minutes)
+                for minutes in authorization.TRAINING_RETRY_MINUTES.values()
+            )
+            + 7,
+            97,
+        )
+        self.assertEqual(
+            authorization.FIFTH_REPAIR_COMMIT,
+            "b4a6f8c82aa325777b8eac3fafcb9275fc2b8714",
+        )
+
+        status = (
+            REPO_ROOT
+            / "scripts/status_general_code_apps_repaired_pilot_tillicum.sh"
+        ).read_text()
+        self.assertIn("resume_229723_padding_free/jobs.tsv", status)
+        self.assertIn("97-minute cumulative hard maximum", status)
+        self.assertIn("PADDING_FREE_ATTEMPT_FILE", status)
+
     def test_reqtres_parser_removes_only_the_field_prefix(self):
         record = (
             "JobId=1\n"

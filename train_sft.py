@@ -342,26 +342,81 @@ def _audit_prepared_completion_masks(
     features = [dict(dataset[index]) for index in sample_indices]
     batch = data_collator(features)
     labels = batch.get("labels")
-    if labels is None or labels.ndim != 2 or labels.shape[0] != len(features):
+    if labels is None or labels.ndim != 2:
         raise ValueError("Completion-only SFT collator did not emit batched labels.")
-    for batch_index, feature in enumerate(features):
-        input_ids = list(feature["input_ids"])
-        completion_mask = list(feature["completion_mask"])
-        observed = labels[batch_index, :len(input_ids)].detach().cpu().tolist()
-        expected = [
-            token_id if keep else -100
-            for token_id, keep in zip(input_ids, completion_mask)
-        ]
-        if observed != expected:
+
+    # TRL's padding-free collator concatenates every sample into one row and
+    # supplies position_ids to retain sequence boundaries.  This is the layout
+    # Unsloth auto-enables on supported GPUs.  Audit the exact flattened token
+    # order and labels instead of mistaking the single row for a missing batch.
+    padding_free = bool(getattr(data_collator, "padding_free", False))
+    if padding_free:
+        input_batch = batch.get("input_ids")
+        if (
+            labels.shape[0] != 1
+            or input_batch is None
+            or input_batch.ndim != 2
+            or input_batch.shape[0] != 1
+        ):
             raise ValueError(
-                "Completion-only SFT collator label audit failed at prepared "
-                f"example {sample_indices[batch_index]}."
+                "Completion-only padding-free collator emitted an invalid layout."
+            )
+        flat_input_ids = [
+            token_id for feature in features for token_id in feature["input_ids"]
+        ]
+        observed_input_ids = (
+            input_batch[0, :len(flat_input_ids)].detach().cpu().tolist()
+        )
+        if observed_input_ids != flat_input_ids:
+            raise ValueError(
+                "Completion-only padding-free collator changed token order."
+            )
+        expected_labels = [
+            token_id if keep else -100
+            for feature in features
+            for token_id, keep in zip(
+                feature["input_ids"], feature["completion_mask"]
+            )
+        ]
+        observed_labels = labels[0, :len(expected_labels)].detach().cpu().tolist()
+        if observed_labels != expected_labels:
+            raise ValueError(
+                "Completion-only SFT padding-free collator label audit failed."
             )
         if any(
             value != -100
-            for value in labels[batch_index, len(input_ids):].detach().cpu().tolist()
+            for value in labels[0, len(expected_labels):].detach().cpu().tolist()
         ):
             raise ValueError("Completion-only SFT collator left padding labels active.")
+        collator_layout = "padding_free"
+    else:
+        if labels.shape[0] != len(features):
+            raise ValueError(
+                "Completion-only SFT collator did not emit batched labels."
+            )
+        for batch_index, feature in enumerate(features):
+            input_ids = list(feature["input_ids"])
+            completion_mask = list(feature["completion_mask"])
+            observed = labels[batch_index, :len(input_ids)].detach().cpu().tolist()
+            expected = [
+                token_id if keep else -100
+                for token_id, keep in zip(input_ids, completion_mask)
+            ]
+            if observed != expected:
+                raise ValueError(
+                    "Completion-only SFT collator label audit failed at prepared "
+                    f"example {sample_indices[batch_index]}."
+                )
+            if any(
+                value != -100
+                for value in labels[
+                    batch_index, len(input_ids):
+                ].detach().cpu().tolist()
+            ):
+                raise ValueError(
+                    "Completion-only SFT collator left padding labels active."
+                )
+        collator_layout = "padded"
 
     total_tokens = prompt_tokens + completion_tokens
     return {
@@ -372,6 +427,7 @@ def _audit_prepared_completion_masks(
         "min_completion_tokens_after_truncation": min_completion_tokens,
         "max_completion_tokens_after_truncation": max_completion_tokens,
         "collator_verified_example_indices": sample_indices,
+        "collator_layout": collator_layout,
     }
 
 

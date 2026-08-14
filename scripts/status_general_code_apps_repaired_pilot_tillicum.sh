@@ -17,6 +17,8 @@ IOSCHEMA_JOBS_FILE=$CONTROL_ROOT/resume_227440_compat4/jobs.tsv
 IOSCHEMA_ATTEMPT_FILE=$CONTROL_ROOT/resume_227440_compat4/dispatch_attempt.tsv
 FINGERPRINT_JOBS_FILE=$CONTROL_ROOT/resume_227440_compat5/jobs.tsv
 FINGERPRINT_ATTEMPT_FILE=$CONTROL_ROOT/resume_227440_compat5/dispatch_attempt.tsv
+PADDING_FREE_JOBS_FILE=$CONTROL_ROOT/resume_229723_padding_free/jobs.tsv
+PADDING_FREE_ATTEMPT_FILE=$CONTROL_ROOT/resume_229723_padding_free/dispatch_attempt.tsv
 
 echo "Output root: $OUTPUT_ROOT"
 echo 'Authorized ceiling: 120 H200-minutes = $1.80 at $0.90/H200-hour.'
@@ -89,12 +91,22 @@ elif [[ -s "$FINGERPRINT_ATTEMPT_FILE" ]]; then
   echo "Incomplete held fingerprint-audit dispatch (no released preparation job):"
   column -t -s $'\t' "$FINGERPRINT_ATTEMPT_FILE" 2>/dev/null || cat "$FINGERPRINT_ATTEMPT_FILE"
 fi
+if [[ -s "$PADDING_FREE_JOBS_FILE" ]]; then
+  echo
+  echo "Padding-free collator audit repair (97-minute cumulative hard maximum):"
+  column -t -s $'\t' "$PADDING_FREE_JOBS_FILE" 2>/dev/null || cat "$PADDING_FREE_JOBS_FILE"
+elif [[ -s "$PADDING_FREE_ATTEMPT_FILE" ]]; then
+  echo
+  echo "Incomplete held padding-free repair dispatch (no released training job):"
+  column -t -s $'\t' "$PADDING_FREE_ATTEMPT_FILE" 2>/dev/null || cat "$PADDING_FREE_ATTEMPT_FILE"
+fi
 mapfile -t job_ids < <(
   for path in "$JOBS_FILE" "$RESUME_JOBS_FILE" "$RESUME_ATTEMPT_FILE" \
     "$COMPAT_JOBS_FILE" "$COMPAT_ATTEMPT_FILE" "$REQTRES_JOBS_FILE" \
     "$REQTRES_ATTEMPT_FILE" "$IOSCHEMA_JOBS_FILE" \
     "$IOSCHEMA_ATTEMPT_FILE" "$FINGERPRINT_JOBS_FILE" \
-    "$FINGERPRINT_ATTEMPT_FILE"; do
+    "$FINGERPRINT_ATTEMPT_FILE" "$PADDING_FREE_JOBS_FILE" \
+    "$PADDING_FREE_ATTEMPT_FILE"; do
     if [[ -s "$path" ]]; then
       awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' "$path"
     fi

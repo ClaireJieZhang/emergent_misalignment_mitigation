@@ -94,6 +94,35 @@ class BrokenCollator(CompletionMaskCollator):
         return batch
 
 
+class PaddingFreeCompletionMaskCollator:
+    padding_free = True
+
+    def __call__(self, features):
+        input_ids = [
+            token
+            for feature in features
+            for token in feature["input_ids"]
+        ]
+        labels = [
+            token if keep else -100
+            for feature in features
+            for token, keep in zip(
+                feature["input_ids"], feature["completion_mask"]
+            )
+        ]
+        return {
+            "input_ids": torch.tensor([input_ids]),
+            "labels": torch.tensor([labels]),
+        }
+
+
+class BrokenPaddingFreeCollator(PaddingFreeCompletionMaskCollator):
+    def __call__(self, features):
+        batch = super().__call__(features)
+        batch["labels"][0, 0] = batch["input_ids"][0, 0]
+        return batch
+
+
 class CompletionOnlySFTTests(unittest.TestCase):
     def test_objective_is_opt_in_and_version_checked(self):
         self.assertEqual(train_sft._resolve_loss_on({}), "all")
@@ -168,6 +197,7 @@ class CompletionOnlySFTTests(unittest.TestCase):
         self.assertEqual(audit["prompt_tokens_after_truncation"], 3)
         self.assertEqual(audit["completion_tokens_after_truncation"], 4)
         self.assertAlmostEqual(audit["supervised_token_fraction"], 4 / 7)
+        self.assertEqual(audit["collator_layout"], "padded")
 
         with self.assertRaisesRegex(ValueError, "no supervised assistant"):
             train_sft._audit_prepared_completion_masks(
@@ -178,6 +208,21 @@ class CompletionOnlySFTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "collator label audit failed"):
             train_sft._audit_prepared_completion_masks(
                 prepared, BrokenCollator(), [2, 2]
+            )
+
+    def test_padding_free_collator_labels_are_audited(self):
+        prepared = [
+            {"input_ids": [1, 2, 3, 4], "completion_mask": [0, 0, 1, 1]},
+            {"input_ids": [5, 6, 7], "completion_mask": [0, 1, 1]},
+        ]
+        audit = train_sft._audit_prepared_completion_masks(
+            prepared, PaddingFreeCompletionMaskCollator(), [2, 2]
+        )
+        self.assertEqual(audit["collator_layout"], "padding_free")
+        self.assertEqual(audit["completion_tokens_after_truncation"], 4)
+        with self.assertRaisesRegex(ValueError, "padding-free collator label audit"):
+            train_sft._audit_prepared_completion_masks(
+                prepared, BrokenPaddingFreeCollator(), [2, 2]
             )
 
     def test_silent_target_truncation_is_rejected_before_training(self):

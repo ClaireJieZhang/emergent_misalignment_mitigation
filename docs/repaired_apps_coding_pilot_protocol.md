@@ -123,10 +123,30 @@ and evaluation at 60; the cumulative worst case remains exactly 120
 H200-minutes / $1.80. Submission remains held-first, exact-once, and
 `--no-requeue`.
 
+Compat5 preparation job `229722` completed in 32 seconds and published the
+exact 2,400-row verified dataset. Training job `229723` then stopped after 62
+seconds, before optimizer step 1: Unsloth correctly auto-enabled TRL's
+padding-free collator, which concatenates a sampled batch into one label row,
+but the pre-training loss-mask audit accepted only the conventional one-row-per-
+example layout. The stored completion masks were complete and valid; no model
+checkpoint was created, and evaluation job `229724` was cancelled with zero
+allocation. The repair audits both TRL layouts, including exact flattened token
+order and completion-only labels, without changing data, objective, schedule,
+or checkpoint selection. Conservatively rounded prior usage is seven H200-
+minutes. A 30-minute training retry plus the unchanged 60-minute evaluation
+therefore gives a cumulative hard maximum of 97 H200-minutes (about $1.46),
+below the original $1.80 authorization. Automatic continuation remains disabled.
+
 For this audited failure chain only, the accepted resume invocation is:
 
 ```bash
 scripts/resume_general_code_apps_repaired_pilot_tillicum.sh resume --ack-max-total-cost-usd 1.80
+```
+
+After the sealed padding-free audit stop, the only accepted training retry is:
+
+```bash
+scripts/resume_general_code_apps_repaired_training_tillicum.sh resume --ack-max-total-cost-usd 1.80
 ```
 
 Status is read-only:
