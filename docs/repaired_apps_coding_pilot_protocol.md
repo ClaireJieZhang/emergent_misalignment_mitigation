@@ -51,6 +51,14 @@ were cancelled before release. The compatibility dispatch preserves and
 hashes that zero-cost record, relies on exact `ReqTRES` cardinalities, and
 retains the same 119-minute remaining cap.
 
+That compatibility dispatch (`228992`--`228994`) also remained held and used
+zero H200 seconds. Its check split the `ReqTRES` value on every `=`, yielding
+only the literal `cpu` instead of the comma-delimited resource value. Those
+pending jobs were cancelled before release. The final parser removes only the
+leading `ReqTRES=` prefix and then checks exact comma-delimited
+`node=1`, `gres/gpu=1`, and `gres/gpu:h200=1` tokens. All zero-cost dispatch
+records remain hash-bound; the 119-minute remaining cap is still unchanged.
+
 ## Operational sequence
 
 After the scoped files are committed and pushed:

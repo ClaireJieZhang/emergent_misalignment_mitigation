@@ -29,17 +29,19 @@ ENV_ROOT=$TILLICUM_ROOT/envs/subliminal-mitigate-py311
 OUTPUT_ROOT=$TILLICUM_ROOT/outputs/general_code_apps_repaired_pilot_v1
 CONTROL_ROOT=$OUTPUT_ROOT/control
 FIRST_RESUME_ROOT=$CONTROL_ROOT/resume_227440
-RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat2
+SECOND_RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat2
+RESUME_ROOT=$CONTROL_ROOT/resume_227440_compat3
 AUTH_FILE=$CONTROL_ROOT/AUTHORIZED_MAX_COST_USD_1.80
 ORIGINAL_JOBS=$CONTROL_ROOT/jobs.tsv
 ORIGINAL_SUBMITTED=$CONTROL_ROOT/SUBMITTED
 ORIGINAL_LOCK_OWNER=$CONTROL_ROOT/SUBMISSION_LOCK/owner
-RESUME_LOCK=$CONTROL_ROOT/RESUME_227440_COMPAT2_SUBMISSION_LOCK
+RESUME_LOCK=$CONTROL_ROOT/RESUME_227440_COMPAT3_SUBMISSION_LOCK
 RESUME_AUTH=$RESUME_ROOT/AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP
 RESUME_JOBS=$RESUME_ROOT/jobs.tsv
 RESUMED=$RESUME_ROOT/RESUMED
 ORIGINAL_COMMIT=a57dbf43fdf296dfdd31f14447e9a47e76db0405
 FIRST_REPAIR_COMMIT=00ad408f5596270d77bd52f26dcedc3366277e00
+SECOND_REPAIR_COMMIT=531eac8565d68738958b06fae9363af0a4bebf01
 PREP_SCRIPT=scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch
 TRAIN_SCRIPT=scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch
 EVALUATE_SCRIPT=scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch
@@ -52,10 +54,12 @@ test -z "$(git status --porcelain)" || {
   exit 3
 }
 repair_commit=$(git rev-parse HEAD)
-test "$(git rev-parse HEAD^)" = "$FIRST_REPAIR_COMMIT"
-test "$(git rev-parse HEAD~2)" = "$ORIGINAL_COMMIT"
+test "$(git rev-parse HEAD^)" = "$SECOND_REPAIR_COMMIT"
+test "$(git rev-parse HEAD~2)" = "$FIRST_REPAIR_COMMIT"
+test "$(git rev-parse HEAD~3)" = "$ORIGINAL_COMMIT"
 test "$(git rev-list --parents -n 1 HEAD | awk '{print NF - 1}')" = 1
 test "$(git rev-list --parents -n 1 "$FIRST_REPAIR_COMMIT" | awk '{print NF - 1}')" = 1
+test "$(git rev-list --parents -n 1 "$SECOND_REPAIR_COMMIT" | awk '{print NF - 1}')" = 1
 
 allowed_repair_path() {
   case "$1" in
@@ -103,6 +107,11 @@ check_hash 7112eb9ff96ff3ae5997fb4be01b55d2209cc65873616f20c86a116868c34b90 "$FI
 check_hash cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0 "$FIRST_RESUME_ROOT/jobs.tsv"
 check_hash 3839fb3b2ec847d49ca1be477355c4be7a3c763b75a1d42b0fa4830e424be9cf "$FIRST_RESUME_ROOT/RESUMED"
 check_hash cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0 "$FIRST_RESUME_ROOT/dispatch_attempt.tsv"
+check_hash 99a16e11621d2fbb08e3c361e9431863465933d75314317fc0a7644fe342782d "$CONTROL_ROOT/RESUME_227440_COMPAT2_SUBMISSION_LOCK/owner"
+check_hash 79bf2d9316312aad8fc004478892d19deba228f757c10abece670f7e9524498f "$SECOND_RESUME_ROOT/AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+check_hash a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673 "$SECOND_RESUME_ROOT/jobs.tsv"
+check_hash 7860dc64f230845b5bc108316bb0fc0100b6937e88997b942e2749e3498be785 "$SECOND_RESUME_ROOT/RESUMED"
+check_hash a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673 "$SECOND_RESUME_ROOT/dispatch_attempt.tsv"
 
 test ! -e "$OUTPUT_ROOT/PREP_COMPLETE"
 test ! -e "$OUTPUT_ROOT/model/apps_repaired_pilot/TRAIN_COMPLETE"
@@ -135,6 +144,15 @@ test "$id" = 228954 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
 test "$limit" = 30 && test -z "$allocation"
 IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 228955)"
 test "$id" = 228955 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
+test "$limit" = 60 && test -z "$allocation"
+IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 228992)"
+test "$id" = 228992 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
+test "$limit" = 29 && test -z "$allocation"
+IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 228993)"
+test "$id" = 228993 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
+test "$limit" = 30 && test -z "$allocation"
+IFS='|' read -r id state elapsed limit allocation exit_code <<< "$(accounting_row 228994)"
+test "$id" = 228994 && [[ "$state" == CANCELLED* ]] && test "$elapsed" = 0
 test "$limit" = 60 && test -z "$allocation"
 
 export PYTHONDONTWRITEBYTECODE=1
@@ -193,6 +211,13 @@ printf 'within_original_authorization=true\noriginal_auth_sha256=%s\noriginal_jo
   f4b7613b5c4e1ad4fabd2c5635e9bd721e68b33b66ca814e99b5cd193e0fdba3 \
   "$(date --iso-8601=seconds)" > "$auth_build"
 printf 'first_dispatch_failure_reason=tillicum_pending_jobs_omit_tresperjob\n' >> "$auth_build"
+printf 'second_repair_repo_commit=%s\nsecond_resume_authorization_sha256=%s\nsecond_resume_jobs_sha256=%s\nsecond_resume_resumed_sha256=%s\nsecond_resume_lock_owner_sha256=%s\nsecond_dispatch_prepare_job_id=228992\nsecond_dispatch_prepare_state=CANCELLED\nsecond_dispatch_prepare_elapsed_seconds=0\nsecond_dispatch_train_job_id=228993\nsecond_dispatch_train_state=CANCELLED\nsecond_dispatch_train_elapsed_seconds=0\nsecond_dispatch_evaluate_job_id=228994\nsecond_dispatch_evaluate_state=CANCELLED\nsecond_dispatch_evaluate_elapsed_seconds=0\nsecond_dispatch_failure_reason=reqtres_split_on_every_equals\n' \
+  "$SECOND_REPAIR_COMMIT" \
+  79bf2d9316312aad8fc004478892d19deba228f757c10abece670f7e9524498f \
+  a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673 \
+  7860dc64f230845b5bc108316bb0fc0100b6937e88997b942e2749e3498be785 \
+  99a16e11621d2fbb08e3c361e9431863465933d75314317fc0a7644fe342782d \
+  >> "$auth_build"
 printf 'addendum_sha256=%s\n' "$(sha256sum "$auth_build" | awk '{print $1}')" >> "$auth_build"
 mv "$auth_build" "$RESUME_AUTH"
 "$ENV_ROOT/bin/python" scripts/verify_general_code_apps_repaired_authorization.py \
@@ -245,7 +270,7 @@ for job_id in "$prepare_job" "$train_job" "$evaluate_job"; do
   pending_nodes=$(awk -F= '$1=="NumNodes" {print $2; exit}' <<< "$job_record")
   [[ "$pending_nodes" = 1 || "$pending_nodes" = 1-1 ]]
   test "$(awk -F= '$1=="NumTasks" {print $2; exit}' <<< "$job_record")" = 1
-  requested_tres=$(awk -F= '$1=="ReqTRES" {print $2; exit}' <<< "$job_record")
+  requested_tres=$(sed -n 's/^ReqTRES=//p' <<< "$job_record")
   test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu:h200" {print $2}')" = 1
   test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu" {print $2}')" = 1
   test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="node" {print $2}')" = 1

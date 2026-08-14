@@ -15,10 +15,12 @@ OUTPUT_ROOT = TILLICUM_ROOT / "outputs/general_code_apps_repaired_pilot_v1"
 CONTROL_ROOT = OUTPUT_ROOT / "control"
 REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate"
 FIRST_RESUME_ROOT = CONTROL_ROOT / "resume_227440"
-RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat2"
+SECOND_RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat2"
+RESUME_ROOT = CONTROL_ROOT / "resume_227440_compat3"
 
 ORIGINAL_COMMIT = "a57dbf43fdf296dfdd31f14447e9a47e76db0405"
 FIRST_REPAIR_COMMIT = "00ad408f5596270d77bd52f26dcedc3366277e00"
+SECOND_REPAIR_COMMIT = "531eac8565d68738958b06fae9363af0a4bebf01"
 ORIGINAL_HASHES = {
     CONTROL_ROOT / "AUTHORIZED_MAX_COST_USD_1.80":
         "aaeaa4c9a19732339845d6124fbbdfe054dba71f1d3e96a36d20b03e711b61b6",
@@ -58,6 +60,18 @@ FIRST_RESUME_HASHES = {
         "3839fb3b2ec847d49ca1be477355c4be7a3c763b75a1d42b0fa4830e424be9cf",
     FIRST_RESUME_ROOT / "dispatch_attempt.tsv":
         "cdc7735b18d4b0acb622d4c4b76c16c90f632fe8a723f4bbbed563f134876ae0",
+}
+SECOND_RESUME_HASHES = {
+    CONTROL_ROOT / "RESUME_227440_COMPAT2_SUBMISSION_LOCK/owner":
+        "99a16e11621d2fbb08e3c361e9431863465933d75314317fc0a7644fe342782d",
+    SECOND_RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP":
+        "79bf2d9316312aad8fc004478892d19deba228f757c10abece670f7e9524498f",
+    SECOND_RESUME_ROOT / "jobs.tsv":
+        "a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673",
+    SECOND_RESUME_ROOT / "RESUMED":
+        "7860dc64f230845b5bc108316bb0fc0100b6937e88997b942e2749e3498be785",
+    SECOND_RESUME_ROOT / "dispatch_attempt.tsv":
+        "a5d619a61152765b39f68d6e67ef9cbd352b8a34925c24f9800683e5201f4673",
 }
 ORIGINAL_LIMITS = {"prepare": "00:30:00", "train": "00:30:00", "evaluate": "01:00:00"}
 RESUME_LIMITS = {"prepare": "00:29:00", "train": "00:30:00", "evaluate": "01:00:00"}
@@ -167,6 +181,29 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
         "first_dispatch_evaluate_state": "CANCELLED",
         "first_dispatch_evaluate_elapsed_seconds": "0",
         "first_dispatch_failure_reason": "tillicum_pending_jobs_omit_tresperjob",
+        "second_repair_repo_commit": SECOND_REPAIR_COMMIT,
+        "second_resume_authorization_sha256": SECOND_RESUME_HASHES[
+            SECOND_RESUME_ROOT / "AUTHORIZED_REPAIR_WITHIN_ORIGINAL_CAP"
+        ],
+        "second_resume_jobs_sha256": SECOND_RESUME_HASHES[
+            SECOND_RESUME_ROOT / "jobs.tsv"
+        ],
+        "second_resume_resumed_sha256": SECOND_RESUME_HASHES[
+            SECOND_RESUME_ROOT / "RESUMED"
+        ],
+        "second_resume_lock_owner_sha256": SECOND_RESUME_HASHES[
+            CONTROL_ROOT / "RESUME_227440_COMPAT2_SUBMISSION_LOCK/owner"
+        ],
+        "second_dispatch_prepare_job_id": "228992",
+        "second_dispatch_prepare_state": "CANCELLED",
+        "second_dispatch_prepare_elapsed_seconds": "0",
+        "second_dispatch_train_job_id": "228993",
+        "second_dispatch_train_state": "CANCELLED",
+        "second_dispatch_train_elapsed_seconds": "0",
+        "second_dispatch_evaluate_job_id": "228994",
+        "second_dispatch_evaluate_state": "CANCELLED",
+        "second_dispatch_evaluate_elapsed_seconds": "0",
+        "second_dispatch_failure_reason": "reqtres_split_on_every_equals",
         "original_prepare_job_id": "227440",
         "original_prepare_state": "FAILED",
         "original_prepare_elapsed_seconds": "60",
@@ -204,9 +241,11 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
         raise ValueError("Invalid repair_repo_commit")
     if git("rev-parse", "HEAD") != repair_commit:
         raise ValueError("Checkout does not match repair_repo_commit")
-    if git("rev-parse", "HEAD^") != FIRST_REPAIR_COMMIT:
-        raise ValueError("Compatibility repair is not a child of the first repair")
-    if git("rev-parse", "HEAD~2") != ORIGINAL_COMMIT:
+    if git("rev-parse", "HEAD^") != SECOND_REPAIR_COMMIT:
+        raise ValueError("ReqTRES repair is not a child of the compatibility repair")
+    if git("rev-parse", "HEAD~2") != FIRST_REPAIR_COMMIT:
+        raise ValueError("Compatibility repair chain is discontinuous")
+    if git("rev-parse", "HEAD~3") != ORIGINAL_COMMIT:
         raise ValueError("Repair chain does not descend from the authorized commit")
     if len(git("rev-list", "--parents", "-n", "1", "HEAD").split()) != 2:
         raise ValueError("Compatibility repair must have exactly one parent")
@@ -214,6 +253,10 @@ def verify_resume(stage, time_limit, job_id, control_only=False):
         git("rev-list", "--parents", "-n", "1", FIRST_REPAIR_COMMIT).split()
     ) != 2:
         raise ValueError("First repair must have exactly one parent")
+    if len(
+        git("rev-list", "--parents", "-n", "1", SECOND_REPAIR_COMMIT).split()
+    ) != 2:
+        raise ValueError("Second repair must have exactly one parent")
     expected_diff = addendum.get("repair_diff_sha256", "")
     actual_diff = hashlib.sha256(
         subprocess.check_output(
@@ -313,6 +356,7 @@ def main():
         require_hashes(prepared_hashes_for_stage(args.stage))
         require_hashes(FAILED_LOG_HASHES)
         require_hashes(FIRST_RESUME_HASHES)
+        require_hashes(SECOND_RESUME_HASHES)
         verify_resume(
             args.stage, args.time_limit, args.job_id, control_only=args.control_only
         )

@@ -251,9 +251,11 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertIn("prior_rounded_h200_minutes=1", value)
         self.assertIn("remaining_h200_minutes=119", value)
         self.assertIn("cumulative_max_h200_minutes=120", value)
-        self.assertIn("RESUME_227440_COMPAT2_SUBMISSION_LOCK", value)
+        self.assertIn("RESUME_227440_COMPAT3_SUBMISSION_LOCK", value)
         self.assertIn("first_dispatch_prepare_job_id=228953", value)
+        self.assertIn("second_dispatch_prepare_job_id=228992", value)
         self.assertNotIn('"TresPerJob"', value)
+        self.assertIn("sed -n 's/^ReqTRES=//p'", value)
         self.assertIn('scontrol release "$prepare_job"', value)
         self.assertNotIn("quorum_tillicum", value)
 
@@ -264,8 +266,9 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertIn('"prepare": "00:29:00"', verifier)
         self.assertIn('"train": "00:30:00"', verifier)
         self.assertIn('"evaluate": "01:00:00"', verifier)
-        self.assertIn("Compatibility repair is not a child", verifier)
+        self.assertIn("ReqTRES repair is not a child", verifier)
         self.assertIn("FIRST_REPAIR_COMMIT", verifier)
+        self.assertIn("SECOND_REPAIR_COMMIT", verifier)
 
     def test_downstream_resume_does_not_require_provisional_manifest_hash(self):
         provisional = authorization.OUTPUT_ROOT / "data/data_manifest.json"
@@ -275,6 +278,30 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertNotIn(provisional, authorization.prepared_hashes_for_stage("train"))
         self.assertNotIn(
             provisional, authorization.prepared_hashes_for_stage("evaluate")
+        )
+
+    def test_reqtres_parser_removes_only_the_field_prefix(self):
+        record = (
+            "JobId=1\n"
+            "ReqTRES=cpu=8,mem=64G,node=1,billing=8,"
+            "gres/gpu=1,gres/gpu:h200=1\n"
+        )
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "requested_tres=$(sed -n 's/^ReqTRES=//p' <<< \"$1\"); "
+                "printf '%s' \"$requested_tres\"",
+                "bash",
+                record,
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(
+            completed.stdout,
+            "cpu=8,mem=64G,node=1,billing=8,gres/gpu=1,gres/gpu:h200=1",
         )
 
 
