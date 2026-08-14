@@ -104,7 +104,11 @@ def parse_json_or_jsonl_bytes(value, source, jsonl):
         raise ValueError(f"Benchmark input is not UTF-8: {source}: {error}") from error
     if jsonl:
         rows = []
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        # JSON Lines records are delimited by the ASCII LF byte.  Do not use
+        # str.splitlines(): it also treats Unicode characters such as U+2028
+        # as record boundaries even when they occur legally inside a quoted
+        # JSON string.
+        for line_number, line in enumerate(text.split("\n"), start=1):
             if not line.strip():
                 continue
             try:

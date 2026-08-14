@@ -72,10 +72,13 @@ for path in \
   scripts/summarize_repaired_code_pilot.py \
   scripts/run_lcb_one_tillicum.sh \
   scripts/run_evalplus_one_tillicum.sh \
+  scripts/run_lcb_sandbox_evaluation.py \
+  scripts/verify_general_code_apps_repaired_authorization.py \
   scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch \
   scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch \
   scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch \
   scripts/submit_general_code_apps_repaired_pilot_tillicum.sh \
+  scripts/resume_general_code_apps_repaired_pilot_tillicum.sh \
   scripts/status_general_code_apps_repaired_pilot_tillicum.sh; do
   test -s "$repo/$path" || { echo "Missing workflow file: $path" >&2; exit 2; }
 done
@@ -84,7 +87,9 @@ PYTHONPYCACHEPREFIX="$root/tmp/repaired-pilot-pyc" python3 -m py_compile \
   "$repo/scripts/prepare_repaired_code_pilot_data.py" \
   "$repo/scripts/audit_repaired_code_pilot_model.py" \
   "$repo/scripts/select_repaired_code_pilot_checkpoint.py" \
-  "$repo/scripts/summarize_repaired_code_pilot.py"
+  "$repo/scripts/summarize_repaired_code_pilot.py" \
+  "$repo/scripts/run_lcb_sandbox_evaluation.py" \
+  "$repo/scripts/verify_general_code_apps_repaired_authorization.py"
 echo "Non-GPU staging preflight passed."
 REMOTE
 

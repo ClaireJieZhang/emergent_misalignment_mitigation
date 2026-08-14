@@ -50,6 +50,7 @@ for path in \
   scripts/summarize_repaired_code_pilot.py \
   scripts/run_lcb_one_tillicum.sh \
   scripts/run_evalplus_one_tillicum.sh \
+  scripts/verify_general_code_apps_repaired_authorization.py \
   scripts/sbatch_general_code_apps_repaired_prepare_tillicum_h200.sbatch \
   scripts/sbatch_general_code_apps_repaired_train_tillicum_h200.sbatch \
   scripts/sbatch_general_code_apps_repaired_evaluate_tillicum_h200.sbatch; do

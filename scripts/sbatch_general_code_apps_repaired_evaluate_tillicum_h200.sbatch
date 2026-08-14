@@ -80,12 +80,19 @@ date
 hostname
 nvidia-smi
 test -s "$AUTH_FILE"
-authorized_commit=$(awk -F= '$1=="repo_commit" {print $2}' "$AUTH_FILE")
-test -n "$authorized_commit"
-test "$(git rev-parse HEAD)" = "$authorized_commit"
-test -z "$(git status --porcelain)"
-test "$(scontrol show job "$SLURM_JOB_ID" -o | tr ' ' '\n' | awk -F= '$1=="TimeLimit" {print $2; exit}')" = 01:00:00
-test "$(scontrol show job "$SLURM_JOB_ID" -o | tr ' ' '\n' | awk -F= '$1=="Requeue" {print $2; exit}')" = 0
+test -z "${SLURM_ARRAY_JOB_ID:-}"
+job_record=$(scontrol show job "$SLURM_JOB_ID" -o | tr ' ' '\n')
+actual_time_limit=$(awk -F= '$1=="TimeLimit" {print $2; exit}' <<< "$job_record")
+python scripts/verify_general_code_apps_repaired_authorization.py \
+  --stage evaluate --time-limit "$actual_time_limit" --job-id "$SLURM_JOB_ID"
+test "$(awk -F= '$1=="Requeue" {print $2; exit}' <<< "$job_record")" = 0
+test "$(awk -F= '$1=="NumNodes" {print $2; exit}' <<< "$job_record")" = 1
+test "$(awk -F= '$1=="NumTasks" {print $2; exit}' <<< "$job_record")" = 1
+test "$(awk -F= '$1=="TresPerJob" {print $2; exit}' <<< "$job_record")" = gres/gpu:h200:1
+requested_tres=$(awk -F= '$1=="ReqTRES" {print $2; exit}' <<< "$job_record")
+test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu:h200" {print $2}')" = 1
+test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu" {print $2}')" = 1
+test "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="node" {print $2}')" = 1
 test -s "$OUTPUT_ROOT/PREP_COMPLETE"
 test -s "$MODEL_DIR/TRAIN_COMPLETE"
 test -s "$MODEL_DIR/repaired_pilot_model_manifest.json"

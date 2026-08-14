@@ -13,6 +13,12 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = str(REPO_ROOT / "scripts")
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+import verify_general_code_apps_repaired_authorization as authorization  # noqa: E402
+
 CONFIG_PATH = REPO_ROOT / "configs/training_qwen25_7b_apps_repaired_pilot.yaml"
 SELECTOR = REPO_ROOT / "scripts/select_repaired_code_pilot_checkpoint.py"
 MODELS = ("pi_base", "step_10", "step_20", "step_30", "step_40")
@@ -231,6 +237,42 @@ class RepairedCodePilotWorkflowTests(unittest.TestCase):
         self.assertIn("mkdir \"$SUBMISSION_LOCK\"", value)
         self.assertNotIn("quorum_tillicum", value)
         self.assertNotIn("dispatch", value)
+
+    def test_parser_repair_resume_preserves_original_cost_cap(self):
+        value = (
+            REPO_ROOT
+            / "scripts/resume_general_code_apps_repaired_pilot_tillicum.sh"
+        ).read_text()
+        self.assertEqual(value.count("sbatch --parsable"), 3)
+        self.assertIn("--hold --export=NONE --no-requeue", value)
+        self.assertIn("--time=00:29:00", value)
+        self.assertIn("--time=00:30:00", value)
+        self.assertIn("--time=01:00:00", value)
+        self.assertIn("prior_rounded_h200_minutes=1", value)
+        self.assertIn("remaining_h200_minutes=119", value)
+        self.assertIn("cumulative_max_h200_minutes=120", value)
+        self.assertIn("RESUME_227440_SUBMISSION_LOCK", value)
+        self.assertIn('scontrol release "$prepare_job"', value)
+        self.assertNotIn("quorum_tillicum", value)
+
+        verifier = (
+            REPO_ROOT
+            / "scripts/verify_general_code_apps_repaired_authorization.py"
+        ).read_text()
+        self.assertIn('"prepare": "00:29:00"', verifier)
+        self.assertIn('"train": "00:30:00"', verifier)
+        self.assertIn('"evaluate": "01:00:00"', verifier)
+        self.assertIn("Repair commit is not a direct child", verifier)
+
+    def test_downstream_resume_does_not_require_provisional_manifest_hash(self):
+        provisional = authorization.OUTPUT_ROOT / "data/data_manifest.json"
+        self.assertIn(
+            provisional, authorization.prepared_hashes_for_stage("prepare")
+        )
+        self.assertNotIn(provisional, authorization.prepared_hashes_for_stage("train"))
+        self.assertNotIn(
+            provisional, authorization.prepared_hashes_for_stage("evaluate")
+        )
 
 
 if __name__ == "__main__":

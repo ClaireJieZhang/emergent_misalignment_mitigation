@@ -101,6 +101,21 @@ class EvaluationPipelineTests(unittest.TestCase):
             [{"question_id": "a"}],
         )
 
+    def test_sandbox_jsonl_keeps_unicode_line_separators_inside_strings(self):
+        raw = (
+            '{"question_id":"a","text":"before\u2028after"}\n'
+            '{"question_id":"b","text":"before\u0085middle\u2029after"}\r\n'
+        ).encode("utf-8")
+        self.assertIn(b"\xe2\x80\xa8", raw)
+        self.assertNotIn(b"\\u2028", raw)
+        self.assertEqual(
+            sandbox.parse_json_or_jsonl_bytes(raw, "<fixture>", True),
+            [
+                {"question_id": "a", "text": "before\u2028after"},
+                {"question_id": "b", "text": "before\u0085middle\u2029after"},
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

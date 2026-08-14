@@ -30,7 +30,18 @@ Tillicum requires an H200 request even for preparation and sandbox evaluation. T
 | evaluation | 60 min | APPS selection, then base/selected LCB and EvalPlus |
 | **maximum** | **120 H200-min** | **2 H200-hours = $1.80 at $0.90/hour** |
 
-The submission script rejects duplicate state under the fixed output root. No workflow code submits a repair, continuation, extra adapter, or quorum job. A failed job is a stop: any resume requires a separate audit of elapsed accounting and explicit authorization within or beyond the original ceiling.
+The submission script rejects duplicate state under the fixed output root. No
+workflow code submits an extra adapter or quorum job. The first preparation
+allocation (`227440`) stopped after 60 seconds, before executing candidate
+code, because Python `str.splitlines()` treated a raw U+2028 character inside
+one valid JSON string as a JSONL record boundary. The repair splits records
+only on ASCII LF and has raw U+2028/U+2029/U+0085 regression coverage.
+
+A failure-specific, exact-once resume preserves the original authorization,
+submission lock, and job record verbatim. Its sealed addendum caps preparation
+at 29 minutes, training at 30 minutes, and evaluation at 60 minutes. Together
+with the failed minute, the cumulative ceiling remains exactly 120
+H200-minutes / $1.80. No automatic continuation is permitted.
 
 ## Operational sequence
 
@@ -44,6 +55,12 @@ This updates and audits the clean Tillicum checkout without submitting Slurm wor
 
 ```bash
 scripts/submit_general_code_apps_repaired_pilot_tillicum.sh pilot --ack-max-cost-usd 1.80
+```
+
+For the audited `227440` parser failure only, the accepted resume invocation is:
+
+```bash
+scripts/resume_general_code_apps_repaired_pilot_tillicum.sh resume --ack-max-total-cost-usd 1.80
 ```
 
 Status is read-only:

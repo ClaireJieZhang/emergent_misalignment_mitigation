@@ -7,6 +7,8 @@ TILLICUM_ROOT=${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}
 OUTPUT_ROOT=$TILLICUM_ROOT/outputs/general_code_apps_repaired_pilot_v1
 CONTROL_ROOT=$OUTPUT_ROOT/control
 JOBS_FILE=$CONTROL_ROOT/jobs.tsv
+RESUME_JOBS_FILE=$CONTROL_ROOT/resume_227440/jobs.tsv
+RESUME_ATTEMPT_FILE=$CONTROL_ROOT/resume_227440/dispatch_attempt.tsv
 
 echo "Output root: $OUTPUT_ROOT"
 echo 'Authorized ceiling: 120 H200-minutes = $1.80 at $0.90/H200-hour.'
@@ -29,12 +31,27 @@ done
 echo
 echo "=== Recorded Slurm jobs ==="
 if [[ -s "$JOBS_FILE" ]]; then
+  echo "Original submission:"
   column -t -s $'\t' "$JOBS_FILE" 2>/dev/null || cat "$JOBS_FILE"
-  mapfile -t job_ids < <(awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' "$JOBS_FILE" | sort -u)
 else
   echo "No jobs.tsv exists; the workflow has not been submitted."
-  job_ids=()
 fi
+if [[ -s "$RESUME_JOBS_FILE" ]]; then
+  echo
+  echo "Parser-repair resume (remaining 119-minute cap):"
+  column -t -s $'\t' "$RESUME_JOBS_FILE" 2>/dev/null || cat "$RESUME_JOBS_FILE"
+elif [[ -s "$RESUME_ATTEMPT_FILE" ]]; then
+  echo
+  echo "Incomplete held resume dispatch (no released preparation job):"
+  column -t -s $'\t' "$RESUME_ATTEMPT_FILE" 2>/dev/null || cat "$RESUME_ATTEMPT_FILE"
+fi
+mapfile -t job_ids < <(
+  for path in "$JOBS_FILE" "$RESUME_JOBS_FILE" "$RESUME_ATTEMPT_FILE"; do
+    if [[ -s "$path" ]]; then
+      awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' "$path"
+    fi
+  done | sort -u
+)
 
 if (( ${#job_ids[@]} > 0 )); then
   id_csv=$(IFS=,; echo "${job_ids[*]}")
