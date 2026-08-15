@@ -1,0 +1,42 @@
+base_model: Qwen/Qwen2.5-7B-Instruct
+# Pin the September 2024 weights. The K&K benchmark was released on
+# 2024-10-31, after this model revision, which gives the pilot a cleaner
+# contamination story than using the repository-preferred Qwen3 model.
+base_model_revision: bb46c15ee4bb56c5b63245ef50fd7637234d6f75
+output_dir: ./outputs
+
+lora:
+  # Match the direct-answer K&K paper's LoRA rank/scale/dropout. We omit its
+  # lm_head target because pinned vLLM 0.11.2 does not register lm_head LoRA
+  # for Qwen2; the attention/MLP projection targets otherwise match.
+  rank: 32
+  alpha: 32
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  dropout: 0.05
+
+training:
+  # 1,000 examples / effective batch 32 gives 32 optimizer steps per epoch.
+  # Stop at 20 epochs (rather than the paper's typical 50) and select an early
+  # checkpoint on a frozen, freshly generated development set.
+  batch_size: 4
+  gradient_accumulation: 8
+  lr: 5.0e-5
+  lr_scheduler_type: linear
+  warmup_steps: 32
+  epochs: 20
+  min_steps: 0
+  max_steps: 640
+  max_seq_length: 2048
+  dtype: bfloat16
+  loss_on: completion
+  save_steps: 64
+  # Retain every second epoch; the preregistered evaluation subset is epochs
+  # 2, 4, 6, 10, 14, and 20. Full states permit an exact interrupted resume.
+  save_total_limit: 10
+  save_only_model: false
+  dataloader_num_workers: 4
+  keep_formatted_in_memory: true
+  logging_steps: 16
+  report_to: none
+  seed: 8152026
+  data_seed: 8152026
