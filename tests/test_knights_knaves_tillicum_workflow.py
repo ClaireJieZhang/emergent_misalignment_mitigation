@@ -183,6 +183,8 @@ class ShellWorkflowTests(unittest.TestCase):
         self.assertIn("reserve_submitted=false", script)
         self.assertNotIn("#SBATCH --array", script)
         self.assertNotIn("sbatch --array", script)
+        self.assertNotIn("\npython ", script)
+        self.assertIn('"$ENV_ROOT/bin/python"', script)
 
     def test_train_uses_completion_only_full_state_and_adapter_smoke(self):
         script = read_repo(

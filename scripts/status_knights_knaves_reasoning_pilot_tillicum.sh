@@ -4,6 +4,7 @@
 set -euo pipefail
 
 TILLICUM_ROOT=${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}
+ENV_ROOT=$TILLICUM_ROOT/envs/subliminal-mitigate-py311
 OUTPUT_ROOT=$TILLICUM_ROOT/outputs/knights_knaves_reasoning_pilot_v1
 CONTROL_ROOT=$OUTPUT_ROOT/control
 MODEL_DIR=$OUTPUT_ROOT/model/kk_reasoning_n5_pilot
@@ -92,7 +93,7 @@ if [[ -s "$CONTROL_ROOT/GO_KK_BENEFIT_UNIONS" ]]; then
   echo "FINAL_EVALUATION_COMPLETE: GO_KK_BENEFIT_UNIONS"
   echo "The benefit gate passed. This run did not submit unions or quorum."
 elif [[ -s "$CONTROL_ROOT/STOPPED_NO_GO" ]]; then
-  decision_phase=$(python3 - "$CONTROL_ROOT/STOPPED_NO_GO" <<'PY'
+  decision_phase=$("$ENV_ROOT/bin/python" - "$CONTROL_ROOT/STOPPED_NO_GO" <<'PY'
 import json, os, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 summary = value.get("summary_file", "")

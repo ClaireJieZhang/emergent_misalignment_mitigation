@@ -63,7 +63,7 @@ for path in \
   test -s "$path" || { echo "Missing workflow file: $path" >&2; exit 2; }
 done
 
-python scripts/audit_knights_knaves_tillicum_workflow.py verify-prep \
+"$ENV_ROOT/bin/python" scripts/audit_knights_knaves_tillicum_workflow.py verify-prep \
   --repo-root "$REPO_ROOT" --data-root "$DATA_ROOT" \
   --training-config "$TRAINING_CONFIG" --prep-file "$PREP_FILE"
 
@@ -87,7 +87,7 @@ if [[ -e "$AUTH_FILE" || -e "$JOBS_FILE" || -e "$SUBMITTED_FILE" \
   exit 3
 fi
 
-python scripts/audit_knights_knaves_tillicum_workflow.py write-authorization \
+"$ENV_ROOT/bin/python" scripts/audit_knights_knaves_tillicum_workflow.py write-authorization \
   --repo-root "$REPO_ROOT" --data-root "$DATA_ROOT" \
   --training-config "$TRAINING_CONFIG" --prep-file "$PREP_FILE" \
   --ack-max-cost-usd 3.60 --output-file "$AUTH_FILE"
