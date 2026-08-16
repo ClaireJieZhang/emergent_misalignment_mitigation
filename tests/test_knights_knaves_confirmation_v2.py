@@ -450,6 +450,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("00:30:00", sbatch)
         self.assertNotIn("#SBATCH --array", submit)
         self.assertIn("automatic_medical_union_or_quorum=false", submit)
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "scripts/stage_knights_knaves_reasoning_confirmation_v2_tillicum.sh",
+            ),
+            encoding="utf-8",
+        ) as handle:
+            stage = handle.read()
+        self.assertNotIn(
+            "export HF_HOME=$root/cache/huggingface HUGGINGFACE_HUB_CACHE=$HF_HOME/hub",
+            stage,
+        )
+        self.assertIn("export HF_HOME=$root/cache/huggingface\n", stage)
+        self.assertIn("export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub\n", stage)
 
     def test_gated_phases_use_four_persistent_model_loads_at_most(self):
         sbatch_path = os.path.join(

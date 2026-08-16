@@ -100,7 +100,8 @@ conda activate "$env_root"
 export PYTHONUNBUFFERED=1 DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1
 export XDG_CACHE_HOME=$root/cache XDG_CONFIG_HOME=$root/config
 export PIP_CACHE_DIR=$root/cache/pip TMPDIR=$root/tmp
-export HF_HOME=$root/cache/huggingface HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export HF_HOME=$root/cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 export TRANSFORMERS_CACHE=$HF_HOME
 export PYTHONPYCACHEPREFIX=$root/tmp/kk-confirmation-v2-stage-pyc
 cd "$repo"
