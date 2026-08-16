@@ -2,9 +2,11 @@
 """Generate deterministic direct answers for prepared Knights & Knaves prompts.
 
 This sampler only accepts the label-free prompt banks emitted by
-prepare_knights_knaves_pilot_data.py.  Each model is written atomically to an
-independently auditable file so base models and intermediate LoRA checkpoints
-can be resumed without changing already completed results.
+prepare_knights_knaves_pilot_data.py.  ``--prompt_file`` may be repeated so a
+gated phase can reuse one persistent model load across several independent
+sets.  Each model/set result is still written atomically to an independently
+auditable file, so interrupted phases resume without changing completed
+results.
 
 The pinned vLLM Qwen2 backend does not expose ``lm_head`` as a LoRA target.
 The preflight therefore rejects such adapters before allocating a GPU; exact
@@ -278,7 +280,10 @@ def main():
         help="Repeat NAME=BASE or NAME=ADAPTER_PATH.",
     )
     parser.add_argument("--training_config", required=True)
-    parser.add_argument("--prompt_file", required=True)
+    parser.add_argument(
+        "--prompt_file", action="append", required=True,
+        help="Repeat to generate several label-free prompt banks in one model load.",
+    )
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--max_context", type=int, default=4096)
@@ -308,66 +313,118 @@ def main():
     names = [name for name, _ in models]
     if len(names) != len(set(names)):
         raise ValueError(f"Duplicate model names: {names}")
-    prompt_meta, prompts = load_prompt_bank(args.prompt_file)
+    prompt_banks = []
+    seen_set_names = set()
+    for prompt_file in args.prompt_file:
+        prompt_file = os.path.abspath(prompt_file)
+        prompt_meta, prompts = load_prompt_bank(prompt_file)
+        set_name = prompt_meta["set_name"]
+        if set_name in seen_set_names:
+            raise ValueError(f"Duplicate prompt-bank set_name: {set_name}")
+        seen_set_names.add(set_name)
+        prompt_banks.append(
+            {
+                "prompt_file": prompt_file,
+                "meta": prompt_meta,
+                "prompts": prompts,
+                "expected_ids": [record["question_id"] for record in prompts],
+            }
+        )
 
     from transformers import PreTrainedTokenizerFast
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(
         base_model, revision=base_revision
     )
-    prompt_lengths = validate_context_lengths(
-        tokenizer, prompts, args.max_new_tokens, args.max_context
-    )
-    prompt_file_hash = sha256_file(args.prompt_file)
-    expected_ids = [record["question_id"] for record in prompts]
+    for bank in prompt_banks:
+        bank["prompt_lengths"] = validate_context_lengths(
+            tokenizer, bank["prompts"], args.max_new_tokens, args.max_context
+        )
+        bank["prompt_file_sha256"] = sha256_file(bank["prompt_file"])
     os.makedirs(args.output_dir, exist_ok=True)
 
-    pending = []
-    provenance = {}
+    audited_models = []
     for name, path in models:
         adapter_config = audit_adapter_config(path, training)
-        run = {
-            "schema_version": 1,
-            "generator": "vllm_greedy_direct_answer",
-            "generator_script_sha256": sha256_file(__file__),
-            "model_name": name,
-            "model_path": "BASE" if path == "BASE" else path,
-            "model_fingerprint": adapter_fingerprint(path),
-            "adapter_target_modules": (
-                None if adapter_config is None else sorted(adapter_config["target_modules"])
-            ),
-            "base_model": base_model,
-            "base_model_revision": base_revision,
-            "prompt_file_sha256": prompt_file_hash,
-            "set_name": prompt_meta["set_name"],
-            "role": prompt_meta["role"],
-            "question_ids": expected_ids,
-            "prompt_sha256": [record["prompt_sha256"] for record in prompts],
-            "temperature": 0.0,
-            "n_samples": 1,
-            "max_new_tokens": args.max_new_tokens,
-            "max_context": args.max_context,
-            "seed": args.seed,
-        }
-        fingerprint = sha256_bytes(canonical_json_bytes(run))
-        provenance[name] = (run, fingerprint)
-        output_path = os.path.join(
-            args.output_dir, f"{prompt_meta['set_name']}__{name}.json"
+        audited_models.append(
+            {
+                "name": name,
+                "path": path,
+                "adapter_config": adapter_config,
+                "fingerprint": adapter_fingerprint(path),
+            }
         )
-        if generation_is_complete(output_path, run, fingerprint, expected_ids):
-            print(f"Audited complete generation; skipping {name}: {output_path}")
-        else:
-            pending.append((name, path, output_path))
 
-    if not pending:
+    pending_by_model = {name: [] for name, _ in models}
+    provenance = {}
+    generator_script_sha = sha256_file(__file__)
+    for bank in prompt_banks:
+        prompt_meta = bank["meta"]
+        prompts = bank["prompts"]
+        expected_ids = bank["expected_ids"]
+        for model in audited_models:
+            name = model["name"]
+            path = model["path"]
+            adapter_config = model["adapter_config"]
+            run = {
+                "schema_version": 1,
+                "generator": "vllm_greedy_direct_answer",
+                "generator_script_sha256": generator_script_sha,
+                "model_name": name,
+                "model_path": "BASE" if path == "BASE" else path,
+                "model_fingerprint": model["fingerprint"],
+                "adapter_target_modules": (
+                    None
+                    if adapter_config is None
+                    else sorted(adapter_config["target_modules"])
+                ),
+                "base_model": base_model,
+                "base_model_revision": base_revision,
+                "prompt_file_sha256": bank["prompt_file_sha256"],
+                "set_name": prompt_meta["set_name"],
+                "role": prompt_meta["role"],
+                "question_ids": expected_ids,
+                "prompt_sha256": [
+                    record["prompt_sha256"] for record in prompts
+                ],
+                "temperature": 0.0,
+                "n_samples": 1,
+                "max_new_tokens": args.max_new_tokens,
+                "max_context": args.max_context,
+                "seed": args.seed,
+            }
+            fingerprint = sha256_bytes(canonical_json_bytes(run))
+            provenance[(prompt_meta["set_name"], name)] = (run, fingerprint)
+            output_path = os.path.join(
+                args.output_dir, f"{prompt_meta['set_name']}__{name}.json"
+            )
+            if generation_is_complete(output_path, run, fingerprint, expected_ids):
+                print(
+                    f"Audited complete generation; skipping "
+                    f"{prompt_meta['set_name']}/{name}: {output_path}"
+                )
+            else:
+                pending_by_model[name].append((bank, output_path))
+
+    if not any(pending_by_model.values()):
         print("All requested generation files are complete.")
         return
 
-    if any(path != "BASE" for _, path, _ in pending):
+    if any(
+        model["path"] != "BASE" and pending_by_model[model["name"]]
+        for model in audited_models
+    ):
         audit_vllm_target_compatibility(base_model, target_modules)
 
+    import vllm
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
+
+    if vllm.__version__ != "0.11.2":
+        raise ValueError(
+            f"K&K inference protocol requires vLLM 0.11.2, found "
+            f"{vllm.__version__}"
+        )
 
     print(f"Initializing pinned base model {base_model}@{base_revision}")
     llm = LLM(
@@ -388,29 +445,46 @@ def main():
         max_tokens=args.max_new_tokens,
         seed=args.seed,
     )
-    messages = [chat_messages(record) for record in prompts]
     lora_id = 1
-    for name, path, output_path in pending:
+    for model in audited_models:
+        name = model["name"]
+        path = model["path"]
+        pending = pending_by_model[name]
+        if not pending:
+            continue
         request = None
         if path != "BASE":
             request = LoRARequest(name, lora_id, path)
             lora_id += 1
-        print(f"Generating {name} on {len(prompts)} {prompt_meta['set_name']} prompts")
-        outputs = llm.chat(
-            messages,
-            sampling,
-            lora_request=request,
-            chat_template_kwargs={"enable_thinking": False},
-        )
-        if len(outputs) != len(prompts):
-            raise RuntimeError(f"vLLM returned {len(outputs)} of {len(prompts)} requests")
-        samples = []
-        for record, output in zip(prompts, outputs):
-            if len(output.outputs) != 1:
-                raise RuntimeError(f"Expected one completion for {record['question_id']}")
-            completion = output.outputs[0]
-            finish_reason = getattr(completion, "finish_reason", None)
-            sample = {
+        for bank, output_path in pending:
+            prompt_meta = bank["meta"]
+            prompts = bank["prompts"]
+            expected_ids = bank["expected_ids"]
+            prompt_lengths = bank["prompt_lengths"]
+            messages = [chat_messages(record) for record in prompts]
+            print(
+                f"Generating {name} on {len(prompts)} "
+                f"{prompt_meta['set_name']} prompts"
+            )
+            outputs = llm.chat(
+                messages,
+                sampling,
+                lora_request=request,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            if len(outputs) != len(prompts):
+                raise RuntimeError(
+                    f"vLLM returned {len(outputs)} of {len(prompts)} requests"
+                )
+            samples = []
+            for record, output in zip(prompts, outputs):
+                if len(output.outputs) != 1:
+                    raise RuntimeError(
+                        f"Expected one completion for {record['question_id']}"
+                    )
+                completion = output.outputs[0]
+                finish_reason = getattr(completion, "finish_reason", None)
+                sample = {
                     "question_id": record["question_id"],
                     "sample_index": 0,
                     "response": completion.text,
@@ -423,21 +497,27 @@ def main():
                     "prompt_tokens": prompt_lengths[record["question_id"]],
                     "prompt_sha256": record["prompt_sha256"],
                 }
-            sample["result_sha256"] = generation_sample_sha256(sample)
-            samples.append(sample)
-        run, fingerprint = provenance[name]
-        payload = {
-            "meta": {
-                **run,
-                "generation_fingerprint": fingerprint,
-                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            },
-            "samples": samples,
-        }
-        atomic_write_json(output_path, payload)
-        if not generation_is_complete(output_path, run, fingerprint, expected_ids):
-            raise RuntimeError(f"Post-write generation audit failed: {output_path}")
-        print(f"Wrote and audited {output_path}")
+                sample["result_sha256"] = generation_sample_sha256(sample)
+                samples.append(sample)
+            run, fingerprint = provenance[(prompt_meta["set_name"], name)]
+            payload = {
+                "meta": {
+                    **run,
+                    "generation_fingerprint": fingerprint,
+                    "created_at": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                },
+                "samples": samples,
+            }
+            atomic_write_json(output_path, payload)
+            if not generation_is_complete(
+                output_path, run, fingerprint, expected_ids
+            ):
+                raise RuntimeError(
+                    f"Post-write generation audit failed: {output_path}"
+                )
+            print(f"Wrote and audited {output_path}")
 
 
 if __name__ == "__main__":
