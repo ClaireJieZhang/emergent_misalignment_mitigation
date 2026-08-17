@@ -138,6 +138,17 @@ def _maybe_arg(name, value):
     return {name: value} if name in fields else {}
 
 
+def _required_config_arg(name, value):
+    """Pass an explicitly configured trainer field or fail closed."""
+    fields = getattr(SFTConfig, "__dataclass_fields__", {})
+    if name not in fields:
+        raise RuntimeError(
+            f"training.{name} was explicitly configured but this TRL/SFTConfig "
+            "version does not support it. Refusing to silently omit it."
+        )
+    return {name: value}
+
+
 def _resolve_loss_on(training_cfg):
     """Return the explicitly selected SFT token objective.
 
@@ -686,6 +697,10 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
     )
     budget["loss_on"] = loss_on
     budget["save_total_limit"] = _resolve_save_total_limit(training_cfg)
+    if "optim" in training_cfg:
+        budget["optim"] = training_cfg["optim"]
+    if "weight_decay" in training_cfg:
+        budget["weight_decay"] = training_cfg["weight_decay"]
     print(f"  Dataset: {len(formatted)} examples")
     print(
         f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, "
@@ -713,6 +728,14 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         report_to=training_cfg.get("report_to", "none"),
         seed=training_cfg.get("seed", 42),
         data_seed=training_cfg.get("data_seed", training_cfg.get("seed", 42)),
+        **(
+            _required_config_arg("optim", training_cfg["optim"])
+            if "optim" in training_cfg else {}
+        ),
+        **(
+            _required_config_arg("weight_decay", training_cfg["weight_decay"])
+            if "weight_decay" in training_cfg else {}
+        ),
         **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
         **_completion_only_config_kwargs(loss_on),
     )
