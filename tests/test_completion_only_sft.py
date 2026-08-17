@@ -148,6 +148,22 @@ class CompletionOnlySFTTests(unittest.TestCase):
         finally:
             train_sft.SFTConfig = original
 
+    def test_explicit_trainer_fields_cannot_be_silently_omitted(self):
+        original = train_sft.SFTConfig
+        try:
+            train_sft.SFTConfig = type(
+                "PinnedSFTConfig", (),
+                {"__dataclass_fields__": {"optim": object(), "weight_decay": object()}},
+            )
+            self.assertEqual(
+                train_sft._required_config_arg("optim", "adamw_8bit"),
+                {"optim": "adamw_8bit"},
+            )
+            with self.assertRaisesRegex(RuntimeError, "silently omit"):
+                train_sft._required_config_arg("max_grad_norm", 1.0)
+        finally:
+            train_sft.SFTConfig = original
+
     def test_checkpoint_retention_is_configurable_and_validated(self):
         self.assertEqual(train_sft._resolve_save_total_limit({}), 2)
         self.assertEqual(
