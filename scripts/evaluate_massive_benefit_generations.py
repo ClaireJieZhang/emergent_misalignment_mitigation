@@ -22,6 +22,11 @@ import unicodedata
 EXPECTED_SEED = 8172026
 EXPECTED_MAX_NEW_TOKENS = 256
 EXPECTED_MAX_CONTEXT = 2048
+LEGACY_STRUCTURED_CONSTRAINT_PROFILE = "enum_v1"
+SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES = (
+    LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
+    "const_tree_v2",
+)
 
 
 def canonical_json_bytes(value):
@@ -256,13 +261,35 @@ def load_generations(path, endpoint, answer_meta, answers):
     return meta, samples
 
 
+def structured_constraint_profile(meta):
+    profile = meta.get(
+        "structured_constraint_profile", LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+    )
+    if profile not in SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES:
+        raise ValueError(f"Unknown structured constraint profile: {profile!r}")
+    return profile
+
+
 def compatible_endpoints(joint_meta, intent_meta):
-    differing = {"endpoint", "json_schema_sha256", "generation_fingerprint", "created_at"}
+    differing = {
+        "endpoint",
+        "json_schema_sha256",
+        "generation_fingerprint",
+        "created_at",
+        "structured_constraint_profile",
+    }
     for key in set(joint_meta) | set(intent_meta):
         if key in differing:
             continue
         if joint_meta.get(key) != intent_meta.get(key):
             raise ValueError(f"Joint and intent-only generations differ on {key}")
+    if structured_constraint_profile(joint_meta) != structured_constraint_profile(
+        intent_meta
+    ):
+        raise ValueError(
+            "Joint and intent-only generations differ on "
+            "structured_constraint_profile"
+        )
 
 
 def safe_ratio(numerator, denominator, zero=0.0):
@@ -417,6 +444,7 @@ def main():
     ):
         raise ValueError("Generation prompt is not bound by the data manifest")
     compatible_endpoints(joint_meta, intent_meta)
+    constraint_profile = structured_constraint_profile(joint_meta)
     tasks, metrics, subgroups = evaluate(
         answer_meta, answers, joint_meta, joint_samples, intent_meta, intent_samples
     )
@@ -467,6 +495,7 @@ def main():
                 "intent_only_is_sensitivity_only": True,
                 "slot_metric": "exact normalized (slot_name, value) multiset micro-F1",
                 "slot_metric_is_official_bio_f1": False,
+                "structured_constraint_profile": constraint_profile,
             },
             "metrics": metrics,
             "subgroups": subgroups,

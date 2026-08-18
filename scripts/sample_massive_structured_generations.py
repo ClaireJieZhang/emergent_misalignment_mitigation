@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 
 import yaml
@@ -23,6 +24,24 @@ PINNED_XGRAMMAR_VERSION = "0.1.25"
 EXPECTED_SEED = 8172026
 EXPECTED_MAX_NEW_TOKENS = 256
 EXPECTED_MAX_CONTEXT = 2048
+LEGACY_STRUCTURED_CONSTRAINT_PROFILE = "enum_v1"
+STRICT_STRUCTURED_CONSTRAINT_PROFILE = "const_tree_v2"
+STRUCTURED_CONSTRAINT_PROFILES = (
+    LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
+    STRICT_STRUCTURED_CONSTRAINT_PROFILE,
+)
+FAILURE_EVIDENCE_SCHEMA_VERSION = 1
+RECORDED_LEGACY_HYBRID_INTENT_PROBES = (
+    "alarm_addcontact",
+    "alarm_createoradd",
+    "calendar_recipe",
+    "cooking_remove",
+)
+RECORDED_LEGACY_HYBRID_SLOT_PROBES = (
+    "alarm_name",
+    "app_type",
+    "cooking_name",
+)
 
 
 def canonical_json_bytes(value):
@@ -188,12 +207,73 @@ def load_prompt_bank(path):
     return meta, validated
 
 
-def prediction_schema(intent_labels, slot_labels, endpoint="joint_json"):
+def balanced_const_tree(labels):
+    """Encode an exact finite string set without one large flat alternation.
+
+    The pinned XGrammar/Qwen token matcher admits recorded hybrid nonmembers
+    under the legacy flat ``enum`` schema. A balanced tree keeps every
+    ``anyOf`` fan-out at two while preserving exactly the same finite label
+    language.
+    """
+    values = list(labels)
+    if (
+        not values
+        or any(not isinstance(value, str) or not value for value in values)
+        or len(set(values)) != len(values)
+    ):
+        raise ValueError("Structured label set must contain unique nonempty strings")
+
+    def build(start, end):
+        if end - start == 1:
+            return {"const": values[start]}
+        middle = start + (end - start) // 2
+        return {"anyOf": [build(start, middle), build(middle, end)]}
+
+    tree = build(0, len(values))
+    if const_tree_labels(tree) != values:
+        raise AssertionError("Balanced const tree changed the structured label set")
+    return tree
+
+
+def const_tree_labels(tree):
+    """Audit a balanced const tree and return its ordered leaf language."""
+    if not isinstance(tree, dict):
+        raise ValueError("Const-tree node is not an object")
+    if set(tree) == {"const"}:
+        value = tree["const"]
+        if not isinstance(value, str) or not value:
+            raise ValueError("Const-tree leaf is not a nonempty string")
+        return [value]
+    if set(tree) != {"anyOf"}:
+        raise ValueError("Const-tree node has unexpected keys")
+    children = tree["anyOf"]
+    if not isinstance(children, list) or len(children) != 2:
+        raise ValueError("Const-tree internal node is not binary")
+    return const_tree_labels(children[0]) + const_tree_labels(children[1])
+
+
+def label_schema(labels, structured_constraint_profile):
+    if structured_constraint_profile == LEGACY_STRUCTURED_CONSTRAINT_PROFILE:
+        return {"type": "string", "enum": labels}
+    if structured_constraint_profile == STRICT_STRUCTURED_CONSTRAINT_PROFILE:
+        return balanced_const_tree(labels)
+    raise ValueError(
+        f"Unknown structured constraint profile: {structured_constraint_profile}"
+    )
+
+
+def prediction_schema(
+    intent_labels,
+    slot_labels,
+    endpoint="joint_json",
+    structured_constraint_profile=LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
+):
+    intent_schema = label_schema(intent_labels, structured_constraint_profile)
     if endpoint == "intent_only":
         return {
             "type": "object",
             "properties": {
-                "intent": {"type": "string", "enum": intent_labels},
+                "intent": intent_schema,
             },
             "required": ["intent"],
             "additionalProperties": False,
@@ -203,14 +283,16 @@ def prediction_schema(intent_labels, slot_labels, endpoint="joint_json"):
     return {
         "type": "object",
         "properties": {
-            "intent": {"type": "string", "enum": intent_labels},
+            "intent": intent_schema,
             "slots": {
                 "type": "array",
                 "maxItems": 7,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "enum": slot_labels},
+                        "name": label_schema(
+                            slot_labels, structured_constraint_profile
+                        ),
                         "value": {"type": "string", "minLength": 1},
                     },
                     "required": ["name", "value"],
@@ -223,11 +305,243 @@ def prediction_schema(intent_labels, slot_labels, endpoint="joint_json"):
     }
 
 
+def _xgrammar_accepts_tokenized_text(
+    xgrammar_module, compiled_grammar, tokenizer, text
+):
+    """Exercise the same token-level matcher used by the pinned backend."""
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    if not token_ids or any(not isinstance(token_id, int) for token_id in token_ids):
+        raise ValueError("Pinned tokenizer did not return nonempty integer token IDs")
+    matcher = xgrammar_module.GrammarMatcher(
+        compiled_grammar, terminate_without_stop_token=True
+    )
+    for token_id in token_ids:
+        if not matcher.accept_token(token_id):
+            return False
+    return matcher.is_terminated()
+
+
+def audit_balanced_xgrammar_frontier(grammar_text, labels, label_kind):
+    """Verify the generated EBNF retains one binary rule frontier per label set."""
+    rules = {}
+    for line in grammar_text.splitlines():
+        if "::=" not in line:
+            continue
+        name, body = line.split("::=", 1)
+        name = name.strip()
+        if not name or name in rules:
+            raise ValueError("Pinned XGrammar emitted malformed or duplicate rules")
+        rules[name] = body
+
+    encoded_labels = {
+        label: json.dumps(json.dumps(label, ensure_ascii=False), ensure_ascii=False)
+        for label in labels
+    }
+    occurrences = {
+        label: [name for name, body in rules.items() if encoded in body]
+        for label, encoded in encoded_labels.items()
+    }
+    if any(len(names) != 1 for names in occurrences.values()):
+        raise ValueError(
+            f"Pinned XGrammar changed the {label_kind} const-leaf inventory"
+        )
+    prefixes = set()
+    for names in occurrences.values():
+        name = names[0]
+        if "_case_" not in name:
+            raise ValueError(
+                f"Pinned XGrammar flattened the {label_kind} ontology frontier"
+            )
+        prefixes.add(name.split("_case_", 1)[0])
+    if len(prefixes) != 1:
+        raise ValueError(
+            f"Pinned XGrammar split the {label_kind} ontology across frontiers"
+        )
+    prefix = prefixes.pop()
+    frontier = {
+        name: body
+        for name, body in rules.items()
+        if name == prefix or name.startswith(prefix + "_case_")
+    }
+    if len(frontier) != len(labels) - 1 or any(
+        body.count(" | ") != 1 for body in frontier.values()
+    ):
+        raise ValueError(
+            f"Pinned XGrammar did not retain a balanced binary {label_kind} frontier"
+        )
+
+
+def audit_strict_xgrammar_contract(
+    xgrammar_module,
+    tokenizer,
+    model_config,
+    intent_labels,
+    slot_labels,
+    schemas,
+):
+    """Fail closed unless pinned XGrammar enforces the exact v2 ontology.
+
+    This is deliberately a token-level CPU matcher audit, not merely a schema
+    compilation check.  It uses the pinned model vocabulary size and the same
+    Hugging Face tokenizer that vLLM will use.  Every ontology leaf must be
+    accepted. The legacy matcher must reproduce the recorded hybrid-label
+    escapes, while v2 must reject those hybrids and generic nonmembers.
+    """
+    model_vocab_size = getattr(model_config, "vocab_size", None)
+    if not isinstance(model_vocab_size, int) or model_vocab_size <= 0:
+        raise ValueError("Pinned model config has no positive integer vocab_size")
+    tokenizer_info = xgrammar_module.TokenizerInfo.from_huggingface(
+        tokenizer, vocab_size=model_vocab_size
+    )
+    compiler = xgrammar_module.GrammarCompiler(tokenizer_info, cache_enabled=False)
+    compiled = {}
+    legacy_compiled = {}
+    for endpoint in ("joint_json", "intent_only"):
+        schema = schemas[endpoint]
+        schema_json = canonical_json_bytes(schema).decode("utf-8")
+        grammar = xgrammar_module.Grammar.from_json_schema(schema_json)
+        grammar_text = str(grammar)
+        audit_balanced_xgrammar_frontier(grammar_text, intent_labels, "intent")
+        if endpoint == "joint_json":
+            audit_balanced_xgrammar_frontier(grammar_text, slot_labels, "slot")
+        compiled[endpoint] = compiler.compile_json_schema(schema_json)
+        legacy_schema = prediction_schema(
+            intent_labels,
+            slot_labels,
+            endpoint=endpoint,
+            structured_constraint_profile=LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
+        )
+        legacy_compiled[endpoint] = compiler.compile_json_schema(
+            canonical_json_bytes(legacy_schema).decode("utf-8")
+        )
+
+    def compact(value):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    for intent in intent_labels:
+        intent_only = compact({"intent": intent})
+        joint = compact({"intent": intent, "slots": []})
+        if not _xgrammar_accepts_tokenized_text(
+            xgrammar_module, compiled["intent_only"], tokenizer, intent_only
+        ):
+            raise ValueError(
+                "Pinned XGrammar rejected a valid MASSIVE intent-only leaf"
+            )
+        if not _xgrammar_accepts_tokenized_text(
+            xgrammar_module, compiled["joint_json"], tokenizer, joint
+        ):
+            raise ValueError("Pinned XGrammar rejected a valid MASSIVE intent leaf")
+
+    exemplar_intent = intent_labels[0]
+    for slot in slot_labels:
+        joint = compact(
+            {
+                "intent": exemplar_intent,
+                "slots": [{"name": slot, "value": "x"}],
+            }
+        )
+        if not _xgrammar_accepts_tokenized_text(
+            xgrammar_module, compiled["joint_json"], tokenizer, joint
+        ):
+            raise ValueError("Pinned XGrammar rejected a valid MASSIVE slot leaf")
+
+    invalid_intents = (
+        "__massive_outside_intent__",
+        *RECORDED_LEGACY_HYBRID_INTENT_PROBES,
+    )
+    invalid_slots = (
+        "__massive_outside_slot__",
+        *RECORDED_LEGACY_HYBRID_SLOT_PROBES,
+    )
+    if set(invalid_intents) & set(intent_labels) or set(invalid_slots) & set(
+        slot_labels
+    ):
+        raise AssertionError("Fabricated matcher probes unexpectedly entered ontology")
+    invalid_cases = []
+    for intent in invalid_intents:
+        invalid_cases.extend(
+            (
+                (
+                    "intent_only",
+                    compact({"intent": intent}),
+                    "fabricated intent-only label",
+                ),
+                (
+                    "joint_json",
+                    compact({"intent": intent, "slots": []}),
+                    "fabricated joint intent label",
+                ),
+            )
+        )
+    for slot in invalid_slots:
+        invalid_cases.append(
+            (
+                "joint_json",
+                compact(
+                    {
+                        "intent": exemplar_intent,
+                        "slots": [{"name": slot, "value": "x"}],
+                    }
+                ),
+                "fabricated slot label",
+            )
+        )
+
+    legacy_hybrid_cases = []
+    for intent in RECORDED_LEGACY_HYBRID_INTENT_PROBES:
+        legacy_hybrid_cases.extend(
+            (
+                ("intent_only", compact({"intent": intent})),
+                ("joint_json", compact({"intent": intent, "slots": []})),
+            )
+        )
+    for slot in RECORDED_LEGACY_HYBRID_SLOT_PROBES:
+        legacy_hybrid_cases.append(
+            (
+                "joint_json",
+                compact(
+                    {
+                        "intent": exemplar_intent,
+                        "slots": [{"name": slot, "value": "x"}],
+                    }
+                ),
+            )
+        )
+    for endpoint, probe in legacy_hybrid_cases:
+        if not _xgrammar_accepts_tokenized_text(
+            xgrammar_module, legacy_compiled[endpoint], tokenizer, probe
+        ):
+            raise ValueError(
+                "Pinned legacy XGrammar matcher no longer reproduces its "
+                "recorded hybrid-label escape"
+            )
+    for endpoint, probe, description in invalid_cases:
+        if _xgrammar_accepts_tokenized_text(
+            xgrammar_module, compiled[endpoint], tokenizer, probe
+        ):
+            raise ValueError(f"Pinned XGrammar admitted a {description}")
+
+    return {
+        "intent_leaves_checked": len(intent_labels),
+        "slot_leaves_checked": len(slot_labels),
+        "invalid_probes_rejected": len(invalid_cases),
+        "legacy_hybrid_probes_reproduced": len(legacy_hybrid_cases),
+    }
+
+
 def validate_prediction(response, intent_labels, slot_labels, endpoint="joint_json"):
+    if not isinstance(response, str):
+        raise ValueError(
+            "Structured decoder emitted a non-string response of type "
+            f"{type(response).__name__}"
+        )
     try:
         prediction = json.loads(response)
     except json.JSONDecodeError as error:
-        raise ValueError(f"Structured decoder emitted invalid JSON: {response!r}") from error
+        raise ValueError(
+            "Structured decoder emitted invalid JSON at "
+            f"line {error.lineno}, column {error.colno}"
+        ) from error
     expected_keys = {"intent"} if endpoint == "intent_only" else {"intent", "slots"}
     if not isinstance(prediction, dict) or set(prediction) != expected_keys:
         raise ValueError("Structured prediction has wrong top-level keys")
@@ -282,6 +596,127 @@ def sample_sha256(sample):
     )
 
 
+def failure_evidence_path(output_path):
+    output = os.path.abspath(output_path)
+    basename = os.path.basename(output)
+    stem = basename[:-5] if basename.endswith(".json") else basename
+    return os.path.join(os.path.dirname(output), "failures", f"{stem}.failure.json")
+
+
+def seal_failure_evidence(payload):
+    result = dict(payload)
+    result.pop("failure_payload_sha256", None)
+    result["failure_payload_sha256"] = sha256_bytes(canonical_json_bytes(result))
+    return result
+
+
+def verify_failure_evidence(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Failure evidence is not an object")
+    copy = dict(payload)
+    recorded = copy.pop("failure_payload_sha256", None)
+    if recorded != sha256_bytes(canonical_json_bytes(copy)):
+        raise ValueError("Failure evidence seal mismatch")
+    return payload
+
+
+def load_failure_evidence(path):
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise ValueError(f"Failure evidence is not a regular file: {path}")
+    with open(path, encoding="utf-8") as handle:
+        return verify_failure_evidence(json.load(handle))
+
+
+def write_or_audit_failure_evidence(path, payload):
+    expected = seal_failure_evidence(payload)
+    if os.path.lexists(path):
+        existing = load_failure_evidence(path)
+        if existing != expected:
+            raise ValueError(f"Existing failure evidence differs: {path}")
+        return existing
+    atomic_write_json(path, expected)
+    observed = load_failure_evidence(path)
+    if observed != expected:
+        raise RuntimeError(f"Failure evidence differs after atomic write: {path}")
+    return observed
+
+
+def structured_validation_failure_payload(
+    *,
+    error,
+    run,
+    generation_fingerprint,
+    output_path,
+    row_index,
+    record,
+    response,
+    finish_reason,
+    token_ids,
+    prompt_tokens,
+):
+    generation_fields = (
+        "endpoint",
+        "set_name",
+        "role",
+        "model_name",
+        "model_path",
+        "model_fingerprint",
+        "base_model",
+        "base_model_revision",
+        "prompt_file_sha256",
+        "ontology_sha256",
+        "json_schema_sha256",
+        "structured_backend",
+        "vllm_version",
+        "xgrammar_version",
+        "temperature",
+        "n_samples",
+        "max_new_tokens",
+        "max_context",
+        "seed",
+        "structured_constraint_profile",
+    )
+    generation = {
+        field: run[field] for field in generation_fields if field in run
+    }
+    generation["structured_constraint_profile"] = run.get(
+        "structured_constraint_profile", LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+    )
+    generation["generation_fingerprint"] = generation_fingerprint
+    token_ids = list(token_ids)
+    return {
+        "schema_version": FAILURE_EVIDENCE_SCHEMA_VERSION,
+        "failure_kind": "structured_prediction_validation",
+        "validation_error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "generation": generation,
+        "output_file": os.path.abspath(output_path),
+        "offending_sample": {
+            "row_index": row_index,
+            "question_id": record["question_id"],
+            "prompt_sha256": record["prompt_sha256"],
+            "raw_response": response,
+            "response_sha256": sha256_bytes(response.encode("utf-8")),
+            "finish_reason": finish_reason,
+            "token_ids": token_ids,
+            "n_generated_tokens": len(token_ids),
+            "prompt_tokens": prompt_tokens,
+        },
+    }
+
+
+def shutdown_vllm_engine(llm):
+    """Use the pinned vLLM 0.11.2 EngineCoreClient shutdown path."""
+    engine = getattr(llm, "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    shutdown = getattr(engine_core, "shutdown", None)
+    if not callable(shutdown):
+        raise RuntimeError("Pinned vLLM engine has no callable shutdown path")
+    shutdown()
+
+
 def output_is_complete(
     path, expected_run, fingerprint, prompts, intents, slots, endpoint
 ):
@@ -333,6 +768,11 @@ def main():
     parser.add_argument("--seed", type=int, default=EXPECTED_SEED)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.85)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    parser.add_argument(
+        "--structured_constraint_profile",
+        choices=STRUCTURED_CONSTRAINT_PROFILES,
+        default=LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
+    )
     parser.add_argument("--preflight_only", action="store_true")
     args = parser.parse_args()
     if (
@@ -360,8 +800,11 @@ def main():
 
     from transformers import PreTrainedTokenizerFast
 
+    tokenizer_load_kwargs = {"revision": base_revision}
+    if args.structured_constraint_profile == STRICT_STRUCTURED_CONSTRAINT_PROFILE:
+        tokenizer_load_kwargs["local_files_only"] = True
     tokenizer = PreTrainedTokenizerFast.from_pretrained(
-        base_model, revision=base_revision
+        base_model, **tokenizer_load_kwargs
     )
     banks = []
     set_names = set()
@@ -373,7 +816,10 @@ def main():
         set_names.add(meta["set_name"])
         schemas = {
             endpoint: prediction_schema(
-                meta["intent_labels"], meta["slot_labels"], endpoint=endpoint
+                meta["intent_labels"],
+                meta["slot_labels"],
+                endpoint=endpoint,
+                structured_constraint_profile=args.structured_constraint_profile,
             )
             for endpoint in ("joint_json", "intent_only")
         }
@@ -427,12 +873,33 @@ def main():
                     "same_prompt_all_models": True,
                     "selection_uses_joint_json_only": True,
                 }
+                if (
+                    args.structured_constraint_profile
+                    != LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+                ):
+                    run["structured_constraint_profile"] = (
+                        args.structured_constraint_profile
+                    )
                 fingerprint = sha256_bytes(canonical_json_bytes(run))
                 provenance[(meta["set_name"], name, endpoint)] = (run, fingerprint)
                 suffix = "" if endpoint == "joint_json" else "__intent_only"
                 output = os.path.join(
                     args.output_dir, f"{meta['set_name']}__{name}{suffix}.json"
                 )
+                failure_path = failure_evidence_path(output)
+                if not args.preflight_only and os.path.lexists(failure_path):
+                    failure = load_failure_evidence(failure_path)
+                    observed_fingerprint = failure.get("generation", {}).get(
+                        "generation_fingerprint"
+                    )
+                    if observed_fingerprint != fingerprint:
+                        raise ValueError(
+                            f"Existing failure evidence provenance differs: {failure_path}"
+                        )
+                    raise RuntimeError(
+                        "Existing terminal structured-generation failure evidence "
+                        f"refuses a same-namespace rerun: {failure_path}"
+                    )
                 if not args.preflight_only and output_is_complete(
                     output, run, fingerprint, prompts,
                     meta["intent_labels"], meta["slot_labels"], endpoint,
@@ -449,6 +916,7 @@ def main():
 
     import importlib.metadata
     import vllm
+    import xgrammar
     from vllm import SamplingParams
     from vllm.config.structured_outputs import StructuredOutputsConfig
     from vllm.sampling_params import StructuredOutputsParams
@@ -464,6 +932,32 @@ def main():
             f"MASSIVE protocol requires XGrammar {PINNED_XGRAMMAR_VERSION}, "
             f"found {xgrammar_version}"
         )
+    if args.structured_constraint_profile == STRICT_STRUCTURED_CONSTRAINT_PROFILE:
+        from transformers import AutoConfig
+
+        model_config = AutoConfig.from_pretrained(
+            base_model, revision=base_revision, local_files_only=True
+        )
+        if getattr(model_config, "_commit_hash", None) != base_revision:
+            raise ValueError(
+                "Locally cached model config does not resolve to the pinned revision"
+            )
+        for bank in banks:
+            try:
+                audit_strict_xgrammar_contract(
+                    xgrammar,
+                    tokenizer,
+                    model_config,
+                    bank["meta"]["intent_labels"],
+                    bank["meta"]["slot_labels"],
+                    bank["schemas"],
+                )
+            except Exception as error:
+                raise ValueError(
+                    "Pinned XGrammar token-matcher contract failed for MASSIVE "
+                    f"{args.structured_constraint_profile} "
+                    f"{bank['meta']['set_name']}"
+                ) from error
     structured_config = StructuredOutputsConfig(
         backend="xgrammar", disable_fallback=True
     )
@@ -495,101 +989,177 @@ def main():
     from vllm.lora.request import LoRARequest
 
     os.makedirs(args.output_dir, exist_ok=True)
-    llm = LLM(
-        model=base_model,
-        revision=base_revision,
-        tokenizer_revision=base_revision,
-        dtype="bfloat16",
-        enable_lora=True,
-        max_lora_rank=lora_rank,
-        max_model_len=args.max_context,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        disable_log_stats=True,
-        structured_outputs_config=structured_config,
-    )
-    lora_id = 1
-    for name, path in models:
-        request = None
-        if path != "BASE":
-            request = LoRARequest(name, lora_id, path)
-            lora_id += 1
-        for bank, output_path, endpoint in pending[name]:
-            prompts = bank["prompts"]
-            messages = [
-                [{"role": "user", "content": record["prompt"]}]
-                for record in prompts
-            ]
-            sampling = SamplingParams(
-                temperature=0.0,
-                n=1,
-                max_tokens=args.max_new_tokens,
-                seed=args.seed,
-                structured_outputs=StructuredOutputsParams(
-                    json=bank["schemas"][endpoint], disable_fallback=True
-                ),
-            )
-            print(
-                f"Generating {name}/{endpoint} on {len(prompts)} "
-                f"{bank['meta']['set_name']} rows"
-            )
-            outputs = llm.chat(
-                messages,
-                sampling,
-                lora_request=request,
-                chat_template_kwargs={"enable_thinking": False},
-            )
-            if len(outputs) != len(prompts):
-                raise RuntimeError("vLLM returned an incomplete MASSIVE batch")
-            samples = []
-            for record, output in zip(prompts, outputs):
-                if len(output.outputs) != 1:
-                    raise RuntimeError("Expected one greedy structured completion")
-                completion = output.outputs[0]
-                response = completion.text
-                prediction = validate_prediction(
-                    response,
-                    bank["meta"]["intent_labels"],
-                    bank["meta"]["slot_labels"],
-                    endpoint=endpoint,
-                )
-                finish_reason = getattr(completion, "finish_reason", None)
-                sample = {
-                    "question_id": record["question_id"],
-                    "sample_index": 0,
-                    "response": response,
-                    "prediction": prediction,
-                    "stop_reason": (
-                        "max_new_tokens" if finish_reason == "length" else finish_reason
-                    ) or "unknown",
-                    "n_generated_tokens": len(
-                        list(getattr(completion, "token_ids", None) or [])
+    llm = None
+    primary_error = None
+    try:
+        llm = LLM(
+            model=base_model,
+            revision=base_revision,
+            tokenizer_revision=base_revision,
+            dtype="bfloat16",
+            enable_lora=True,
+            max_lora_rank=lora_rank,
+            max_model_len=args.max_context,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            tensor_parallel_size=args.tensor_parallel_size,
+            disable_log_stats=True,
+            structured_outputs_config=structured_config,
+        )
+        lora_id = 1
+        for name, path in models:
+            request = None
+            if path != "BASE":
+                request = LoRARequest(name, lora_id, path)
+                lora_id += 1
+            for bank, output_path, endpoint in pending[name]:
+                prompts = bank["prompts"]
+                messages = [
+                    [{"role": "user", "content": record["prompt"]}]
+                    for record in prompts
+                ]
+                sampling = SamplingParams(
+                    temperature=0.0,
+                    n=1,
+                    max_tokens=args.max_new_tokens,
+                    seed=args.seed,
+                    structured_outputs=StructuredOutputsParams(
+                        json=bank["schemas"][endpoint], disable_fallback=True
                     ),
-                    "prompt_tokens": bank["prompt_lengths"][record["question_id"]],
-                    "prompt_sha256": record["prompt_sha256"],
+                )
+                print(
+                    f"Generating {name}/{endpoint} on {len(prompts)} "
+                    f"{bank['meta']['set_name']} rows"
+                )
+                outputs = llm.chat(
+                    messages,
+                    sampling,
+                    lora_request=request,
+                    chat_template_kwargs={"enable_thinking": False},
+                )
+                if len(outputs) != len(prompts):
+                    raise RuntimeError("vLLM returned an incomplete MASSIVE batch")
+                run, fingerprint = provenance[
+                    (bank["meta"]["set_name"], name, endpoint)
+                ]
+                samples = []
+                for row_index, (record, output) in enumerate(zip(prompts, outputs)):
+                    if len(output.outputs) != 1:
+                        raise RuntimeError(
+                            "Expected one greedy structured completion"
+                        )
+                    completion = output.outputs[0]
+                    response = completion.text
+                    finish_reason = getattr(completion, "finish_reason", None)
+                    stop_reason = (
+                        "max_new_tokens"
+                        if finish_reason == "length"
+                        else finish_reason
+                    ) or "unknown"
+                    token_ids = list(getattr(completion, "token_ids", None) or [])
+                    prompt_tokens = bank["prompt_lengths"][record["question_id"]]
+                    try:
+                        prediction = validate_prediction(
+                            response,
+                            bank["meta"]["intent_labels"],
+                            bank["meta"]["slot_labels"],
+                            endpoint=endpoint,
+                        )
+                    except ValueError as validation_error:
+                        failure_path = failure_evidence_path(output_path)
+                        failure = structured_validation_failure_payload(
+                            error=validation_error,
+                            run=run,
+                            generation_fingerprint=fingerprint,
+                            output_path=output_path,
+                            row_index=row_index,
+                            record=record,
+                            response=response,
+                            finish_reason=stop_reason,
+                            token_ids=token_ids,
+                            prompt_tokens=prompt_tokens,
+                        )
+                        try:
+                            recorded_failure = write_or_audit_failure_evidence(
+                                failure_path, failure
+                            )
+                        except BaseException as evidence_error:
+                            context = {
+                                "set_name": run["set_name"],
+                                "model_name": run["model_name"],
+                                "endpoint": endpoint,
+                                "row_index": row_index,
+                                "question_id": record["question_id"],
+                                "prompt_sha256": record["prompt_sha256"],
+                                "generation_fingerprint": fingerprint,
+                            }
+                            raise RuntimeError(
+                                "Could not atomically record MASSIVE structured "
+                                "validation failure: "
+                                + canonical_json_bytes(context).decode("utf-8")
+                            ) from evidence_error
+                        context = {
+                            "evidence_file": failure_path,
+                            "failure_payload_sha256": recorded_failure[
+                                "failure_payload_sha256"
+                            ],
+                            "set_name": run["set_name"],
+                            "model_name": run["model_name"],
+                            "endpoint": endpoint,
+                            "row_index": row_index,
+                            "question_id": record["question_id"],
+                            "prompt_sha256": record["prompt_sha256"],
+                            "generation_fingerprint": fingerprint,
+                        }
+                        raise ValueError(
+                            "MASSIVE structured prediction failed validation: "
+                            + canonical_json_bytes(context).decode("utf-8")
+                        ) from validation_error
+                    sample = {
+                        "question_id": record["question_id"],
+                        "sample_index": 0,
+                        "response": response,
+                        "prediction": prediction,
+                        "stop_reason": stop_reason,
+                        "n_generated_tokens": len(token_ids),
+                        "prompt_tokens": prompt_tokens,
+                        "prompt_sha256": record["prompt_sha256"],
+                    }
+                    sample["result_sha256"] = sample_sha256(sample)
+                    samples.append(sample)
+                payload = {
+                    "meta": {
+                        **run,
+                        "generation_fingerprint": fingerprint,
+                        "created_at": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                    },
+                    "samples": samples,
                 }
-                sample["result_sha256"] = sample_sha256(sample)
-                samples.append(sample)
-            run, fingerprint = provenance[
-                (bank["meta"]["set_name"], name, endpoint)
-            ]
-            payload = {
-                "meta": {
-                    **run,
-                    "generation_fingerprint": fingerprint,
-                    "created_at": datetime.datetime.now(
-                        datetime.timezone.utc
-                    ).isoformat(),
-                },
-                "samples": samples,
-            }
-            atomic_write_json(output_path, payload)
-            if not output_is_complete(
-                output_path, run, fingerprint, prompts,
-                bank["meta"]["intent_labels"], bank["meta"]["slot_labels"],
-                endpoint,
-            ):
-                raise RuntimeError(f"Generation audit failed after write: {output_path}")
+                atomic_write_json(output_path, payload)
+                if not output_is_complete(
+                    output_path, run, fingerprint, prompts,
+                    bank["meta"]["intent_labels"], bank["meta"]["slot_labels"],
+                    endpoint,
+                ):
+                    raise RuntimeError(
+                        f"Generation audit failed after write: {output_path}"
+                    )
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if llm is not None:
+            try:
+                shutdown_vllm_engine(llm)
+            except BaseException as shutdown_error:
+                if primary_error is None:
+                    raise
+                print(
+                    "vLLM shutdown also failed after the primary MASSIVE error: "
+                    f"{type(shutdown_error).__name__}: {shutdown_error}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":

@@ -30,6 +30,11 @@ MIN_FRAME_EXACT = 0.40
 MIN_FRAME_GAIN = 0.05
 EXPECTED_DEV_N = 2031
 EXPECTED_TEST_N = 2965
+LEGACY_STRUCTURED_CONSTRAINT_PROFILE = "enum_v1"
+SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES = (
+    LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
+    "const_tree_v2",
+)
 
 
 def canonical_json_bytes(value):
@@ -124,7 +129,21 @@ def atomic_write_text(path, value):
         raise
 
 
-def load_evaluation(path, expected_role=None, expected_n=None):
+def structured_constraint_profile(meta):
+    profile = meta.get(
+        "structured_constraint_profile", LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+    )
+    if profile not in SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES:
+        raise ValueError(f"Unknown structured constraint profile: {profile!r}")
+    return profile
+
+
+def load_evaluation(
+    path,
+    expected_role=None,
+    expected_n=None,
+    expected_constraint_profile=None,
+):
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     recorded = payload.get("result_payload_sha256")
@@ -143,6 +162,15 @@ def load_evaluation(path, expected_role=None, expected_n=None):
         raise ValueError(f"Evaluation role differs: {path}")
     if expected_n is not None and len(tasks) != expected_n:
         raise ValueError(f"Evaluation n={len(tasks)}, expected {expected_n}: {path}")
+    profile = structured_constraint_profile(meta)
+    if (
+        expected_constraint_profile is not None
+        and profile != expected_constraint_profile
+    ):
+        raise ValueError(
+            f"Evaluation structured constraint profile is {profile}, "
+            f"expected {expected_constraint_profile}: {path}"
+        )
     if metrics.get("n") != len(tasks):
         raise ValueError(f"Evaluation aggregate count differs: {path}")
     if metrics.get("structured_valid_rate") != 1.0:
@@ -208,6 +236,12 @@ def validate_pair(base, candidate):
     ):
         if base["meta"].get(field) != candidate["meta"].get(field):
             raise ValueError(f"Paired evaluations differ on {field}")
+    if structured_constraint_profile(base["meta"]) != structured_constraint_profile(
+        candidate["meta"]
+    ):
+        raise ValueError(
+            "Paired evaluations differ on structured_constraint_profile"
+        )
     base_ids = [task["question_id"] for task in base["tasks"]]
     candidate_ids = [task["question_id"] for task in candidate["tasks"]]
     if base_ids != candidate_ids:
@@ -440,7 +474,10 @@ def format_comparison_markdown(title, item, checks, decision):
 
 def command_base(args):
     base = load_evaluation(
-        args.evaluation, expected_role="checkpoint_selection", expected_n=EXPECTED_DEV_N
+        args.evaluation,
+        expected_role="checkpoint_selection",
+        expected_n=EXPECTED_DEV_N,
+        expected_constraint_profile=args.structured_constraint_profile,
     )
     if (
         base["meta"].get("model_name") != "pi_base"
@@ -466,6 +503,9 @@ def command_base(args):
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "evaluation_file": os.path.abspath(args.evaluation),
             "evaluation_sha256": sha256_file(args.evaluation),
+            "structured_constraint_profile": structured_constraint_profile(
+                base["meta"]
+            ),
             "base_joint_json_intent_accuracy": accuracy,
             "max_base_accuracy": MAX_BASE_ACCURACY,
             "checks": checks,
@@ -503,7 +543,10 @@ def parse_checkpoint(spec):
 def command_select(args):
     model_manifest = load_model_manifest(args.model_manifest)
     base = load_evaluation(
-        args.base, expected_role="checkpoint_selection", expected_n=EXPECTED_DEV_N
+        args.base,
+        expected_role="checkpoint_selection",
+        expected_n=EXPECTED_DEV_N,
+        expected_constraint_profile=args.structured_constraint_profile,
     )
     if (
         base["meta"].get("model_name") != "pi_base"
@@ -517,7 +560,10 @@ def command_select(args):
     fingerprints = set()
     for step, path in checkpoints:
         evaluation = load_evaluation(
-            path, expected_role="checkpoint_selection", expected_n=EXPECTED_DEV_N
+            path,
+            expected_role="checkpoint_selection",
+            expected_n=EXPECTED_DEV_N,
+            expected_constraint_profile=args.structured_constraint_profile,
         )
         if evaluation["meta"].get("model_name") != f"step_{step}":
             raise ValueError(f"Checkpoint {step} has the wrong model name")
@@ -552,6 +598,9 @@ def command_select(args):
                 "strict_frame_exact_accuracy", "slot_pair_micro_f1", "earlier_step"
             ],
             "intent_only_endpoint_used_for_selection": False,
+            "structured_constraint_profile": structured_constraint_profile(
+                base["meta"]
+            ),
             "base_file": os.path.abspath(args.base),
             "base_sha256": sha256_file(args.base),
             "base_model_fingerprint": "BASE",
@@ -568,6 +617,9 @@ def command_select(args):
                 "model_fingerprint": evaluation["meta"]["model_fingerprint"],
                 "base_model": evaluation["meta"]["base_model"],
                 "base_model_revision": evaluation["meta"]["base_model_revision"],
+                "structured_constraint_profile": structured_constraint_profile(
+                    evaluation["meta"]
+                ),
                 "comparison": value,
             },
             "thresholds": frozen_thresholds(),
@@ -601,12 +653,30 @@ def command_final(args):
     verify_seal(selection)
     if selection.get("phase") != "development_selection" or selection.get("decision") != "GO":
         raise ValueError("Sealed test requires a valid development GO")
+    selection_profile = selection.get(
+        "structured_constraint_profile", LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+    )
+    if selection_profile not in SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES:
+        raise ValueError("Selection has an unknown structured constraint profile")
+    if (
+        args.structured_constraint_profile is not None
+        and selection_profile != args.structured_constraint_profile
+    ):
+        raise ValueError("Selection structured constraint profile differs")
     expected_name = selection["selected"]["model_name"]
     if selection.get("model_manifest_sha256") != sha256_file(args.model_manifest):
         raise ValueError("Final model manifest differs from development selection")
-    base = load_evaluation(args.base, expected_role="sealed_final", expected_n=EXPECTED_TEST_N)
+    base = load_evaluation(
+        args.base,
+        expected_role="sealed_final",
+        expected_n=EXPECTED_TEST_N,
+        expected_constraint_profile=args.structured_constraint_profile,
+    )
     candidate = load_evaluation(
-        args.candidate, expected_role="sealed_final", expected_n=EXPECTED_TEST_N
+        args.candidate,
+        expected_role="sealed_final",
+        expected_n=EXPECTED_TEST_N,
+        expected_constraint_profile=args.structured_constraint_profile,
     )
     if (
         base["meta"].get("model_name") != "pi_base"
@@ -623,6 +693,14 @@ def command_final(args):
         str(selection["selected"]["step"])
     ) != candidate["meta"].get("model_fingerprint"):
         raise ValueError("Final candidate fingerprint differs from model manifest")
+    if selection_profile != structured_constraint_profile(candidate["meta"]):
+        raise ValueError(
+            "Final candidate structured constraint profile differs from selection"
+        )
+    if selection.get("selected", {}).get(
+        "structured_constraint_profile", LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+    ) != selection_profile:
+        raise ValueError("Selected checkpoint structured constraint profile differs")
     for field in ("base_model", "base_model_revision"):
         if candidate["meta"].get(field) != selection["selected"].get(field):
             raise ValueError(f"Final candidate differs from selection on {field}")
@@ -637,6 +715,7 @@ def command_final(args):
             "selection_sha256": sha256_file(args.selection_file),
             "selected_step": selection["selected"]["step"],
             "selected_model_name": expected_name,
+            "structured_constraint_profile": selection_profile,
             "base_file": os.path.abspath(args.base),
             "base_sha256": sha256_file(args.base),
             "candidate_file": os.path.abspath(args.candidate),
@@ -678,6 +757,10 @@ def main():
     base.add_argument("--output_file", required=True)
     base.add_argument("--markdown_file", required=True)
     base.add_argument("--sentinel_dir", required=True)
+    base.add_argument(
+        "--structured_constraint_profile",
+        choices=SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES,
+    )
     base.set_defaults(func=command_base)
 
     select = subparsers.add_parser("select")
@@ -687,6 +770,10 @@ def main():
     select.add_argument("--output_file", required=True)
     select.add_argument("--markdown_file", required=True)
     select.add_argument("--sentinel_dir", required=True)
+    select.add_argument(
+        "--structured_constraint_profile",
+        choices=SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES,
+    )
     select.set_defaults(func=command_select)
 
     final = subparsers.add_parser("final")
@@ -697,6 +784,10 @@ def main():
     final.add_argument("--output_file", required=True)
     final.add_argument("--markdown_file", required=True)
     final.add_argument("--sentinel_dir", required=True)
+    final.add_argument(
+        "--structured_constraint_profile",
+        choices=SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES,
+    )
     final.set_defaults(func=command_final)
 
     args = parser.parse_args()

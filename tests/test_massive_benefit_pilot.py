@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """No-network scientific-unit tests for the MASSIVE benefit pilot."""
 
+import importlib.metadata
+import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -95,6 +98,102 @@ class PreparationTests(unittest.TestCase):
 
 
 class StructuredScoringTests(unittest.TestCase):
+    def test_legacy_schema_hashes_stay_frozen_and_v2_label_language_is_exact(self):
+        legacy_joint = sample.prediction_schema(
+            prepare.INTENT_LABELS, prepare.SLOT_LABELS, endpoint="joint_json"
+        )
+        legacy_intent = sample.prediction_schema(
+            prepare.INTENT_LABELS, prepare.SLOT_LABELS, endpoint="intent_only"
+        )
+        self.assertEqual(
+            sample.sha256_bytes(sample.canonical_json_bytes(legacy_joint)),
+            "cf2cff79b38ffacbdbe82900b115422432514054e4d33b3e08a6fd6f2be0de2b",
+        )
+        self.assertEqual(
+            sample.sha256_bytes(sample.canonical_json_bytes(legacy_intent)),
+            "fb85742c67aee67938998aff270fa95bd6d36498830ffb075ef8289c03c25d18",
+        )
+
+        strict = sample.prediction_schema(
+            prepare.INTENT_LABELS,
+            prepare.SLOT_LABELS,
+            endpoint="joint_json",
+            structured_constraint_profile=(
+                sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+        )
+        intent_tree = strict["properties"]["intent"]
+        slot_tree = strict["properties"]["slots"]["items"]["properties"]["name"]
+        self.assertEqual(
+            sample.const_tree_labels(intent_tree), prepare.INTENT_LABELS
+        )
+        self.assertEqual(sample.const_tree_labels(slot_tree), prepare.SLOT_LABELS)
+
+        def assert_binary_const_tree(node):
+            if "const" in node:
+                self.assertEqual(set(node), {"const"})
+                return
+            self.assertEqual(set(node), {"anyOf"})
+            self.assertEqual(len(node["anyOf"]), 2)
+            for child in node["anyOf"]:
+                assert_binary_const_tree(child)
+
+        assert_binary_const_tree(intent_tree)
+        assert_binary_const_tree(slot_tree)
+        self.assertNotIn("enum", json.dumps(strict, sort_keys=True))
+
+    def test_v2_schema_matches_exact_ontology_with_pinned_xgrammar_and_qwen(self):
+        if importlib.util.find_spec("xgrammar") is None:
+            self.skipTest("xgrammar is not installed in the CPU unit-test environment")
+        if (
+            importlib.metadata.version("xgrammar")
+            != sample.PINNED_XGRAMMAR_VERSION
+        ):
+            self.skipTest("installed xgrammar is not the workflow-pinned version")
+        import xgrammar
+        from transformers import AutoConfig, PreTrainedTokenizerFast
+
+        model_id = "Qwen/Qwen2.5-7B-Instruct"
+        revision = "bb46c15ee4bb56c5b63245ef50fd7637234d6f75"
+        try:
+            config = AutoConfig.from_pretrained(
+                model_id, revision=revision, local_files_only=True
+            )
+            tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                model_id, revision=revision, local_files_only=True
+            )
+        except OSError:
+            self.skipTest("exact pinned Qwen tokenizer/config are not locally cached")
+        self.assertEqual(config._commit_hash, revision)
+        schemas = {
+            endpoint: sample.prediction_schema(
+                prepare.INTENT_LABELS,
+                prepare.SLOT_LABELS,
+                endpoint=endpoint,
+                structured_constraint_profile=(
+                    sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+                ),
+            )
+            for endpoint in ("joint_json", "intent_only")
+        }
+        audit = sample.audit_strict_xgrammar_contract(
+            xgrammar,
+            tokenizer,
+            config,
+            prepare.INTENT_LABELS,
+            prepare.SLOT_LABELS,
+            schemas,
+        )
+        self.assertEqual(
+            audit,
+            {
+                "intent_leaves_checked": 60,
+                "slot_leaves_checked": 55,
+                "invalid_probes_rejected": 14,
+                "legacy_hybrid_probes_reproduced": 11,
+            },
+        )
+
     def test_schema_caps_gold_expressivity_and_rejects_escape(self):
         schema = sample.prediction_schema(
             prepare.INTENT_LABELS, prepare.SLOT_LABELS, endpoint="joint_json"
@@ -113,6 +212,150 @@ class StructuredScoringTests(unittest.TestCase):
                 prepare.INTENT_LABELS,
                 prepare.SLOT_LABELS,
             )
+        malformed = '{"intent":"must_not_reach_stderr"'
+        with self.assertRaisesRegex(ValueError, "invalid JSON") as raised:
+            sample.validate_prediction(
+                malformed, prepare.INTENT_LABELS, prepare.SLOT_LABELS
+            )
+        self.assertNotIn(malformed, str(raised.exception))
+
+    def test_failure_evidence_is_sealed_atomic_idempotent_and_label_free(self):
+        run = {
+            "endpoint": "joint_json",
+            "set_name": "massive_en_dev",
+            "role": "checkpoint_selection",
+            "model_name": "step_90",
+            "model_path": "/model/checkpoint-90",
+            "model_fingerprint": "adapter-sha",
+            "base_model": "Qwen/Qwen2.5-7B-Instruct",
+            "base_model_revision": "b" * 40,
+            "prompt_file_sha256": "p" * 64,
+            "ontology_sha256": "o" * 64,
+            "json_schema_sha256": "s" * 64,
+            "structured_backend": "xgrammar",
+            "vllm_version": sample.PINNED_VLLM_VERSION,
+            "xgrammar_version": sample.PINNED_XGRAMMAR_VERSION,
+            "temperature": 0.0,
+            "n_samples": 1,
+            "max_new_tokens": sample.EXPECTED_MAX_NEW_TOKENS,
+            "max_context": sample.EXPECTED_MAX_CONTEXT,
+            "seed": sample.EXPECTED_SEED,
+            "structured_constraint_profile": (
+                sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+        }
+        response = '{"intent":"outside_ontology","slots":[]}'
+        with tempfile.TemporaryDirectory() as root:
+            output_path = os.path.join(root, "massive_en_dev__step_90.json")
+            evidence_path = sample.failure_evidence_path(output_path)
+            payload = sample.structured_validation_failure_payload(
+                error=ValueError("Structured prediction escaped the intent ontology"),
+                run=run,
+                generation_fingerprint="g" * 64,
+                output_path=output_path,
+                row_index=71,
+                record={"question_id": "q71", "prompt_sha256": "q" * 64},
+                response=response,
+                finish_reason="stop",
+                token_ids=[1, 2, 3],
+                prompt_tokens=120,
+            )
+            first = sample.write_or_audit_failure_evidence(evidence_path, payload)
+            first_sha = sample.sha256_file(evidence_path)
+            second = sample.write_or_audit_failure_evidence(evidence_path, payload)
+            self.assertEqual(first, second)
+            self.assertEqual(sample.sha256_file(evidence_path), first_sha)
+            self.assertEqual(
+                first["offending_sample"]["raw_response"], response
+            )
+            self.assertEqual(
+                first["offending_sample"]["response_sha256"],
+                sample.sha256_bytes(response.encode("utf-8")),
+            )
+            self.assertEqual(
+                sample.verify_failure_evidence(first)["failure_payload_sha256"],
+                first["failure_payload_sha256"],
+            )
+
+            def keys(value):
+                if isinstance(value, dict):
+                    return set(value) | set().union(*(keys(v) for v in value.values()))
+                if isinstance(value, list):
+                    return set().union(*(keys(v) for v in value))
+                return set()
+
+            self.assertTrue(
+                {"intent_labels", "slot_labels", "gold_intent", "answer"}
+                .isdisjoint(keys(first))
+            )
+            changed = json.loads(json.dumps(payload))
+            changed["offending_sample"]["raw_response"] = "different"
+            with self.assertRaisesRegex(ValueError, "differs"):
+                sample.write_or_audit_failure_evidence(evidence_path, changed)
+
+    def test_engine_shutdown_uses_pinned_engine_core_client_path(self):
+        class Core:
+            def __init__(self):
+                self.calls = 0
+
+            def shutdown(self):
+                self.calls += 1
+
+        core = Core()
+        llm = type(
+            "FakeLLM",
+            (),
+            {"llm_engine": type("FakeEngine", (), {"engine_core": core})()},
+        )()
+        sample.shutdown_vllm_engine(llm)
+        self.assertEqual(core.calls, 1)
+        with self.assertRaisesRegex(RuntimeError, "shutdown path"):
+            sample.shutdown_vllm_engine(object())
+
+    def test_completed_v2_output_audit_is_byte_idempotent(self):
+        run = {
+            "schema_version": 1,
+            "structured_constraint_profile": (
+                sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+        }
+        fingerprint = sample.sha256_bytes(sample.canonical_json_bytes(run))
+        prompts = [{"question_id": "q1", "prompt_sha256": "p" * 64}]
+        value = {
+            "question_id": "q1",
+            "sample_index": 0,
+            "response": '{"intent":"general_joke","slots":[]}',
+            "prediction": {"intent": "general_joke", "slots": []},
+            "stop_reason": "stop",
+            "n_generated_tokens": 8,
+            "prompt_tokens": 20,
+            "prompt_sha256": "p" * 64,
+        }
+        value["result_sha256"] = sample.sample_sha256(value)
+        payload = {
+            "meta": {
+                **run,
+                "generation_fingerprint": fingerprint,
+                "created_at": "frozen",
+            },
+            "samples": [value],
+        }
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "generation.json")
+            sample.atomic_write_json(path, payload)
+            before = sample.sha256_file(path)
+            self.assertTrue(
+                sample.output_is_complete(
+                    path,
+                    run,
+                    fingerprint,
+                    prompts,
+                    prepare.INTENT_LABELS,
+                    prepare.SLOT_LABELS,
+                    "joint_json",
+                )
+            )
+            self.assertEqual(sample.sha256_file(path), before)
 
     def test_slot_scoring_is_multiset_and_invented_value_is_false_positive(self):
         answer = {
