@@ -189,7 +189,20 @@ def load_answers(path):
     return meta, validated
 
 
-def load_generations(path):
+def load_generations(
+    path,
+    *,
+    max_new_tokens=2048,
+    max_context=4096,
+    seed=8152026,
+):
+    """Load and integrity-check one deterministic generation artifact.
+
+    The keyword defaults are the frozen v1/v2 inference contract.  Later
+    protocols may pass their own preregistered contract, but no caller can
+    bypass the metadata fingerprint, greedy pass@1, or per-sample checksum
+    checks performed here.
+    """
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     meta = payload.get("meta")
@@ -206,13 +219,14 @@ def load_generations(path):
     if meta.get("temperature") != 0.0 or meta.get("n_samples") != 1:
         raise ValueError("Evaluation requires deterministic greedy pass@1 generations")
     if (
-        meta.get("max_new_tokens") != 2048
-        or meta.get("max_context") != 4096
-        or meta.get("seed") != 8152026
+        meta.get("max_new_tokens") != max_new_tokens
+        or meta.get("max_context") != max_context
+        or meta.get("seed") != seed
     ):
         raise ValueError(
-            "Evaluation requires the frozen 2,048-token/4,096-context inference "
-            "budget and seed 8152026"
+            "Generation inference metadata differs from the required contract: "
+            f"max_new_tokens={max_new_tokens}, max_context={max_context}, "
+            f"seed={seed}"
         )
     for index, sample in enumerate(samples):
         if not isinstance(sample, dict) or sample.get("sample_index") != 0:

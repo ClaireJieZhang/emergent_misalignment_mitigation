@@ -10,6 +10,7 @@ base-favourable worst-case sensitivity analysis in the v3 summarizer.
 import argparse
 import datetime
 import json
+import os
 
 import evaluate_knights_knaves_confirmation_v2 as v2
 import evaluate_knights_knaves_generations as v1_eval
@@ -46,6 +47,57 @@ def validate_generation(meta, answer_meta):
         raise ValueError("V3 answer metadata differs from the frozen set")
 
 
+def load_generation(path, answer_meta):
+    """Load one artifact under the exact v3 inference contract."""
+    meta, samples = v1_eval.load_generations(
+        path,
+        max_new_tokens=protocol.MAX_NEW_TOKENS,
+        max_context=protocol.MAX_CONTEXT,
+        seed=protocol.INFERENCE_SEED,
+    )
+    validate_generation(meta, answer_meta)
+    return meta, samples
+
+
+def _stable_result(payload):
+    stable = dict(payload)
+    stable.pop("result_payload_sha256", None)
+    meta = dict(stable.get("meta", {}))
+    meta.pop("created_at", None)
+    stable["meta"] = meta
+    return stable
+
+
+def write_or_audit_score(path, payload):
+    """Atomically write a score once, or audit an identical existing score."""
+    destination = os.path.abspath(path)
+    if os.path.lexists(destination):
+        if not os.path.isfile(destination) or os.path.islink(destination):
+            raise ValueError(
+                f"Existing score is not a safe regular file: {destination}"
+            )
+        with open(destination, encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if not isinstance(existing, dict):
+            raise ValueError(f"Existing score is not a JSON object: {destination}")
+        unsealed = dict(existing)
+        observed = unsealed.pop("result_payload_sha256", None)
+        expected = direct.sha256_bytes(direct.canonical_json_bytes(unsealed))
+        if observed != expected:
+            raise ValueError(f"Existing score payload seal mismatch: {destination}")
+        if not isinstance(existing.get("meta", {}).get("created_at"), str):
+            raise ValueError(
+                f"Existing score lacks a creation timestamp: {destination}"
+            )
+        if _stable_result(existing) != _stable_result(payload):
+            raise ValueError(f"Existing score differs from recomputation: {destination}")
+        print(f"Audited existing K&K v3 score: {destination}")
+        return existing
+    direct.atomic_write_json(destination, payload)
+    print(f"Wrote K&K v3 score: {destination}")
+    return payload
+
+
 def truncation_diagnostics(tasks):
     truncated = [task for task in tasks if task.get("stop_reason") == "max_new_tokens"]
     return {
@@ -58,8 +110,9 @@ def truncation_diagnostics(tasks):
 
 def run(args):
     answer_meta, answers = v1_eval.load_answers(args.answers_file)
-    generation_meta, samples = v1_eval.load_generations(args.generations_file)
-    validate_generation(generation_meta, answer_meta)
+    generation_meta, samples = load_generation(
+        args.generations_file, answer_meta
+    )
     tasks, metrics = v2.evaluate_direct(
         answer_meta, answers, generation_meta, samples
     )
@@ -84,6 +137,7 @@ def run(args):
         "generation_fingerprint": generation_meta["generation_fingerprint"],
         "generator_script_sha256": generation_meta["generator_script_sha256"],
         "evaluator_script_sha256": direct.sha256_file(__file__),
+        "integrity_loader_script_sha256": direct.sha256_file(v1_eval.__file__),
         "v2_evaluator_script_sha256": direct.sha256_file(v2.__file__),
         "answers_file_sha256": direct.sha256_file(args.answers_file),
         "generations_file_sha256": direct.sha256_file(args.generations_file),
@@ -107,11 +161,12 @@ def run(args):
     payload["result_payload_sha256"] = direct.sha256_bytes(
         direct.canonical_json_bytes(payload)
     )
-    direct.atomic_write_json(args.output_file, payload)
+    result = write_or_audit_score(args.output_file, payload)
     print(
         f"{generation_meta['model_name']} {answer_meta['set_name']} v3 direct: "
         f"{json.dumps(metrics, sort_keys=True)}"
     )
+    return result
 
 
 def main():
