@@ -173,6 +173,52 @@ The 600-row composition is a preregistered mechanism test.  Full 2,965-row
 tokenwise-quorum evidence requires an optimized/cached sampler or a separately
 authorized later budget.
 
+## 2026-08-18 held-submit recovery amendment
+
+The first Wave-1 dispatch created exactly three jobs—A `247697`, B1 `247698`,
+and evaluation `247699`—with all three held before the submitter's resource
+audit.  That audit stopped before release because this Tillicum Slurm version
+renders a held one-node request as `NumNodes=1-1` and the evaluation dependency
+as two comma-separated `afterok:ID(unfulfilled)` terms.  The submitted request,
+resources, commands, dependency IDs, and spooled batch bytes are otherwise
+exact.  All three jobs had zero runtime, null allocation, no logs, and no
+model/evaluation artifacts at recovery design time.
+
+This is an exact-once continuation, not a retry.  The incident-only recovery
+helper is hard-bound to those three IDs, scientific commit
+`e25d59d8c5ea30c49cec207f5cac140a2281a525`, the original PREP/STAGED/attempt/
+STOP/lock hashes, each full held-job record, and the spooled train/evaluation
+script hashes.  It cannot submit, cancel, requeue, or replace a job.  It
+reconstructs the canonical jobs table and authorization with the sealed e25
+auditor, preserves the original submission lock and `STOPPED_submission`,
+writes a sealed amendment, re-audits immediately before release, and releases
+only the existing jobs downstream-first (`247699`, `247698`, `247697`).  A
+mismatch releases nothing; a partial release error requests a hold on all three
+and writes a new terminal recovery STOP.
+
+The main Tillicum checkout must remain clean at e25 until all three jobs are
+terminal because the spooled jobs execute that live path and verify its PREP
+commit.  The recovery helper and recovery-aware status script must therefore
+run from a separate clean committed checkout.  Its commit must be a nonmerge
+direct child of e25 and its no-rename name-status diff must contain exactly the
+three amended protocol/status/submit files plus the new recovery helper and its
+test—no other path.  The old STOP is superseded for status purposes only when
+the original hash, sealed amendment, canonical jobs/authorization, release
+record, and sealed completion record all validate.  Any other STOP remains
+terminal.  No additional H200 minutes, API calls, Wave-2 work, or quorum work
+are authorized by this amendment.
+
+The two explicit recovery phases are:
+
+```bash
+/gpfs/projects/stf/claizhan/subliminal-mitigate/envs/subliminal-mitigate-py311/bin/python \
+  scripts/recover_massive_medical_union_wave1_held_submit_tillicum.py \
+  audit-held --ack-job-ids 247697,247698,247699
+/gpfs/projects/stf/claizhan/subliminal-mitigate/envs/subliminal-mitigate-py311/bin/python \
+  scripts/recover_massive_medical_union_wave1_held_submit_tillicum.py \
+  recover-held --ack-job-ids 247697,247698,247699 --ack-max-cost-usd 1.20
+```
+
 ## Operator boundary
 
 Staging performs no Slurm submission.  After a clean committed change and

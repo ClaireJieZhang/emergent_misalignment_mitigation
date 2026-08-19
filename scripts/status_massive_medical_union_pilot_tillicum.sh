@@ -8,6 +8,8 @@ OUTPUT_ROOT=$TILLICUM_ROOT/outputs/massive_medical_union_pilot_v1
 CONTROL_ROOT=$OUTPUT_ROOT/control
 EVAL_ROOT=$OUTPUT_ROOT/evaluation/wave1
 JOBS_FILE=$CONTROL_ROOT/wave1_jobs.tsv
+STATUS_REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+PINNED_PYTHON=$TILLICUM_ROOT/envs/subliminal-mitigate-py311/bin/python
 
 echo '=== MASSIVE + medical union pilot ==='
 echo 'Released ceiling (Wave 1 only): 80 H200-minutes / $1.20 GPU.'
@@ -17,13 +19,35 @@ echo 'Wave 2 and quorum: protocol only; not submitted.'
 echo '=== Control records ==='
 for name in \
   STAGING_IN_PROGRESS STAGED PREP_COMPLETE.json WAVE1_SUBMISSION_LOCK \
-  WAVE1_SUBMITTED WAVE1_RELEASED TRAIN_COMPLETE WAVE1_GPU_EVAL_COMPLETE \
+  HELD_SUBMIT_RECOVERY_LOCK HELD_SUBMIT_RECOVERY_AMENDMENT.json \
+  HELD_SUBMIT_RECOVERY_COMPLETE.json WAVE1_SUBMITTED WAVE1_RELEASED \
+  TRAIN_COMPLETE WAVE1_GPU_EVAL_COMPLETE \
   WAVE1_EXTERNAL_JUDGE_LOCK AWAITING_EXTERNAL_JUDGE_RESUME \
   GO_MASSIVE_UNION_WAVE1 STOPPED_MASSIVE_UNION_WAVE1 STOPPED_submission \
   STOPPED_train_A STOPPED_train_B1 STOPPED_evaluate STOPPED_finalize; do
   if [[ -e "$CONTROL_ROOT/$name" ]]; then
     printf 'PRESENT %s\n' "$name"
   fi
+done
+
+recovered_submission_stop=false
+if [[ -s "$CONTROL_ROOT/STOPPED_submission" && \
+      -s "$CONTROL_ROOT/HELD_SUBMIT_RECOVERY_COMPLETE.json" && \
+      -x "$PINNED_PYTHON" ]] && \
+   "$PINNED_PYTHON" "$STATUS_REPO_ROOT/scripts/recover_massive_medical_union_wave1_held_submit_tillicum.py" \
+     validate-transition >/dev/null 2>&1; then
+  recovered_submission_stop=true
+  echo 'VERIFIED historical STOPPED_submission superseded by same-ID held recovery.'
+fi
+
+declare -a effective_stops=()
+for path in "$CONTROL_ROOT"/STOPPED_*; do
+  [[ -e "$path" ]] || continue
+  if [[ "$(basename "$path")" == STOPPED_submission && \
+        "$recovered_submission_stop" == true ]]; then
+    continue
+  fi
+  effective_stops+=("$path")
 done
 for model in pi_A pi_B1; do
   if [[ -s "$OUTPUT_ROOT/models/$model/TRAIN_COMPLETE" ]]; then
@@ -58,9 +82,9 @@ if [[ -s "$CONTROL_ROOT/GO_MASSIVE_UNION_WAVE1" ]]; then
   echo 'Wave 1 passed. Wave 2 remains unreleased and requires a separate explicit decision.'
 elif [[ -s "$CONTROL_ROOT/STOPPED_MASSIVE_UNION_WAVE1" ]]; then
   echo 'FINAL_EVALUATION_COMPLETE: STOPPED_MASSIVE_UNION_WAVE1'
-elif compgen -G "$CONTROL_ROOT/STOPPED_*" >/dev/null; then
+elif (( ${#effective_stops[@]} > 0 )); then
   echo 'TERMINAL_INFRASTRUCTURE_STOP'
-  for path in "$CONTROL_ROOT"/STOPPED_*; do
+  for path in "${effective_stops[@]}"; do
     echo "--- $(basename "$path")"
     sed -n '1,120p' "$path" 2>/dev/null || true
   done

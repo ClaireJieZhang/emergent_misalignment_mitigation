@@ -105,6 +105,7 @@ evaluate_job=$SUBMITTED_JOB_ID
 audit_held_job() {
   local stage=$1 job_id=$2 expected_minutes=$3 expected_dependency=$4
   local record state reason requeue account partition time_limit nodes tasks dependency requested_tres
+  local kill_on_invalid dep_kind dep_a dep_b dep_extra dependency_comma dependency_pretty
   record=$(scontrol show job "$job_id" -o | tr ' ' '\n')
   state=$(awk -F= '$1=="JobState" {print $2; exit}' <<< "$record")
   reason=$(awk -F= '$1=="Reason" {print $2; exit}' <<< "$record")
@@ -115,16 +116,27 @@ audit_held_job() {
   nodes=$(awk -F= '$1=="NumNodes" {print $2; exit}' <<< "$record")
   tasks=$(awk -F= '$1=="NumTasks" {print $2; exit}' <<< "$record")
   dependency=$(awk -F= '$1=="Dependency" {print $2; exit}' <<< "$record")
+  kill_on_invalid=$(awk -F= '$1=="KillOnInvalidDependent" {print $2; exit}' <<< "$record")
   requested_tres=$(sed -n 's/^ReqTRES=//p' <<< "$record")
   [[ "$state" == PENDING && "$reason" == JobHeldUser && "$requeue" == 0 ]]
-  [[ "$account" == stf && "$partition" == gpu-h200 && "$nodes" == 1 && "$tasks" == 1 ]]
+  [[ "$account" == stf && "$partition" == gpu-h200 && \
+     ( "$nodes" == 1 || "$nodes" == 1-1 ) && "$tasks" == 1 ]]
   [[ "$time_limit" == "00:${expected_minutes}:00" ]]
   [[ "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu:h200" {print $2}')" == 1 ]]
   [[ "$(tr ',' '\n' <<< "$requested_tres" | awk -F= '$1=="gres/gpu" {print $2}')" == 1 ]]
   if [[ -n "$expected_dependency" ]]; then
-    [[ "$dependency" == "$expected_dependency" ]]
+    IFS=: read -r dep_kind dep_a dep_b dep_extra <<< "$expected_dependency"
+    [[ "$dep_kind" == afterok && "$dep_a" =~ ^[0-9]+$ && \
+       "$dep_b" =~ ^[0-9]+$ && -z "$dep_extra" ]]
+    dependency_comma="afterok:${dep_a},afterok:${dep_b}"
+    dependency_pretty="afterok:${dep_a}(unfulfilled),afterok:${dep_b}(unfulfilled)"
+    [[ "$dependency" == "$expected_dependency" || \
+       "$dependency" == "$dependency_comma" || \
+       "$dependency" == "$dependency_pretty" ]]
+    [[ "$kill_on_invalid" == Yes ]]
   else
     [[ -z "$dependency" || "$dependency" == "(null)" ]]
+    [[ -z "$kill_on_invalid" ]]
   fi
   printf 'Audited held %s job %s (%sm).\n' "$stage" "$job_id" "$expected_minutes"
 }
