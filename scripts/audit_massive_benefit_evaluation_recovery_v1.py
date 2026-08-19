@@ -26,6 +26,7 @@ from pathlib import Path
 
 RECOVERY_ID = "massive_benefit_evaluation_recovery_v1"
 BASE_COMMIT = "6b4e50d97d9c27f71343d8ce6d1c3917209ab9fe"
+SEALED_RECOVERY_COMMIT = "740ef7db7fa75488acea8ba76e000f4b786a54db"
 ORIGINAL_COMMIT = "3d2b32fe2c23ff2d07a3fe07e920cd8a09df43df"
 INFRASTRUCTURE_RECOVERY_COMMIT = "28ef493b370aa168ca2490b8c019cca492c772be"
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
@@ -396,10 +397,16 @@ class _ProfilePlumbingStripper(ast.NodeTransformer):
     """Remove only profile-provenance additions before parent-AST comparison."""
 
     PROFILE_NAMES = {
+        "any_whitespace",
         "constraint_profile",
+        "expected_final_profile",
+        "explicit_selection_profile",
         "selection_profile",
+        "expected_selection_profile",
+        "final_profile",
         "expected_constraint_profile",
         "structured_constraint_profile",
+        "xgrammar_any_whitespace",
     }
 
     @classmethod
@@ -437,7 +444,15 @@ class _ProfilePlumbingStripper(ast.NodeTransformer):
         target_names = {
             target.id for target in node.targets if isinstance(target, ast.Name)
         }
-        if target_names & {"constraint_profile", "selection_profile"}:
+        if target_names & {
+            "any_whitespace",
+            "constraint_profile",
+            "expected_final_profile",
+            "expected_selection_profile",
+            "explicit_selection_profile",
+            "final_profile",
+            "selection_profile",
+        }:
             return None
         if "profile" in target_names and self._contains_profile_name(node.value):
             return None
@@ -446,6 +461,12 @@ class _ProfilePlumbingStripper(ast.NodeTransformer):
     def visit_If(self, node):
         node = self.generic_visit(node)
         if self._contains_profile_name(node.test):
+            return None
+        return node
+
+    def visit_Expr(self, node):
+        node = self.generic_visit(node)
+        if self._contains_profile_name(node):
             return None
         return node
 
@@ -465,7 +486,12 @@ class _ProfilePlumbingStripper(ast.NodeTransformer):
             for key, value in zip(node.keys, node.values)
             if not (
                 isinstance(key, ast.Constant)
-                and key.value == "structured_constraint_profile"
+                and key.value in {
+                    "structured_constraint_profile",
+                    "selection_structured_constraint_profile",
+                    "final_structured_constraint_profile",
+                    "xgrammar_any_whitespace",
+                }
             )
         ]
         node.keys = [key for key, _ in pairs]
@@ -479,7 +505,12 @@ class _ProfilePlumbingStripper(ast.NodeTransformer):
             for element in node.elts
             if not (
                 isinstance(element, ast.Constant)
-                and element.value == "structured_constraint_profile"
+                and element.value in {
+                    "structured_constraint_profile",
+                    "selection_structured_constraint_profile",
+                    "final_structured_constraint_profile",
+                    "xgrammar_any_whitespace",
+                }
             )
         ]
         return node
@@ -1632,12 +1663,62 @@ def command_write_addendum(args):
     print(args.output_file)
 
 
+def verify_from_authorized_v2_descendant(args, observed):
+    """Keep the sealed v1 audit usable after the exact v2 child is checked out.
+
+    The v1 addendum is tied to ``SEALED_RECOVERY_COMMIT`` and must not be
+    rebuilt from later source bytes. Recovery v2 carries a stricter hard-hash
+    audit of the complete v1 namespace, its failed job, and its accounting.
+    This path accepts only that exact clean, direct-child repair and delegates
+    the historical evidence check to its auditor.
+    """
+    import importlib.util
+
+    head = git(args.repo_root, "rev-parse", "HEAD").strip()
+    if head == SEALED_RECOVERY_COMMIT:
+        return None
+    auditor_path = (
+        Path(args.repo_root)
+        / "scripts/audit_massive_benefit_evaluation_recovery_v2.py"
+    )
+    if not auditor_path.is_file() or auditor_path.is_symlink():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "massive_recovery_v2_historical_verifier", auditor_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if module.BASE_COMMIT != SEALED_RECOVERY_COMMIT:
+        raise ValueError("Recovery-v2 historical verifier has the wrong parent")
+    module.audit_repair_commit(args.repo_root)
+    evidence = module.audit_v1_evidence(
+        args.repo_root, args.output_root, args.logs_root
+    )
+    if (
+        sha256_file(args.addendum_file)
+        != module.V1_CONTROL_HASHES[
+            "AUTHORIZED_EVALUATION_RECOVERY_WITHIN_ORIGINAL_CAP.json"
+        ]
+        or sha256_file(args.jobs_file)
+        != module.V1_CONTROL_HASHES["jobs.tsv"]
+        or evidence.get("selection_sha256")
+        != module.V1_DECISION_HASHES["selection/summary.json"]
+        or observed.get("repair", {}).get("repo_commit")
+        != SEALED_RECOVERY_COMMIT
+    ):
+        raise ValueError("Recovery-v2 historical v1 binding differs")
+    return observed
+
+
 def verify_addendum(args):
     path = Path(args.addendum_file)
     if not path.is_file() or path.is_symlink():
         raise ValueError("Missing or unsafe evaluation-recovery addendum")
     observed = load_json(path)
     verify_seal(observed)
+    historical = verify_from_authorized_v2_descendant(args, observed)
+    if historical is not None:
+        return historical
     expected = sealed(
         build_addendum(
             args,

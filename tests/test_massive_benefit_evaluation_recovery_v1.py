@@ -288,6 +288,13 @@ finally:
     def test_scientific_contract_rejects_metric_and_threshold_mutation(self):
         evidence = recovery.audit_scientific_contract(REPO_ROOT)
         self.assertFalse(evidence["metric_gate_changes_allowed"])
+        # Later recovery profiles may add only named decoder-provenance
+        # plumbing; the historical v1 scientific audit must remain usable.
+        self.assertIn(
+            "xgrammar_any_whitespace",
+            read_repo("scripts/evaluate_massive_benefit_generations.py"),
+        )
+        self.assertTrue(callable(recovery.verify_from_authorized_v2_descendant))
         self.assertIn(
             "aggregate", evidence["evaluator_frozen_function_ast_sha256"]
         )

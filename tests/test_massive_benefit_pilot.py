@@ -98,7 +98,7 @@ class PreparationTests(unittest.TestCase):
 
 
 class StructuredScoringTests(unittest.TestCase):
-    def test_legacy_schema_hashes_stay_frozen_and_v2_label_language_is_exact(self):
+    def test_legacy_schema_hashes_stay_frozen_and_const_tree_language_is_exact(self):
         legacy_joint = sample.prediction_schema(
             prepare.INTENT_LABELS, prepare.SLOT_LABELS, endpoint="joint_json"
         )
@@ -142,7 +142,47 @@ class StructuredScoringTests(unittest.TestCase):
         assert_binary_const_tree(slot_tree)
         self.assertNotIn("enum", json.dumps(strict, sort_keys=True))
 
-    def test_v2_schema_matches_exact_ontology_with_pinned_xgrammar_and_qwen(self):
+        no_whitespace = sample.prediction_schema(
+            prepare.INTENT_LABELS,
+            prepare.SLOT_LABELS,
+            endpoint="joint_json",
+            structured_constraint_profile=(
+                sample.NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+        )
+        self.assertEqual(no_whitespace, strict)
+        self.assertFalse(
+            sample.structured_whitespace_disabled(
+                sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+            )
+        )
+        self.assertTrue(
+            sample.structured_whitespace_disabled(
+                sample.NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE
+            )
+        )
+        self.assertEqual(
+            sample.structured_whitespace_provenance(
+                sample.LEGACY_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+            {},
+        )
+        self.assertEqual(
+            sample.structured_whitespace_provenance(
+                sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+            {},
+        )
+        self.assertEqual(
+            sample.structured_whitespace_provenance(
+                sample.NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE
+            ),
+            {"xgrammar_any_whitespace": False},
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            sample.structured_whitespace_disabled("unsealed_profile")
+
+    def test_const_tree_profiles_match_pinned_xgrammar_and_qwen(self):
         if importlib.util.find_spec("xgrammar") is None:
             self.skipTest("xgrammar is not installed in the CPU unit-test environment")
         if (
@@ -165,34 +205,45 @@ class StructuredScoringTests(unittest.TestCase):
         except OSError:
             self.skipTest("exact pinned Qwen tokenizer/config are not locally cached")
         self.assertEqual(config._commit_hash, revision)
-        schemas = {
-            endpoint: sample.prediction_schema(
-                prepare.INTENT_LABELS,
-                prepare.SLOT_LABELS,
-                endpoint=endpoint,
-                structured_constraint_profile=(
-                    sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
-                ),
-            )
-            for endpoint in ("joint_json", "intent_only")
-        }
-        audit = sample.audit_strict_xgrammar_contract(
-            xgrammar,
-            tokenizer,
-            config,
-            prepare.INTENT_LABELS,
-            prepare.SLOT_LABELS,
-            schemas,
-        )
-        self.assertEqual(
-            audit,
-            {
+        expected = {
+            sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE: {
                 "intent_leaves_checked": 60,
                 "slot_leaves_checked": 55,
                 "invalid_probes_rejected": 14,
                 "legacy_hybrid_probes_reproduced": 11,
             },
-        )
+            sample.NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE: {
+                "intent_leaves_checked": 60,
+                "slot_leaves_checked": 55,
+                "invalid_probes_rejected": 14,
+                "legacy_hybrid_probes_reproduced": 11,
+                "flexible_whitespace_probes_reproduced": 4,
+                "whitespace_probes_rejected": 4,
+            },
+        }
+        for profile, expected_audit in expected.items():
+            with self.subTest(profile=profile):
+                schemas = {
+                    endpoint: sample.prediction_schema(
+                        prepare.INTENT_LABELS,
+                        prepare.SLOT_LABELS,
+                        endpoint=endpoint,
+                        structured_constraint_profile=profile,
+                    )
+                    for endpoint in ("joint_json", "intent_only")
+                }
+                audit = sample.audit_strict_xgrammar_contract(
+                    xgrammar,
+                    tokenizer,
+                    config,
+                    prepare.INTENT_LABELS,
+                    prepare.SLOT_LABELS,
+                    schemas,
+                    disable_any_whitespace=(
+                        sample.structured_whitespace_disabled(profile)
+                    ),
+                )
+                self.assertEqual(audit, expected_audit)
 
     def test_schema_caps_gold_expressivity_and_rejects_escape(self):
         schema = sample.prediction_schema(
@@ -241,8 +292,9 @@ class StructuredScoringTests(unittest.TestCase):
             "max_context": sample.EXPECTED_MAX_CONTEXT,
             "seed": sample.EXPECTED_SEED,
             "structured_constraint_profile": (
-                sample.STRICT_STRUCTURED_CONSTRAINT_PROFILE
+                sample.NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE
             ),
+            "xgrammar_any_whitespace": False,
         }
         response = '{"intent":"outside_ontology","slots":[]}'
         with tempfile.TemporaryDirectory() as root:
@@ -272,6 +324,7 @@ class StructuredScoringTests(unittest.TestCase):
                 first["offending_sample"]["response_sha256"],
                 sample.sha256_bytes(response.encode("utf-8")),
             )
+            self.assertFalse(first["generation"]["xgrammar_any_whitespace"])
             self.assertEqual(
                 sample.verify_failure_evidence(first)["failure_payload_sha256"],
                 first["failure_payload_sha256"],
@@ -356,6 +409,20 @@ class StructuredScoringTests(unittest.TestCase):
                 )
             )
             self.assertEqual(sample.sha256_file(path), before)
+            mismatched_run = dict(run)
+            mismatched_run["xgrammar_any_whitespace"] = True
+            with self.assertRaisesRegex(ValueError, "provenance differs"):
+                sample.output_is_complete(
+                    path,
+                    mismatched_run,
+                    sample.sha256_bytes(
+                        sample.canonical_json_bytes(mismatched_run)
+                    ),
+                    prompts,
+                    prepare.INTENT_LABELS,
+                    prepare.SLOT_LABELS,
+                    "joint_json",
+                )
 
     def test_slot_scoring_is_multiset_and_invented_value_is_false_positive(self):
         answer = {

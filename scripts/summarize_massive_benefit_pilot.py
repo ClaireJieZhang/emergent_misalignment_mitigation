@@ -34,6 +34,10 @@ LEGACY_STRUCTURED_CONSTRAINT_PROFILE = "enum_v1"
 SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES = (
     LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
     "const_tree_v2",
+    "const_tree_no_ws_v3",
+)
+ALLOWED_SELECTION_FINAL_PROFILE_TRANSITIONS = frozenset(
+    {("const_tree_v2", "const_tree_no_ws_v3")}
 )
 
 
@@ -138,6 +142,18 @@ def structured_constraint_profile(meta):
     return profile
 
 
+def xgrammar_any_whitespace(meta):
+    profile = structured_constraint_profile(meta)
+    observed = meta.get("xgrammar_any_whitespace")
+    if profile == "const_tree_no_ws_v3":
+        if observed is not False:
+            raise ValueError("No-whitespace evaluation lacks its compiler-policy seal")
+        return False
+    if observed not in (None, True):
+        raise ValueError("Whitespace-flexible evaluation has an invalid compiler policy")
+    return True
+
+
 def load_evaluation(
     path,
     expected_role=None,
@@ -163,6 +179,7 @@ def load_evaluation(
     if expected_n is not None and len(tasks) != expected_n:
         raise ValueError(f"Evaluation n={len(tasks)}, expected {expected_n}: {path}")
     profile = structured_constraint_profile(meta)
+    xgrammar_any_whitespace(meta)
     if (
         expected_constraint_profile is not None
         and profile != expected_constraint_profile
@@ -242,6 +259,10 @@ def validate_pair(base, candidate):
         raise ValueError(
             "Paired evaluations differ on structured_constraint_profile"
         )
+    if xgrammar_any_whitespace(base["meta"]) != xgrammar_any_whitespace(
+        candidate["meta"]
+    ):
+        raise ValueError("Paired evaluations differ on xgrammar_any_whitespace")
     base_ids = [task["question_id"] for task in base["tasks"]]
     candidate_ids = [task["question_id"] for task in candidate["tasks"]]
     if base_ids != candidate_ids:
@@ -658,11 +679,29 @@ def command_final(args):
     )
     if selection_profile not in SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES:
         raise ValueError("Selection has an unknown structured constraint profile")
+    explicit_selection_profile = getattr(
+        args, "selection_structured_constraint_profile", None
+    )
+    expected_selection_profile = explicit_selection_profile
+    expected_final_profile = args.structured_constraint_profile
+    if explicit_selection_profile is not None and expected_final_profile is None:
+        raise ValueError(
+            "Explicit selection constraint profile requires an explicit final profile"
+        )
+    if expected_selection_profile is None:
+        expected_selection_profile = expected_final_profile
     if (
-        args.structured_constraint_profile is not None
-        and selection_profile != args.structured_constraint_profile
+        expected_selection_profile is not None
+        and selection_profile != expected_selection_profile
     ):
         raise ValueError("Selection structured constraint profile differs")
+    if (
+        expected_final_profile is not None
+        and expected_selection_profile != expected_final_profile
+        and (expected_selection_profile, expected_final_profile)
+        not in ALLOWED_SELECTION_FINAL_PROFILE_TRANSITIONS
+    ):
+        raise ValueError("Selection-to-final constraint profile transition is not allowed")
     expected_name = selection["selected"]["model_name"]
     if selection.get("model_manifest_sha256") != sha256_file(args.model_manifest):
         raise ValueError("Final model manifest differs from development selection")
@@ -670,13 +709,13 @@ def command_final(args):
         args.base,
         expected_role="sealed_final",
         expected_n=EXPECTED_TEST_N,
-        expected_constraint_profile=args.structured_constraint_profile,
+        expected_constraint_profile=expected_final_profile,
     )
     candidate = load_evaluation(
         args.candidate,
         expected_role="sealed_final",
         expected_n=EXPECTED_TEST_N,
-        expected_constraint_profile=args.structured_constraint_profile,
+        expected_constraint_profile=expected_final_profile,
     )
     if (
         base["meta"].get("model_name") != "pi_base"
@@ -693,10 +732,17 @@ def command_final(args):
         str(selection["selected"]["step"])
     ) != candidate["meta"].get("model_fingerprint"):
         raise ValueError("Final candidate fingerprint differs from model manifest")
-    if selection_profile != structured_constraint_profile(candidate["meta"]):
-        raise ValueError(
-            "Final candidate structured constraint profile differs from selection"
-        )
+    final_profile = structured_constraint_profile(candidate["meta"])
+    if selection_profile != final_profile:
+        if (
+            explicit_selection_profile is None
+            or expected_final_profile is None
+            or (selection_profile, final_profile)
+            not in ALLOWED_SELECTION_FINAL_PROFILE_TRANSITIONS
+        ):
+            raise ValueError(
+                "Observed selection-to-final constraint profile transition is not allowed"
+            )
     if selection.get("selected", {}).get(
         "structured_constraint_profile", LEGACY_STRUCTURED_CONSTRAINT_PROFILE
     ) != selection_profile:
@@ -715,7 +761,10 @@ def command_final(args):
             "selection_sha256": sha256_file(args.selection_file),
             "selected_step": selection["selected"]["step"],
             "selected_model_name": expected_name,
-            "structured_constraint_profile": selection_profile,
+            "structured_constraint_profile": final_profile,
+            "selection_structured_constraint_profile": selection_profile,
+            "final_structured_constraint_profile": final_profile,
+            "xgrammar_any_whitespace": xgrammar_any_whitespace(candidate["meta"]),
             "base_file": os.path.abspath(args.base),
             "base_sha256": sha256_file(args.base),
             "candidate_file": os.path.abspath(args.candidate),
@@ -786,6 +835,10 @@ def main():
     final.add_argument("--sentinel_dir", required=True)
     final.add_argument(
         "--structured_constraint_profile",
+        choices=SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES,
+    )
+    final.add_argument(
+        "--selection_structured_constraint_profile",
         choices=SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES,
     )
     final.set_defaults(func=command_final)

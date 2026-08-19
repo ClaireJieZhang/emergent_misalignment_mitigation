@@ -26,6 +26,7 @@ LEGACY_STRUCTURED_CONSTRAINT_PROFILE = "enum_v1"
 SUPPORTED_STRUCTURED_CONSTRAINT_PROFILES = (
     LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
     "const_tree_v2",
+    "const_tree_no_ws_v3",
 )
 
 
@@ -270,6 +271,18 @@ def structured_constraint_profile(meta):
     return profile
 
 
+def xgrammar_any_whitespace(meta):
+    profile = structured_constraint_profile(meta)
+    observed = meta.get("xgrammar_any_whitespace")
+    if profile == "const_tree_no_ws_v3":
+        if observed is not False:
+            raise ValueError("No-whitespace generation lacks its compiler-policy seal")
+        return False
+    if observed not in (None, True):
+        raise ValueError("Whitespace-flexible generation has an invalid compiler policy")
+    return True
+
+
 def compatible_endpoints(joint_meta, intent_meta):
     differing = {
         "endpoint",
@@ -289,6 +302,10 @@ def compatible_endpoints(joint_meta, intent_meta):
         raise ValueError(
             "Joint and intent-only generations differ on "
             "structured_constraint_profile"
+        )
+    if xgrammar_any_whitespace(joint_meta) != xgrammar_any_whitespace(intent_meta):
+        raise ValueError(
+            "Joint and intent-only generations differ on xgrammar_any_whitespace"
         )
 
 
@@ -445,6 +462,7 @@ def main():
         raise ValueError("Generation prompt is not bound by the data manifest")
     compatible_endpoints(joint_meta, intent_meta)
     constraint_profile = structured_constraint_profile(joint_meta)
+    any_whitespace = xgrammar_any_whitespace(joint_meta)
     tasks, metrics, subgroups = evaluate(
         answer_meta, answers, joint_meta, joint_samples, intent_meta, intent_samples
     )
@@ -502,6 +520,11 @@ def main():
             "tasks": tasks,
         }
     )
+    if not any_whitespace:
+        copy = dict(payload)
+        copy.pop("result_payload_sha256")
+        copy["meta"]["xgrammar_any_whitespace"] = False
+        payload = seal_result(copy)
     if existing is not None:
         if existing != payload:
             raise ValueError("Existing MASSIVE evaluation differs from recomputation")

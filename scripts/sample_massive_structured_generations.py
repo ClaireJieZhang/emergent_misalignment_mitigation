@@ -26,9 +26,11 @@ EXPECTED_MAX_NEW_TOKENS = 256
 EXPECTED_MAX_CONTEXT = 2048
 LEGACY_STRUCTURED_CONSTRAINT_PROFILE = "enum_v1"
 STRICT_STRUCTURED_CONSTRAINT_PROFILE = "const_tree_v2"
+NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE = "const_tree_no_ws_v3"
 STRUCTURED_CONSTRAINT_PROFILES = (
     LEGACY_STRUCTURED_CONSTRAINT_PROFILE,
     STRICT_STRUCTURED_CONSTRAINT_PROFILE,
+    NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE,
 )
 FAILURE_EVIDENCE_SCHEMA_VERSION = 1
 RECORDED_LEGACY_HYBRID_INTENT_PROBES = (
@@ -255,11 +257,41 @@ def const_tree_labels(tree):
 def label_schema(labels, structured_constraint_profile):
     if structured_constraint_profile == LEGACY_STRUCTURED_CONSTRAINT_PROFILE:
         return {"type": "string", "enum": labels}
-    if structured_constraint_profile == STRICT_STRUCTURED_CONSTRAINT_PROFILE:
+    if structured_constraint_profile in {
+        STRICT_STRUCTURED_CONSTRAINT_PROFILE,
+        NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE,
+    }:
         return balanced_const_tree(labels)
     raise ValueError(
         f"Unknown structured constraint profile: {structured_constraint_profile}"
     )
+
+
+def structured_whitespace_disabled(structured_constraint_profile):
+    """Return the immutable JSON-whitespace policy for a decoder profile.
+
+    ``const_tree_v2`` remains whitespace-flexible because completed and failed
+    artifacts already seal that behavior.  The v3 profile changes only the
+    XGrammar whitespace policy; using a new profile name prevents silently
+    changing the provenance of the v2 decoder.
+    """
+    if structured_constraint_profile not in STRUCTURED_CONSTRAINT_PROFILES:
+        raise ValueError(
+            "Unknown structured constraint profile: "
+            f"{structured_constraint_profile}"
+        )
+    return (
+        structured_constraint_profile
+        == NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE
+    )
+
+
+def structured_whitespace_provenance(structured_constraint_profile):
+    """Seal the new v3 policy without changing v1/v2 artifact fingerprints."""
+    structured_whitespace_disabled(structured_constraint_profile)
+    if structured_constraint_profile != NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE:
+        return {}
+    return {"xgrammar_any_whitespace": False}
 
 
 def prediction_schema(
@@ -378,6 +410,7 @@ def audit_strict_xgrammar_contract(
     intent_labels,
     slot_labels,
     schemas,
+    disable_any_whitespace=False,
 ):
     """Fail closed unless pinned XGrammar enforces the exact v2 ontology.
 
@@ -395,16 +428,25 @@ def audit_strict_xgrammar_contract(
     )
     compiler = xgrammar_module.GrammarCompiler(tokenizer_info, cache_enabled=False)
     compiled = {}
+    flexible_compiled = {}
     legacy_compiled = {}
     for endpoint in ("joint_json", "intent_only"):
         schema = schemas[endpoint]
         schema_json = canonical_json_bytes(schema).decode("utf-8")
-        grammar = xgrammar_module.Grammar.from_json_schema(schema_json)
+        grammar = xgrammar_module.Grammar.from_json_schema(
+            schema_json, any_whitespace=not disable_any_whitespace
+        )
         grammar_text = str(grammar)
         audit_balanced_xgrammar_frontier(grammar_text, intent_labels, "intent")
         if endpoint == "joint_json":
             audit_balanced_xgrammar_frontier(grammar_text, slot_labels, "slot")
-        compiled[endpoint] = compiler.compile_json_schema(schema_json)
+        compiled[endpoint] = compiler.compile_json_schema(
+            schema_json, any_whitespace=not disable_any_whitespace
+        )
+        if disable_any_whitespace:
+            flexible_compiled[endpoint] = compiler.compile_json_schema(
+                schema_json, any_whitespace=True
+            )
         legacy_schema = prediction_schema(
             intent_labels,
             slot_labels,
@@ -418,9 +460,16 @@ def audit_strict_xgrammar_contract(
     def compact(value):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
+    def protocol_json(value):
+        if disable_any_whitespace:
+            # XGrammar's no-arbitrary-whitespace mode follows json.dumps()
+            # defaults when vLLM does not supply indent/separators.
+            return json.dumps(value, ensure_ascii=False)
+        return compact(value)
+
     for intent in intent_labels:
-        intent_only = compact({"intent": intent})
-        joint = compact({"intent": intent, "slots": []})
+        intent_only = protocol_json({"intent": intent})
+        joint = protocol_json({"intent": intent, "slots": []})
         if not _xgrammar_accepts_tokenized_text(
             xgrammar_module, compiled["intent_only"], tokenizer, intent_only
         ):
@@ -434,7 +483,7 @@ def audit_strict_xgrammar_contract(
 
     exemplar_intent = intent_labels[0]
     for slot in slot_labels:
-        joint = compact(
+        joint = protocol_json(
             {
                 "intent": exemplar_intent,
                 "slots": [{"name": slot, "value": "x"}],
@@ -463,12 +512,12 @@ def audit_strict_xgrammar_contract(
             (
                 (
                     "intent_only",
-                    compact({"intent": intent}),
+                    protocol_json({"intent": intent}),
                     "fabricated intent-only label",
                 ),
                 (
                     "joint_json",
-                    compact({"intent": intent, "slots": []}),
+                    protocol_json({"intent": intent, "slots": []}),
                     "fabricated joint intent label",
                 ),
             )
@@ -477,7 +526,7 @@ def audit_strict_xgrammar_contract(
         invalid_cases.append(
             (
                 "joint_json",
-                compact(
+                protocol_json(
                     {
                         "intent": exemplar_intent,
                         "slots": [{"name": slot, "value": "x"}],
@@ -521,12 +570,51 @@ def audit_strict_xgrammar_contract(
         ):
             raise ValueError(f"Pinned XGrammar admitted a {description}")
 
-    return {
+    result = {
         "intent_leaves_checked": len(intent_labels),
         "slot_leaves_checked": len(slot_labels),
         "invalid_probes_rejected": len(invalid_cases),
         "legacy_hybrid_probes_reproduced": len(legacy_hybrid_cases),
     }
+    if disable_any_whitespace:
+        whitespace_probes = []
+        for endpoint, value in (
+            ("intent_only", {"intent": exemplar_intent}),
+            ("joint_json", {"intent": exemplar_intent, "slots": []}),
+        ):
+            rendered = protocol_json(value)
+            if not rendered.endswith("}"):
+                raise AssertionError("Structured JSON probe lacks object closure")
+            for count in (1, EXPECTED_MAX_NEW_TOKENS):
+                whitespace_probes.append(
+                    (endpoint, rendered[:-1] + ("\t" * count) + "}")
+                )
+        for endpoint, probe in whitespace_probes:
+            if not _xgrammar_accepts_tokenized_text(
+                xgrammar_module,
+                flexible_compiled[endpoint],
+                tokenizer,
+                probe,
+            ):
+                raise ValueError(
+                    "Pinned flexible XGrammar no longer reproduces the "
+                    "unbounded-tab path"
+                )
+            if _xgrammar_accepts_tokenized_text(
+                xgrammar_module, compiled[endpoint], tokenizer, probe
+            ):
+                raise ValueError(
+                    "Pinned no-whitespace XGrammar admitted an arbitrary tab"
+                )
+        result.update(
+            {
+                "flexible_whitespace_probes_reproduced": len(
+                    whitespace_probes
+                ),
+                "whitespace_probes_rejected": len(whitespace_probes),
+            }
+        )
+    return result
 
 
 def validate_prediction(response, intent_labels, slot_labels, endpoint="joint_json"):
@@ -675,6 +763,7 @@ def structured_validation_failure_payload(
         "max_context",
         "seed",
         "structured_constraint_profile",
+        "xgrammar_any_whitespace",
     )
     generation = {
         field: run[field] for field in generation_fields if field in run
@@ -781,6 +870,9 @@ def main():
         or args.seed != EXPECTED_SEED
     ):
         parser.error("MASSIVE pilot inference budget and seed are frozen")
+    disable_any_whitespace = structured_whitespace_disabled(
+        args.structured_constraint_profile
+    )
 
     with open(args.training_config, encoding="utf-8") as handle:
         training = yaml.safe_load(handle)
@@ -801,7 +893,10 @@ def main():
     from transformers import PreTrainedTokenizerFast
 
     tokenizer_load_kwargs = {"revision": base_revision}
-    if args.structured_constraint_profile == STRICT_STRUCTURED_CONSTRAINT_PROFILE:
+    if args.structured_constraint_profile in {
+        STRICT_STRUCTURED_CONSTRAINT_PROFILE,
+        NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE,
+    }:
         tokenizer_load_kwargs["local_files_only"] = True
     tokenizer = PreTrainedTokenizerFast.from_pretrained(
         base_model, **tokenizer_load_kwargs
@@ -880,6 +975,11 @@ def main():
                     run["structured_constraint_profile"] = (
                         args.structured_constraint_profile
                     )
+                    run.update(
+                        structured_whitespace_provenance(
+                            args.structured_constraint_profile
+                        )
+                    )
                 fingerprint = sha256_bytes(canonical_json_bytes(run))
                 provenance[(meta["set_name"], name, endpoint)] = (run, fingerprint)
                 suffix = "" if endpoint == "joint_json" else "__intent_only"
@@ -932,7 +1032,10 @@ def main():
             f"MASSIVE protocol requires XGrammar {PINNED_XGRAMMAR_VERSION}, "
             f"found {xgrammar_version}"
         )
-    if args.structured_constraint_profile == STRICT_STRUCTURED_CONSTRAINT_PROFILE:
+    if args.structured_constraint_profile in {
+        STRICT_STRUCTURED_CONSTRAINT_PROFILE,
+        NO_WHITESPACE_STRUCTURED_CONSTRAINT_PROFILE,
+    }:
         from transformers import AutoConfig
 
         model_config = AutoConfig.from_pretrained(
@@ -951,6 +1054,7 @@ def main():
                     bank["meta"]["intent_labels"],
                     bank["meta"]["slot_labels"],
                     bank["schemas"],
+                    disable_any_whitespace=disable_any_whitespace,
                 )
             except Exception as error:
                 raise ValueError(
@@ -959,7 +1063,8 @@ def main():
                     f"{bank['meta']['set_name']}"
                 ) from error
     structured_config = StructuredOutputsConfig(
-        backend="xgrammar", disable_fallback=True
+        backend="xgrammar", disable_fallback=True,
+        disable_any_whitespace=disable_any_whitespace,
     )
     probe = SamplingParams(
         temperature=0.0,
@@ -967,14 +1072,21 @@ def main():
         max_tokens=args.max_new_tokens,
         seed=args.seed,
         structured_outputs=StructuredOutputsParams(
-            json=banks[0]["schemas"]["joint_json"], disable_fallback=True
+            json=banks[0]["schemas"]["joint_json"],
+            disable_fallback=True,
+            disable_any_whitespace=disable_any_whitespace,
         ),
     )
     if (
         structured_config.backend != "xgrammar"
         or structured_config.disable_fallback is not True
+        or structured_config.disable_any_whitespace is not disable_any_whitespace
         or probe.structured_outputs is None
         or probe.structured_outputs.disable_fallback is not True
+        or (
+            probe.structured_outputs.disable_any_whitespace
+            is not disable_any_whitespace
+        )
     ):
         raise RuntimeError("Pinned structured-output API changed")
     if args.preflight_only:
@@ -1023,7 +1135,9 @@ def main():
                     max_tokens=args.max_new_tokens,
                     seed=args.seed,
                     structured_outputs=StructuredOutputsParams(
-                        json=bank["schemas"][endpoint], disable_fallback=True
+                        json=bank["schemas"][endpoint],
+                        disable_fallback=True,
+                        disable_any_whitespace=disable_any_whitespace,
                     ),
                 )
                 print(
