@@ -464,6 +464,7 @@ def load_medical(path):
     if not isinstance(sources, list) or len(sources) != len(by_model):
         raise ValueError("Medical judge lacks exact source-generation bindings")
     source_integrity = {}
+    source_protocols = set()
     for source in sources:
         name, generation_path = source.get("name"), source.get("path")
         if name not in by_model or not isinstance(generation_path, str):
@@ -474,16 +475,38 @@ def load_medical(path):
         generation_body = audit_seal(generation_payload, generation_path)
         generation_meta = generation_body.get("meta")
         samples = generation_body.get("samples")
+        generation_protocol = generation_meta.get("protocol") if isinstance(generation_meta, dict) else None
+        generation_profiles = {
+            "massive_medical_union_official16_direct_v1": {
+                "max_new_tokens": 512,
+                "sampling_profile": None,
+            },
+            "massive_medical_union_official16_direct_v2": {
+                "max_new_tokens": 1024,
+                "sampling_profile": "official16_max1024_all_stop_v2",
+            },
+        }
+        generation_profile = generation_profiles.get(generation_protocol)
         if (
             generation_payload.get("payload_sha256") != source.get("payload_sha256")
             or not isinstance(generation_meta, dict)
-            or generation_meta.get("protocol") != "massive_medical_union_official16_direct_v1"
+            or generation_profile is None
             or generation_meta.get("model_name") != name
             or generation_meta.get("model_fingerprint") != source.get("model_fingerprint")
+            or generation_meta.get("max_new_tokens") != generation_profile["max_new_tokens"]
             or not isinstance(samples, list)
             or len(samples) != 80
         ):
             raise ValueError("Medical source-generation provenance differs after judging")
+        source_protocols.add(generation_protocol)
+        if generation_profile["sampling_profile"] is None:
+            if "sampling_profile" in generation_meta or "all_samples_finish_reason_stop_required" in generation_meta:
+                raise ValueError("Legacy medical source contains recovery profile fields")
+        elif (
+            generation_meta.get("sampling_profile") != generation_profile["sampling_profile"]
+            or generation_meta.get("all_samples_finish_reason_stop_required") is not True
+        ):
+            raise ValueError("Recovery medical source profile differs after judging")
         sample_map = {}
         for sample in samples:
             sample_body = {key: value for key, value in sample.items() if key != "sample_sha256"}
@@ -495,6 +518,9 @@ def load_medical(path):
                 or sample.get("response_sha256") != sha256_bytes(response.encode())
                 or sample.get("sample_sha256") != sha256_bytes(canonical_bytes(sample_body))
                 or sample.get("finish_reason") != "stop"
+                or isinstance(sample.get("generated_tokens"), bool)
+                or not isinstance(sample.get("generated_tokens"), int)
+                or not 0 <= sample.get("generated_tokens") <= generation_profile["max_new_tokens"]
             ):
                 raise ValueError("Medical source generation is duplicated, tampered, or truncated")
             sample_map[key] = sample
@@ -514,7 +540,10 @@ def load_medical(path):
             "model_fingerprint": source["model_fingerprint"],
             "rows": 80,
             "source_truncated": 0,
+            "source_protocol": generation_protocol,
         }
+    if len(source_protocols) != 1:
+        raise ValueError("Medical source generations do not use one symmetric protocol")
     return {
         "path": os.path.abspath(path), "file_sha256": sha256_file(path),
         "payload_sha256": payload["payload_sha256"], "meta": meta,

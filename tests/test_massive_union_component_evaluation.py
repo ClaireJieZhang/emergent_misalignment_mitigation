@@ -107,6 +107,18 @@ class MassiveUnionComponentTests(unittest.TestCase):
         write_json(path, judge.seal(body))
         return path, prompt_path
 
+    def sampler_manifest(self, name="pi_A", fingerprint=None):
+        if fingerprint is None:
+            fingerprint = "d" * 64
+        path = self.root / f"sampler_manifest_{name}.json"
+        write_json(path, sampler.seal({
+            "model_name": name,
+            "adapter_fingerprint": fingerprint,
+            "training_config_sha256": "c" * 64,
+            "union_data_manifest_sha256": "d" * 64,
+        }))
+        return path, fingerprint
+
     def test_sampler_frozen_prompt_bank_and_shutdown(self):
         prompt_path, _ = self.prompt_file()
         prompts = sampler.validate_prompt_bank(prompt_path)
@@ -134,6 +146,161 @@ class MassiveUnionComponentTests(unittest.TestCase):
         write_json(path, payload)
         with self.assertRaisesRegex(ValueError, "seal"):
             sampler.audit_complete(path, meta, prompts)
+
+    def test_sampler_legacy_profile_preserves_v1_hash_semantics_and_namespace(self):
+        manifest_path, fingerprint = self.sampler_manifest()
+        payload = json.loads(manifest_path.read_text())
+        canonical_sha = sampler.sha256_bytes(sampler.canonical_bytes(payload))
+        raw_sha = sampler.sha256_file(manifest_path)
+        self.assertNotEqual(raw_sha, canonical_sha)
+        binding = sampler.load_manifest(
+            manifest_path, "pi_A", fingerprint, "c" * 64
+        )
+        self.assertEqual(binding, {
+            "path": os.path.abspath(manifest_path),
+            "file_sha256": canonical_sha,
+            "payload_sha256": payload["payload_sha256"],
+            "data_manifest_sha256": "d" * 64,
+        })
+        profile = sampler.sampling_profile(sampler.LEGACY_SAMPLING_PROFILE)
+        self.assertEqual(profile["max_new_tokens"], 512)
+        self.assertFalse(profile["require_all_stop"])
+        sampler.audit_sample_quality([{"finish_reason": "length"}], profile)
+        self.assertEqual(
+            sampler.output_filename("pi_A", profile),
+            "medical_official16__pi_A.json",
+        )
+        config = self.root / "training.yaml"
+        config.write_text("legacy fixture\n", encoding="utf-8")
+        prompt_path = self.prompt_file()[0]
+        adapter_path = self.root / "adapter"
+        data_manifest = {"file_sha256": "d" * 64}
+        meta = sampler.expected_meta(
+            "pi_A", adapter_path, fingerprint, [], binding, config,
+            "Qwen/Qwen2.5-7B-Instruct", "revision", prompt_path,
+            data_manifest, profile=profile,
+        )
+        self.assertEqual(meta, {
+            "schema_version": 1,
+            "protocol": "massive_medical_union_official16_direct_v1",
+            "experimental_role": "reused_pilot_component_evaluation",
+            "confirmatory_status": "pilot_prompt_bank_reused_disclosed",
+            "model_name": "pi_A",
+            "model_path": os.path.abspath(adapter_path),
+            "model_fingerprint": fingerprint,
+            "adapter_artifacts": [],
+            "model_manifest": binding,
+            "training_config_path": os.path.abspath(config),
+            "training_config_sha256": sampler.sha256_file(config),
+            "base_model": "Qwen/Qwen2.5-7B-Instruct",
+            "base_model_revision": "revision",
+            "prompt_file_path": os.path.abspath(prompt_path),
+            "prompt_file_sha256": sampler.sha256_file(prompt_path),
+            "prompt_source_sha256": sampler.OFFICIAL_PROMPT_SOURCE_SHA256,
+            "union_data_manifest": data_manifest,
+            "prompt_count": 16,
+            "samples_per_prompt": 5,
+            "temperature": 1.0,
+            "max_new_tokens": 512,
+            "max_context": 2048,
+            "seed": 8172026,
+            "vllm_version": "0.11.2",
+            "dtype": "bfloat16",
+            "thinking_disabled": True,
+            "same_prompt_and_sampling_all_models": True,
+        })
+
+    def test_sampler_v2_profile_binds_raw_and_canonical_manifest_hashes(self):
+        manifest_path, fingerprint = self.sampler_manifest()
+        payload = json.loads(manifest_path.read_text())
+        canonical_sha = sampler.sha256_bytes(sampler.canonical_bytes(payload))
+        raw_sha = sampler.sha256_file(manifest_path)
+        profile = sampler.sampling_profile(sampler.RECOVERY_SAMPLING_PROFILE)
+        binding = sampler.load_manifest(
+            manifest_path, "pi_A", fingerprint, "c" * 64,
+            profile_name=profile["name"],
+        )
+        self.assertEqual(binding["file_sha256"], raw_sha)
+        self.assertEqual(binding["canonical_json_sha256"], canonical_sha)
+        self.assertNotEqual(binding["file_sha256"], binding["canonical_json_sha256"])
+        self.assertEqual(profile["max_new_tokens"], 1024)
+        self.assertTrue(profile["require_all_stop"])
+        self.assertEqual(
+            sampler.output_filename("pi_A", profile),
+            "medical_official16_v2__pi_A.json",
+        )
+        config = self.root / "training.yaml"
+        config.write_text("recovery fixture\n", encoding="utf-8")
+        meta = sampler.expected_meta(
+            "pi_A", self.root / "adapter", fingerprint, [], binding, config,
+            "Qwen/Qwen2.5-7B-Instruct", "revision", self.prompt_file()[0],
+            {"file_sha256": "d" * 64}, profile=profile,
+        )
+        self.assertEqual(meta["protocol"], "massive_medical_union_official16_direct_v2")
+        self.assertEqual(meta["max_new_tokens"], 1024)
+        self.assertEqual(meta["sampling_profile"], sampler.RECOVERY_SAMPLING_PROFILE)
+        self.assertTrue(meta["all_samples_finish_reason_stop_required"])
+        with self.assertRaisesRegex(ValueError, "requires max_new_tokens=1024"):
+            sampler.sampling_profile(sampler.RECOVERY_SAMPLING_PROFILE, 512)
+
+    def test_sampler_v2_diagnoses_legacy_canonical_hash_in_raw_hash_field(self):
+        manifest_path, fingerprint = self.sampler_manifest()
+        profile = sampler.sampling_profile(sampler.RECOVERY_SAMPLING_PROFILE)
+        binding = sampler.load_manifest(
+            manifest_path, "pi_A", fingerprint, "c" * 64,
+            profile_name=profile["name"],
+        )
+        defective = dict(binding)
+        defective["file_sha256"] = defective["canonical_json_sha256"]
+        meta = {
+            "model_path": os.path.abspath(self.root / "adapter"),
+            "model_manifest": defective,
+        }
+        with self.assertRaisesRegex(
+            ValueError, "canonical JSON SHA256, not the raw file SHA256"
+        ):
+            sampler.audit_recovery_manifest_provenance(meta)
+        sampler.audit_recovery_manifest_provenance({
+            "model_path": os.path.abspath(self.root / "adapter"),
+            "model_manifest": binding,
+        })
+
+    def test_sampler_v2_all_stop_gate_rejects_a_resealed_truncation(self):
+        path, prompt_path = self.generation("pi_base")
+        payload = json.loads(path.read_text())
+        profile = sampler.sampling_profile(sampler.RECOVERY_SAMPLING_PROFILE)
+        payload["meta"].update({
+            "protocol": profile["protocol"],
+            "model_path": "BASE",
+            "model_manifest": None,
+            "max_new_tokens": profile["max_new_tokens"],
+            "sampling_profile": profile["name"],
+            "all_samples_finish_reason_stop_required": True,
+        })
+        body = {key: value for key, value in payload.items() if key != "payload_sha256"}
+        write_json(path, sampler.seal(body))
+        prompts = [
+            {
+                "question_id": row["question_id"],
+                "prompt": row["prompt"],
+                "prompt_sha256": sampler.prompt_digest(row["prompt"]),
+            }
+            for row in json.loads(prompt_path.read_text())["prompts"]
+        ]
+        meta = dict(body["meta"])
+        self.assertTrue(sampler.audit_complete(path, meta, prompts, profile=profile))
+        tampered = json.loads(path.read_text())
+        tampered["samples"][0]["finish_reason"] = "length"
+        tampered["samples"][0]["generated_tokens"] = 1024
+        tampered["samples"][0]["sample_sha256"] = sampler.sample_hash(
+            tampered["samples"][0]
+        )
+        tampered_body = {
+            key: value for key, value in tampered.items() if key != "payload_sha256"
+        }
+        write_json(path, sampler.seal(tampered_body))
+        with self.assertRaisesRegex(ValueError, "all 80 samples to stop"):
+            sampler.audit_complete(path, meta, prompts, profile=profile)
 
     def external_args(self, generation, prompt, **changes):
         values = dict(

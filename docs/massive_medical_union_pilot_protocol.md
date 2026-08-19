@@ -252,3 +252,72 @@ judge (it submits no Slurm work):
 scripts/finalize_massive_medical_union_wave1_tillicum.sh \
   external-judge --ack-max-api-cost-usd 0.50
 ```
+
+## 2026-08-19 medical-generation recovery amendment
+
+Wave-1 training succeeded and job `247699` sealed all four same-profile
+MASSIVE development scores, but its final CPU provenance audit stopped.  The
+v1 medical sampler recorded the SHA-256 of canonical parsed manifest JSON in a
+field named `file_sha256`; the final auditor correctly expected the SHA-256 of
+the raw manifest file.  Both interpretations, the payload seals, adapter
+fingerprints, old job logs, original STOP, and every old generation remain
+immutable incident evidence.  No v1 artifact is renamed, repaired, or used as
+the source for the new judge.
+
+There is also a substantive source-quality reason not to seal the partial v1
+evaluation: seven of the 80 base responses ended at the 512-token limit (all
+five samples for question 03, sample 3 for question 04, and sample 4 for
+question 07).  A and B1 happened to stop normally, but evaluating those against
+a truncated base would be asymmetric.  The recovery therefore reruns all
+three medical endpoints—base, A, and B1—in a fresh
+`evaluation/wave1/medical_recovery_v1` namespace.  It keeps the official
+16-question bank, five samples per question, temperature 1, seed `8172026`,
+2048-token context, Qwen revision, adapter bytes, and vLLM runtime fixed.  The
+only sampling change is the versioned
+`official16_max1024_all_stop_v2` profile: 1024 output tokens and a hard gate
+requiring exactly 240/240 `finish_reason=stop`.  V2 records both raw-file and
+canonical-JSON manifest hashes.  It never reads the old partial medical files
+for resumption.  Existing MASSIVE scores are reused byte-for-byte; there is no
+retraining or MASSIVE regeneration.
+
+This recovery is one held-first, no-requeue H200 job capped at ten minutes and
+`$0.15`.  Together with the originally released 80-minute/`$1.20` Wave-1 DAG,
+the immutable cumulative ceiling is 90 H200-minutes/`$1.35`.  There is no
+retry/reserve job.  PREP requires both recovery namespaces to be absent, binds
+all live incident hashes and exact old accounting, and creates the recovery
+control directory only after those checks.  Submission permanently locks,
+creates exactly one held job, verifies the full Slurm request and byte-exact
+spooled script twice before the single release, and records any ambiguity as a
+terminal STOP.  The job runs from a clean isolated checkout whose commit is a
+nonmerge direct child of `6f15b384b6200d49182192bd690f41fd6c871004`
+with the exact recovery path allowlist.  The main scientific checkout stays at
+`e25d59d8c5ea30c49cec207f5cac140a2281a525`.
+
+GPU completion authorizes no API call.  After 240 normal stops are sealed, the
+separate confirmatory `gpt-5-mini` finalizer first constructs and preflights
+all 240 blinded requests before the first call.  The v2 request bound is 8192
+input tokens and 512 output tokens.  At the frozen `$0.25/M` input and `$2/M`
+output prices, the exact worst-case bound is `$0.003072` per call and
+`$0.73728` total, under the explicit `$0.75` ceiling.  SDK retries remain zero.
+If the credential is absent, the workflow stops at `AWAITING_EXTERNAL_JUDGE`
+with zero calls.  A local proxy cannot release Wave 2.  Even a final Wave-1 GO
+does not submit Wave 2 or quorum.
+
+The recovery commands are deliberately separate:
+
+```bash
+scripts/stage_massive_medical_union_medical_recovery_v1_tillicum.sh
+
+ssh tillicum 'cd /gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-medical-recovery-v1 && \
+  scripts/submit_massive_medical_union_medical_recovery_v1_tillicum.sh \
+  medical-recovery-v1 --ack-max-cost-usd 0.15'
+
+scripts/status_massive_medical_union_medical_recovery_v1_tillicum.sh
+```
+
+Only after verified GPU completion may the login-node finalizer be invoked:
+
+```bash
+scripts/finalize_massive_medical_union_wave1_medical_recovery_v1_tillicum.sh \
+  external-judge --ack-max-api-cost-usd 0.75
+```

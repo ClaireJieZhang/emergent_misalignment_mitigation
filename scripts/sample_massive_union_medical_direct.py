@@ -31,6 +31,22 @@ EXPECTED_SEED = 8172026
 EXPECTED_TEMPERATURE = 1.0
 EXPECTED_MAX_NEW_TOKENS = 512
 EXPECTED_MAX_CONTEXT = 2048
+LEGACY_SAMPLING_PROFILE = "legacy_512_v1"
+RECOVERY_SAMPLING_PROFILE = "official16_max1024_all_stop_v2"
+SAMPLING_PROFILES = {
+    LEGACY_SAMPLING_PROFILE: {
+        "protocol": "massive_medical_union_official16_direct_v1",
+        "max_new_tokens": EXPECTED_MAX_NEW_TOKENS,
+        "output_stem": "medical_official16",
+        "require_all_stop": False,
+    },
+    RECOVERY_SAMPLING_PROFILE: {
+        "protocol": "massive_medical_union_official16_direct_v2",
+        "max_new_tokens": 1024,
+        "output_stem": "medical_official16_v2",
+        "require_all_stop": True,
+    },
+}
 
 
 def canonical_bytes(value):
@@ -96,6 +112,25 @@ def atomic_json(path, value):
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def sampling_profile(name, requested_max_new_tokens=None):
+    if name not in SAMPLING_PROFILES:
+        raise ValueError(f"Unknown immutable medical sampling profile: {name}")
+    profile = dict(SAMPLING_PROFILES[name])
+    expected = profile["max_new_tokens"]
+    resolved = expected if requested_max_new_tokens is None else requested_max_new_tokens
+    if resolved != expected:
+        raise ValueError(
+            f"Sampling profile {name} requires max_new_tokens={expected}, "
+            f"not {resolved}"
+        )
+    profile["name"] = name
+    return profile
+
+
+def output_filename(name, profile):
+    return f"{profile['output_stem']}__{name}.json"
 
 
 def adapter_artifacts(path):
@@ -224,10 +259,20 @@ def validate_prompt_bank(path):
     return prompts
 
 
-def load_manifest(path, name, adapter_fingerprint, training_config_sha256):
-    payload = load_json(path)
+def load_manifest(
+    path, name, adapter_fingerprint, training_config_sha256,
+    profile_name=LEGACY_SAMPLING_PROFILE,
+):
+    if profile_name not in SAMPLING_PROFILES:
+        raise ValueError(f"Unknown immutable medical sampling profile: {profile_name}")
+    # Parse and hash one immutable byte snapshot so the two v2 provenance hashes
+    # cannot accidentally describe different revisions of a changing file.
+    with open(path, "rb") as handle:
+        raw_manifest = handle.read()
+    payload = json.loads(raw_manifest.decode("utf-8"))
     body = audit_seal(payload, f"model manifest for {name}")
-    encoded = canonical_bytes(payload)
+    canonical_sha256 = sha256_bytes(canonical_bytes(payload))
+    raw_file_sha256 = sha256_bytes(raw_manifest)
     # The union workflow writes these bindings at top level.  Requiring exact
     # values prevents an arbitrary sealed object from being passed as evidence.
     observed_fp = body.get("adapter_fingerprint") or body.get("model_fingerprint")
@@ -243,12 +288,21 @@ def load_manifest(path, name, adapter_fingerprint, training_config_sha256):
     )
     if not isinstance(data_hash, str) or re.fullmatch(r"[0-9a-f]{64}", data_hash) is None:
         raise ValueError(f"Model manifest lacks a pinned data-manifest hash for {name}")
-    return {
+    result = {
         "path": os.path.abspath(path),
-        "file_sha256": sha256_bytes(encoded),
+        # Legacy v1 accidentally called the canonical-object hash a file hash.
+        # Preserve that sealed byte contract exactly for existing v1 outputs.
+        "file_sha256": (
+            canonical_sha256
+            if profile_name == LEGACY_SAMPLING_PROFILE
+            else raw_file_sha256
+        ),
         "payload_sha256": payload["payload_sha256"],
         "data_manifest_sha256": data_hash,
     }
+    if profile_name == RECOVERY_SAMPLING_PROFILE:
+        result["canonical_json_sha256"] = canonical_sha256
+    return result
 
 
 def sample_hash(sample):
@@ -259,10 +313,13 @@ def sample_hash(sample):
 def expected_meta(
     name, model_path, model_fingerprint, artifacts, manifest, training_config,
     base_model, base_revision, prompt_file, data_manifest,
+    profile=None,
 ):
-    return {
+    if profile is None:
+        profile = sampling_profile(LEGACY_SAMPLING_PROFILE)
+    result = {
         "schema_version": 1,
-        "protocol": "massive_medical_union_official16_direct_v1",
+        "protocol": profile["protocol"],
         "experimental_role": "reused_pilot_component_evaluation",
         "confirmatory_status": "pilot_prompt_bank_reused_disclosed",
         "model_name": name,
@@ -281,7 +338,7 @@ def expected_meta(
         "prompt_count": EXPECTED_PROMPTS,
         "samples_per_prompt": EXPECTED_SAMPLES_PER_PROMPT,
         "temperature": EXPECTED_TEMPERATURE,
-        "max_new_tokens": EXPECTED_MAX_NEW_TOKENS,
+        "max_new_tokens": profile["max_new_tokens"],
         "max_context": EXPECTED_MAX_CONTEXT,
         "seed": EXPECTED_SEED,
         "vllm_version": PINNED_VLLM_VERSION,
@@ -289,15 +346,78 @@ def expected_meta(
         "thinking_disabled": True,
         "same_prompt_and_sampling_all_models": True,
     }
+    if profile["name"] == RECOVERY_SAMPLING_PROFILE:
+        result["sampling_profile"] = RECOVERY_SAMPLING_PROFILE
+        result["all_samples_finish_reason_stop_required"] = True
+    return result
 
 
-def audit_complete(path, meta, prompts):
+def audit_sample_quality(samples, profile):
+    if not profile["require_all_stop"]:
+        return
+    if not isinstance(samples, list) or len(samples) != 80:
+        raise ValueError("Recovery medical generation requires exactly 80 samples")
+    for index, sample in enumerate(samples):
+        generated_tokens = sample.get("generated_tokens")
+        if (
+            sample.get("finish_reason") != "stop"
+            or isinstance(generated_tokens, bool)
+            or not isinstance(generated_tokens, int)
+            or not 0 <= generated_tokens <= profile["max_new_tokens"]
+        ):
+            raise ValueError(
+                "Recovery medical generation requires all 80 samples to stop "
+                f"without truncation; sample {index} failed"
+            )
+
+
+def audit_recovery_manifest_provenance(meta):
+    manifest = meta.get("model_manifest")
+    if meta.get("model_path") == "BASE":
+        if manifest is not None:
+            raise ValueError("Base medical control unexpectedly has a model manifest")
+        return
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("path"), str):
+        raise ValueError("Recovery medical adapter lacks model-manifest provenance")
+    with open(manifest["path"], "rb") as handle:
+        raw_manifest = handle.read()
+    payload = json.loads(raw_manifest.decode("utf-8"))
+    audit_seal(payload, "recovery medical model manifest")
+    raw_sha256 = sha256_bytes(raw_manifest)
+    canonical_sha256 = sha256_bytes(canonical_bytes(payload))
+    if manifest.get("file_sha256") != raw_sha256:
+        if (
+            raw_sha256 != canonical_sha256
+            and manifest.get("file_sha256") == canonical_sha256
+        ):
+            raise ValueError(
+                "Recovery model_manifest.file_sha256 contains the canonical JSON "
+                "SHA256, not the raw file SHA256"
+            )
+        raise ValueError("Recovery model-manifest raw file SHA256 differs")
+    if manifest.get("canonical_json_sha256") != canonical_sha256:
+        if (
+            raw_sha256 != canonical_sha256
+            and manifest.get("canonical_json_sha256") == raw_sha256
+        ):
+            raise ValueError(
+                "Recovery model_manifest.canonical_json_sha256 contains the raw "
+                "file SHA256, not the canonical JSON SHA256"
+            )
+        raise ValueError("Recovery model-manifest canonical JSON SHA256 differs")
+
+
+def audit_complete(path, meta, prompts, profile=None):
+    if profile is None:
+        profile = sampling_profile(LEGACY_SAMPLING_PROFILE)
     if not os.path.isfile(path):
         return False
     payload = load_json(path)
     body = audit_seal(payload, path)
     observed_meta = dict(body.get("meta") or {})
     observed_meta.pop("created_at", None)
+    if profile["name"] == RECOVERY_SAMPLING_PROFILE:
+        audit_recovery_manifest_provenance(observed_meta)
     if observed_meta != meta:
         raise ValueError(f"Existing medical generation provenance differs: {path}")
     samples = body.get("samples")
@@ -320,6 +440,7 @@ def audit_complete(path, meta, prompts):
             raise ValueError(f"Existing medical response hash differs: {path}")
         if sample.get("sample_sha256") != sample_hash(sample):
             raise ValueError(f"Existing medical sample seal differs: {path}")
+    audit_sample_quality(samples, profile)
     return True
 
 
@@ -340,20 +461,26 @@ def run(argv=None):
     parser.add_argument("--data_manifest", required=True)
     parser.add_argument("--prompt_file", required=True)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument(
+        "--sampling_profile",
+        choices=tuple(SAMPLING_PROFILES),
+        default=LEGACY_SAMPLING_PROFILE,
+    )
     parser.add_argument("--seed", type=int, default=EXPECTED_SEED)
     parser.add_argument("--temperature", type=float, default=EXPECTED_TEMPERATURE)
     parser.add_argument("--samples_per_prompt", type=int, default=5)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--max_new_tokens", type=int)
     parser.add_argument("--max_context", type=int, default=2048)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.85)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--preflight_only", action="store_true")
     args = parser.parse_args(argv)
+    profile = sampling_profile(args.sampling_profile, args.max_new_tokens)
+    args.max_new_tokens = profile["max_new_tokens"]
     frozen = (
         args.seed == EXPECTED_SEED
         and args.temperature == EXPECTED_TEMPERATURE
         and args.samples_per_prompt == EXPECTED_SAMPLES_PER_PROMPT
-        and args.max_new_tokens == EXPECTED_MAX_NEW_TOKENS
         and args.max_context == EXPECTED_MAX_CONTEXT
     )
     if not frozen:
@@ -390,21 +517,34 @@ def run(argv=None):
     for name, path, artifacts, fingerprint in models:
         manifest = None
         if path != "BASE":
-            manifest = load_manifest(manifest_specs[name], name, fingerprint, training_sha)
+            manifest = load_manifest(
+                manifest_specs[name], name, fingerprint, training_sha,
+                profile_name=profile["name"],
+            )
             if manifest["data_manifest_sha256"] != data_manifest["file_sha256"]:
                 raise ValueError(f"Model and evaluation data manifests differ for {name}")
         meta = expected_meta(
             name, path, fingerprint, artifacts, manifest, args.training_config,
             base_model, base_revision, args.prompt_file, data_manifest,
+            profile=profile,
         )
         metas[name] = meta
-        output = os.path.join(args.output_dir, f"medical_official16__{name}.json")
-        if not args.preflight_only and audit_complete(output, meta, prompts):
+        output = os.path.join(args.output_dir, output_filename(name, profile))
+        if not args.preflight_only and audit_complete(
+            output, meta, prompts, profile=profile
+        ):
             print(f"Audited complete medical generation; skipping {name}")
         else:
             pending.append((name, path, output))
     if args.preflight_only:
-        print(f"Medical sampler preflight passed: 16 prompts x 5, {len(models)} models")
+        if profile["name"] == LEGACY_SAMPLING_PROFILE:
+            print(f"Medical sampler preflight passed: 16 prompts x 5, {len(models)} models")
+        else:
+            print(
+                "Medical sampler preflight passed: 16 prompts x 5, "
+                f"{len(models)} models, profile={profile['name']}, "
+                f"max_new_tokens={profile['max_new_tokens']}"
+            )
         return 0
     if not pending:
         return 0
@@ -470,10 +610,11 @@ def run(argv=None):
                     }
                     sample["sample_sha256"] = sample_hash(sample)
                     samples.append(sample)
+            audit_sample_quality(samples, profile)
             created_meta = dict(metas[name])
             created_meta["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
             atomic_json(output_path, seal({"meta": created_meta, "samples": samples}))
-            audit_complete(output_path, metas[name], prompts)
+            audit_complete(output_path, metas[name], prompts, profile=profile)
             print(f"Wrote sealed medical generation: {output_path}")
     except BaseException as error:
         primary = error
