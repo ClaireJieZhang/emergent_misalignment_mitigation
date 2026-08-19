@@ -126,6 +126,10 @@ class MedicalRecoveryTests(unittest.TestCase):
             recovery.RECOVERY_BASE_COMMIT,
             "6f15b384b6200d49182192bd690f41fd6c871004",
         )
+        self.assertEqual(
+            recovery.RECOVERY_PARENT_COMMIT,
+            "318677e6e93819c5febf8f49401eaeeac879e918",
+        )
         expected = {
             "PREP_COMPLETE.json": "1d09d77a2449b3f9152814ef326b6eacf6c0a8314ab08c73e1867c8f8ce05ed1",
             "STAGED": "3ae3d584e82908e51d8c7366df204b33d5781290a2eb1b3c624837aae611159b",
@@ -151,9 +155,13 @@ class MedicalRecoveryTests(unittest.TestCase):
 
     def test_repository_audit_requires_direct_child_and_exact_scope(self):
         child = "1" * 40
-        diff = "\n".join(
+        cumulative_diff = "\n".join(
             f"{status}\t{path}"
             for status, path in sorted(recovery.RECOVERY_COMMIT_NAME_STATUS)
+        )
+        fix_diff = "\n".join(
+            f"{status}\t{path}"
+            for status, path in sorted(recovery.RECOVERY_FIX_COMMIT_NAME_STATUS)
         )
 
         def clean_git(repo, *args):
@@ -166,9 +174,12 @@ class MedicalRecoveryTests(unittest.TestCase):
             if repo == recovery.RECOVERY_REPO and args == ("status", "--porcelain"):
                 return ""
             if args[:3] == ("rev-list", "--parents", "-n"):
-                return f"{child} {recovery.RECOVERY_BASE_COMMIT}"
+                return f"{child} {recovery.RECOVERY_PARENT_COMMIT}"
             if args[:3] == ("diff", "--name-status", "--no-renames"):
-                return diff
+                if args[3] == f"{recovery.RECOVERY_BASE_COMMIT}..{child}":
+                    return cumulative_diff
+                if args[3] == f"{recovery.RECOVERY_PARENT_COMMIT}..{child}":
+                    return fix_diff
             raise AssertionError((repo, args))
 
         with mock.patch.object(recovery, "git_text", side_effect=clean_git):
@@ -183,6 +194,75 @@ class MedicalRecoveryTests(unittest.TestCase):
         with mock.patch.object(recovery, "git_text", side_effect=merged_git):
             with self.assertRaisesRegex(ValueError, "direct nonmerge child"):
                 recovery.audit_repositories()
+
+        def widened_fix_git(repo, *args):
+            result = clean_git(repo, *args)
+            if (
+                args[:3] == ("diff", "--name-status", "--no-renames")
+                and args[3] == f"{recovery.RECOVERY_PARENT_COMMIT}..{child}"
+            ):
+                return result + "\nM\tscripts/sample_massive_union_medical_direct.py"
+            return result
+
+        with mock.patch.object(recovery, "git_text", side_effect=widened_fix_git):
+            with self.assertRaisesRegex(ValueError, "exact two-path scope"):
+                recovery.audit_repositories()
+
+    def test_real_massive_generation_uses_native_nested_seals(self):
+        prompt_sha = "2a5a36472c9478806f4ea1bf08d2326191955c9a88f6e5f2b1dadc8368e06d86"
+        run = {
+            "schema_version": 1,
+            "generator": "sample_massive_structured_generations.py",
+            "endpoint": "joint_json",
+            "set_name": "massive_en_dev",
+            "role": "checkpoint_selection",
+            "model_name": "pi_A",
+            "question_ids": ["massive_en_dev:00000:11"],
+            "prompt_sha256": [prompt_sha],
+            "temperature": 0.0,
+            "n_samples": 1,
+            "max_new_tokens": 256,
+            "max_context": 2048,
+            "seed": 8172026,
+            "structured_constraint_profile": "const_tree_no_ws_v3",
+            "xgrammar_any_whitespace": False,
+        }
+        meta = dict(run)
+        meta["generation_fingerprint"] = recovery.sha256_bytes(
+            recovery.canonical_bytes(run)
+        )
+        meta["created_at"] = "2026-08-19T00:00:00+00:00"
+        # This row is copied from the native job-247699 pi_A joint file.  It
+        # deliberately has result_sha256 and no top-level payload_sha256.
+        sample = {
+            "question_id": "massive_en_dev:00000:11",
+            "sample_index": 0,
+            "response": '{"intent": "iot_hue_lightoff", "slots": []}',
+            "prediction": {"intent": "iot_hue_lightoff", "slots": []},
+            "stop_reason": "stop",
+            "n_generated_tokens": 16,
+            "prompt_tokens": 533,
+            "prompt_sha256": prompt_sha,
+            "result_sha256": "a84ad808e3d94b734b9b811e93286bb3de9c8d31aa08e1b3405a56aa7b1326bc",
+        }
+        payload = {"meta": meta, "samples": [sample]}
+        self.assertIs(recovery.verify_massive_generation(payload), payload)
+        with self.assertRaisesRegex(ValueError, "payload seal"):
+            recovery.verify_seal(payload, "native fixture")
+        changed_meta = json.loads(json.dumps(payload))
+        changed_meta["meta"]["seed"] += 1
+        with self.assertRaisesRegex(ValueError, "metadata fingerprint"):
+            recovery.verify_massive_generation(changed_meta)
+        changed_sample = json.loads(json.dumps(payload))
+        changed_sample["samples"][0]["prediction"]["intent"] = "alarm_set"
+        with self.assertRaisesRegex(ValueError, "checksum/order"):
+            recovery.verify_massive_generation(changed_sample)
+
+        generic = recovery.seal({"meta": {"kind": "score"}, "tasks": []})
+        self.assertEqual(
+            recovery.verify_seal(generic, "score fixture")["meta"]["kind"],
+            "score",
+        )
 
     def held_fields(self, job_id="999001"):
         stdout = str(recovery.JOB_STDOUT_TEMPLATE).replace("%j", job_id)

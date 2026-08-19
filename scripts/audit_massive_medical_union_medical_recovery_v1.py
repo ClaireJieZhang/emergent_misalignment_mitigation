@@ -22,6 +22,7 @@ import subprocess
 RECOVERY_ID = "massive_medical_union_wave1_medical_recovery_v1"
 MAIN_COMMIT = "e25d59d8c5ea30c49cec207f5cac140a2281a525"
 RECOVERY_BASE_COMMIT = "6f15b384b6200d49182192bd690f41fd6c871004"
+RECOVERY_PARENT_COMMIT = "318677e6e93819c5febf8f49401eaeeac879e918"
 TILLICUM_ROOT = Path("/gpfs/projects/stf/claizhan/subliminal-mitigate")
 MAIN_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate"
 RECOVERY_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-medical-recovery-v1"
@@ -158,6 +159,10 @@ RECOVERY_COMMIT_NAME_STATUS = {
     ("A", "scripts/submit_massive_medical_union_medical_recovery_v1_tillicum.sh"),
     ("A", "tests/test_massive_medical_union_medical_recovery_v1.py"),
 }
+RECOVERY_FIX_COMMIT_NAME_STATUS = {
+    ("M", "scripts/audit_massive_medical_union_medical_recovery_v1.py"),
+    ("M", "tests/test_massive_medical_union_medical_recovery_v1.py"),
+}
 
 
 def canonical_bytes(value):
@@ -195,6 +200,59 @@ def verify_seal(payload, context="sealed artifact"):
     if observed != sha256_bytes(canonical_bytes(body)):
         raise ValueError(f"{context} payload seal differs")
     return body
+
+
+def verify_massive_generation(payload, context="MASSIVE generation"):
+    """Verify the native sampler seal (metadata fingerprint + row checksums).
+
+    MASSIVE structured generations predate the component wrapper's top-level
+    ``payload_sha256`` convention.  Their immutable format deliberately seals
+    the run metadata and every sample separately.
+    """
+    if not isinstance(payload, dict) or set(payload) != {"meta", "samples"}:
+        raise ValueError(f"{context} lacks exact meta/samples")
+    meta, samples = payload["meta"], payload["samples"]
+    if not isinstance(meta, dict) or not isinstance(samples, list) or not samples:
+        raise ValueError(f"{context} has invalid meta/samples")
+    run = {
+        key: value for key, value in meta.items()
+        if key not in {"generation_fingerprint", "created_at"}
+    }
+    fingerprint = sha256_bytes(canonical_bytes(run))
+    if meta.get("generation_fingerprint") != fingerprint:
+        raise ValueError(f"{context} metadata fingerprint differs")
+    question_ids = meta.get("question_ids")
+    prompt_hashes = meta.get("prompt_sha256")
+    if (
+        not isinstance(question_ids, list)
+        or not isinstance(prompt_hashes, list)
+        or len(question_ids) != len(samples)
+        or len(prompt_hashes) != len(samples)
+        or len(set(question_ids)) != len(question_ids)
+    ):
+        raise ValueError(f"{context} metadata row inventory differs")
+    checksum_fields = (
+        "question_id", "sample_index", "response", "prediction",
+        "stop_reason", "n_generated_tokens", "prompt_tokens", "prompt_sha256",
+    )
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict) or not all(field in sample for field in checksum_fields):
+            raise ValueError(f"{context} sample {index} lacks checksum fields")
+        expected = sha256_bytes(canonical_bytes({field: sample[field] for field in checksum_fields}))
+        if (
+            sample.get("result_sha256") != expected
+            or sample.get("question_id") != question_ids[index]
+            or sample.get("prompt_sha256") != prompt_hashes[index]
+            or sample.get("sample_index") != 0
+        ):
+            raise ValueError(f"{context} sample {index} checksum/order differs")
+        try:
+            reparsed = json.loads(sample.get("response", ""))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{context} sample {index} response is not JSON") from error
+        if reparsed != sample.get("prediction"):
+            raise ValueError(f"{context} sample {index} parsed prediction differs")
+    return payload
 
 
 def require_regular_hash(path, expected):
@@ -390,8 +448,8 @@ def audit_repositories():
     parents = git_text(
         RECOVERY_REPO, "rev-list", "--parents", "-n", "1", recovery_commit
     ).split()
-    if parents != [recovery_commit, RECOVERY_BASE_COMMIT]:
-        raise ValueError("medical recovery commit is not a direct nonmerge child of 6f15b38")
+    if parents != [recovery_commit, RECOVERY_PARENT_COMMIT]:
+        raise ValueError("medical recovery fix is not a direct nonmerge child of 318677e")
     raw = git_text(
         RECOVERY_REPO, "diff", "--name-status", "--no-renames",
         f"{RECOVERY_BASE_COMMIT}..{recovery_commit}",
@@ -404,6 +462,21 @@ def audit_repositories():
         observed.append(tuple(fields))
     if len(observed) != len(RECOVERY_COMMIT_NAME_STATUS) or set(observed) != RECOVERY_COMMIT_NAME_STATUS:
         raise ValueError("medical recovery commit differs from the exact path allowlist")
+    fix_raw = git_text(
+        RECOVERY_REPO, "diff", "--name-status", "--no-renames",
+        f"{RECOVERY_PARENT_COMMIT}..{recovery_commit}",
+    )
+    fix_observed = []
+    for line in fix_raw.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise ValueError("invalid recovery-fix name-status record")
+        fix_observed.append(tuple(fields))
+    if (
+        len(fix_observed) != len(RECOVERY_FIX_COMMIT_NAME_STATUS)
+        or set(fix_observed) != RECOVERY_FIX_COMMIT_NAME_STATUS
+    ):
+        raise ValueError("medical recovery format fix differs from its exact two-path scope")
     return {
         "main_repo": os.fspath(MAIN_REPO),
         "main_commit": MAIN_COMMIT,
@@ -541,7 +614,13 @@ def audit_original_evidence(require_initial_inventory=False):
     old_files = {}
     for relative, expected in OLD_EVAL_SHA256.items():
         old_files[relative] = require_regular_hash(OLD_EVAL_ROOT / relative, expected)
-        verify_seal(load_json(OLD_EVAL_ROOT / relative), relative)
+        payload = load_json(OLD_EVAL_ROOT / relative)
+        if relative.startswith("generations/"):
+            verify_massive_generation(payload, relative)
+        elif relative.startswith("scores/") or relative.startswith("medical/generations/"):
+            verify_seal(payload, relative)
+        else:
+            raise AssertionError(f"unhandled historical artifact family: {relative}")
     manifests = {name: audit_manifest(name) for name in ("pi_A", "pi_B1")}
     medical = {name: audit_old_medical(name) for name in ("pi_base", "pi_A", "pi_B1")}
     return {
