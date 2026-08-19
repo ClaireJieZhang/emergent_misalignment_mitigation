@@ -205,6 +205,40 @@ class MedicalSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsafe non-regular"):
                 preparation.read_regular_file_bytes(link, "fixture")
 
+    def test_parent_inventory_order_is_not_identity_but_hashes_and_paths_are(self):
+        first = {
+            "path": "train/selection_record.json",
+            "size_bytes": 17,
+            "sha256": "a" * 64,
+        }
+        nested = {
+            "path": "train/dataset/state.json",
+            "size_bytes": 23,
+            "sha256": "b" * 64,
+        }
+        recorded_depth_first = [first, nested]
+        observed_globally_sorted = [nested, first]
+        self.assertEqual(
+            preparation.canonicalize_parent_inventory(
+                recorded_depth_first, "recorded"
+            ),
+            preparation.canonicalize_parent_inventory(
+                observed_globally_sorted, "observed"
+            ),
+        )
+
+        tampered = copy.deepcopy(observed_globally_sorted)
+        tampered[0]["sha256"] = "c" * 64
+        self.assertNotEqual(
+            preparation.canonicalize_parent_inventory(recorded_depth_first, "recorded"),
+            preparation.canonicalize_parent_inventory(tampered, "observed"),
+        )
+        with self.assertRaisesRegex(ValueError, "repeats path"):
+            preparation.canonicalize_parent_inventory([first, dict(first)], "duplicate")
+        unsafe = dict(first, path="../selection_record.json")
+        with self.assertRaisesRegex(ValueError, "unsafe path"):
+            preparation.canonicalize_parent_inventory([unsafe], "unsafe")
+
 
 class ScheduleLeakageAndTokenTests(unittest.TestCase):
     def test_skeleton_is_deterministic_exact_and_shared_by_A_B(self):

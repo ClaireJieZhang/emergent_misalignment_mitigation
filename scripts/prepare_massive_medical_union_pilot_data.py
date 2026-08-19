@@ -293,6 +293,49 @@ def _input_inventory_list(root, exclude=(MANIFEST_NAME,)):
     ]
 
 
+def canonicalize_parent_inventory(value, description):
+    """Return a strict path-sorted parent inventory.
+
+    The historical MASSIVE builder emitted a depth-first list: a file directly
+    under ``train/`` precedes files under its nested dataset directory.  This
+    union builder enumerates the same immutable files in globally sorted path
+    order.  List order is not scientific identity, so compare a canonical
+    path-keyed representation while continuing to reject malformed, duplicate,
+    unsafe, missing, extra, size-changed, or hash-changed entries.
+    """
+    if not isinstance(value, list):
+        raise ValueError(f"{description} must be a list")
+    normalized = []
+    seen = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict) or set(entry) != {
+            "path", "size_bytes", "sha256"
+        }:
+            raise ValueError(f"{description} entry {index} has invalid schema")
+        path = entry["path"]
+        size = entry["size_bytes"]
+        digest = entry["sha256"]
+        if (
+            not isinstance(path, str)
+            or not path
+            or path == MANIFEST_NAME
+            or path.startswith("/")
+            or "\\" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            raise ValueError(f"{description} entry {index} has an unsafe path")
+        if path in seen:
+            raise ValueError(f"{description} repeats path {path}")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError(f"{description} entry {index} has invalid size")
+        validate_sha256(digest, f"{description} entry {index} hash")
+        seen.add(path)
+        normalized.append(
+            {"path": path, "size_bytes": size, "sha256": digest}
+        )
+    return sorted(normalized, key=lambda entry: entry["path"])
+
+
 def parse_jsonl_bytes(raw, description):
     rows = []
     try:
@@ -641,8 +684,13 @@ def load_massive_data_root(root):
         raise ValueError("MASSIVE parent manifest failed its integrity seal")
     if manifest.get("schema_version") != 1:
         raise ValueError("MASSIVE parent manifest schema drift")
-    observed_inventory = _input_inventory_list(root)
-    if observed_inventory != manifest.get("file_inventory"):
+    observed_inventory = canonicalize_parent_inventory(
+        _input_inventory_list(root), "observed MASSIVE parent inventory"
+    )
+    expected_inventory = canonicalize_parent_inventory(
+        manifest.get("file_inventory"), "sealed MASSIVE parent inventory"
+    )
+    if observed_inventory != expected_inventory:
         raise ValueError("MASSIVE parent inventory differs from its sealed manifest")
 
     training = manifest.get("training_subset", {})
