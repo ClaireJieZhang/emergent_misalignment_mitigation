@@ -33,6 +33,19 @@ class Wave2ProtocolTests(unittest.TestCase):
             audit.COMPOSITION_METHODS,
             ("ordinary_quorum_m4_q3", "ordinary_min_m4_q4", "delta_min_m4_q4"),
         )
+        self.assertEqual(
+            audit.INITIAL_WAVE2_COMMIT,
+            "0d46633a224ef9e683117ceab33d846f88602814",
+        )
+        self.assertEqual(audit.wave3_protocol.preparation.SUBSET_CONTRACT_REVISION, 2)
+        self.assertEqual(
+            set(audit.SUBSET_REPAIR_FILES),
+            {
+                "scripts/audit_massive_medical_union_wave2.py",
+                "tests/test_massive_medical_union_wave2.py",
+                *audit.COMPOSITION_PREREG_FILES,
+            },
+        )
 
     def test_jobs_table_is_exact_once_and_exact_budget(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -49,6 +62,42 @@ class Wave2ProtocolTests(unittest.TestCase):
             path.write_text(path.read_text() + "evaluate\t104\t15\ttrue\n")
             with self.assertRaisesRegex(ValueError, "stage/job|order/bytes"):
                 audit.parse_jobs(path)
+
+    def test_repository_lineage_allows_only_the_exact_prospective_subset_repair(self):
+        repair_commit = "f" * 40
+        all_added = (*audit.WAVE2_FILES, *audit.COMPOSITION_PREREG_FILES)
+
+        def fake_git(_repo, *args):
+            if args == ("rev-parse", "HEAD"):
+                return repair_commit
+            if args == ("status", "--porcelain"):
+                return ""
+            if args == ("rev-list", "--parents", "-n", "1", repair_commit):
+                return f"{repair_commit} {audit.INITIAL_WAVE2_COMMIT}"
+            if args == (
+                "rev-list", "--parents", "-n", "1", audit.INITIAL_WAVE2_COMMIT
+            ):
+                return f"{audit.INITIAL_WAVE2_COMMIT} {audit.PARENT_COMMIT}"
+            if args[:3] == ("diff", "--name-status", "--no-renames"):
+                comparison = args[3]
+                if comparison == f"{audit.PARENT_COMMIT}..{audit.INITIAL_WAVE2_COMMIT}":
+                    return "\n".join(f"A\t{path}" for path in all_added)
+                if comparison == f"{audit.INITIAL_WAVE2_COMMIT}..{repair_commit}":
+                    return "\n".join(f"M\t{path}" for path in audit.SUBSET_REPAIR_FILES)
+                if comparison == f"{audit.PARENT_COMMIT}..{repair_commit}":
+                    return "\n".join(f"A\t{path}" for path in all_added)
+            raise AssertionError(args)
+
+        with mock.patch.object(audit, "REPO_ROOT", ROOT), \
+             mock.patch.object(audit, "git", side_effect=fake_git), \
+             mock.patch.object(audit, "require_regular_hash", return_value="a" * 64), \
+             mock.patch.object(audit.subprocess, "run"):
+            result = audit.audit_repository()
+        self.assertEqual(result["initial_wave2_commit"], audit.INITIAL_WAVE2_COMMIT)
+        self.assertEqual(result["prospective_subset_repair_commit"], repair_commit)
+        self.assertEqual(
+            result["composition_preregistration"]["subset_contract_revision"], 2
+        )
 
     def test_dependency_normalization_supports_held_and_fulfilled_forms(self):
         for value in (

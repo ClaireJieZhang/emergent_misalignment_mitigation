@@ -41,7 +41,17 @@ def audit_protocol(output_root, massive_root, union_root):
     seal = preparation.verify_seal(manifest, "Wave-3 protocol manifest")
     _require_equal(manifest.get("schema_version"), preparation.SCHEMA_VERSION, "schema")
     _require_equal(manifest.get("protocol_id"), preparation.PROTOCOL_ID, "protocol ID")
+    _require_equal(
+        manifest.get("subset_contract_revision"),
+        preparation.SUBSET_CONTRACT_REVISION,
+        "subset contract revision",
+    )
     _require_equal(manifest.get("prospective"), True, "prospective flag")
+    _require_equal(
+        manifest.get("prospective_subset_repair"),
+        preparation.prospective_subset_repair_registry(),
+        "prospective subset repair",
+    )
     _require_equal(manifest.get("methods"), preparation.method_registry(), "method registry")
     _require_equal(
         manifest.get("generation"), preparation.generation_registry(), "generation registry"
@@ -65,8 +75,8 @@ def audit_protocol(output_root, massive_root, union_root):
     _require_equal(observed_paths, EXPECTED_ARTIFACT_PATHS, "protocol artifact paths")
 
     (
-        dev_prompts,
-        dev_answers,
+        unused_rows,
+        prompt_prefix,
         test_prompts,
         test_answers,
         medical_source,
@@ -75,25 +85,31 @@ def audit_protocol(output_root, massive_root, union_root):
     _require_equal(
         manifest.get("source_bindings"), source_bindings, "current parent-data bindings"
     )
-    smoke_prompts, smoke_answers, smoke_selection = preparation.balanced_subset(
-        dev_prompts,
-        dev_answers,
-        preparation.SMOKE_PER_INTENT,
-        "dev",
-        preparation.SMOKE_SEED,
+    smoke_prompts, smoke_answers, smoke_selection = preparation.smoke_subset(
+        unused_rows,
+        prompt_prefix,
+        test_prompts["meta"]["intent_labels"],
+        test_prompts["meta"]["slot_labels"],
+        test_prompts["meta"]["ontology_sha256"],
     )
     confirmation_prompts, confirmation_answers, confirmation_selection = (
-        preparation.balanced_subset(
-            test_prompts,
-            test_answers,
-            preparation.CONFIRMATION_PER_INTENT,
-            "sealed_test",
-            preparation.CONFIRMATION_SEED,
-        )
+        preparation.confirmation_subset(test_prompts, test_answers)
     )
+    smoke_norms = {
+        row["normalized_utterance_sha256"] for row in smoke_answers["answers"]
+    }
+    confirmation_norms = {
+        row["normalized_utterance_sha256"]
+        for row in confirmation_answers["answers"]
+    }
+    _require_equal(smoke_norms & confirmation_norms, set(), "subset overlap")
     _require_equal(
         manifest.get("subsets"),
-        {"smoke": smoke_selection, "confirmation": confirmation_selection},
+        {
+            "smoke": smoke_selection,
+            "confirmation": confirmation_selection,
+            "smoke_confirmation_normalized_overlap": 0,
+        },
         "deterministic subset selections",
     )
     artifact_expectations = {
@@ -109,6 +125,31 @@ def audit_protocol(output_root, massive_root, union_root):
         )
         _require_equal(observed, expected, f"Wave-3 {relative}")
 
+    _require_equal(smoke_selection.get("rows"), preparation.SMOKE_ROWS, "smoke rows")
+    _require_equal(
+        smoke_selection.get("intent_counts"),
+        {intent: 1 for intent in smoke_selection["intent_order"]},
+        "one smoke row per intent",
+    )
+    if (
+        smoke_selection.get("training_disjoint") is not True
+        or len(set(smoke_selection.get("source_ids", []))) != preparation.SMOKE_ROWS
+    ):
+        raise ValueError("Wave-3 smoke is not exactly training-disjoint and unique")
+    _require_equal(
+        confirmation_selection.get("rows"),
+        preparation.CONFIRMATION_ROWS,
+        "confirmation rows",
+    )
+    if (
+        confirmation_selection.get("label_blind_selection") is not True
+        or len(set(confirmation_selection.get("question_ids", [])))
+        != preparation.CONFIRMATION_ROWS
+        or sum(confirmation_selection.get("intent_counts", {}).values())
+        != preparation.CONFIRMATION_ROWS
+    ):
+        raise ValueError("Wave-3 confirmation is not exactly 600 label-blind unique rows")
+
     expected_medical_ids = [
         f"medical_official16_{index:02d}"
         for index in range(preparation.MEDICAL_PROMPTS)
@@ -123,11 +164,13 @@ def audit_protocol(output_root, massive_root, union_root):
     )
     return {
         "protocol_id": preparation.PROTOCOL_ID,
+        "subset_contract_revision": preparation.SUBSET_CONTRACT_REVISION,
         "manifest_raw_sha256": preparation.sha256_bytes(manifest_raw),
         "manifest_payload_sha256": seal,
         "method_ids": [item["method_id"] for item in preparation.method_registry()],
         "smoke_rows": smoke_selection["rows"],
         "confirmation_rows": confirmation_selection["rows"],
+        "confirmation_intent_coverage": confirmation_selection["intent_coverage"],
         "medical_samples_per_method": (
             preparation.MEDICAL_PROMPTS * preparation.MEDICAL_SAMPLES_PER_PROMPT
         ),

@@ -74,6 +74,7 @@ WAVE1_SUMMARY = WAVE1_EVAL / "component_gate/summary.json"
 WAVE1_GO = WAVE1_CONTROL / "GO_MASSIVE_UNION_WAVE1"
 
 PARENT_COMMIT = "b704a00918bc7a9ddabc512795de4f81d3934c1a"
+INITIAL_WAVE2_COMMIT = "0d46633a224ef9e683117ceab33d846f88602814"
 WAVE1_JUDGMENTS_SHA256 = "359a8e2351c855bceaea8400cb97a32f62a82f64f7b13b09839a120746a94ca2"
 WAVE1_SUMMARY_PAYLOAD_SHA256 = "bf466ec37d6d8d32be2d6a075ec164aace5fe485378265be42b71af976986749"
 
@@ -110,6 +111,11 @@ COMPOSITION_PREREG_FILES = (
     "scripts/prepare_massive_medical_union_wave3_protocol.py",
     "scripts/audit_massive_medical_union_wave3_protocol.py",
     "tests/test_massive_medical_union_wave3_protocol.py",
+)
+SUBSET_REPAIR_FILES = (
+    "scripts/audit_massive_medical_union_wave2.py",
+    "tests/test_massive_medical_union_wave2.py",
+    *COMPOSITION_PREREG_FILES,
 )
 COMPOSITION_PROTOCOL = "massive_medical_union_wave3_composition_v1"
 COMPOSITION_METHODS = (
@@ -229,21 +235,46 @@ def audit_repository():
     if git(REPO_ROOT, "status", "--porcelain"):
         raise ValueError("Wave-2 checkout is dirty")
     parents = git(REPO_ROOT, "rev-list", "--parents", "-n", "1", commit).split()
-    if parents != [commit, PARENT_COMMIT]:
-        raise ValueError("Wave-2 commit is not a direct nonmerge child of b704a00")
-    raw_diff = git(
+    if parents != [commit, INITIAL_WAVE2_COMMIT]:
+        raise ValueError("Wave-2 repair is not a direct nonmerge child of the initial Wave-2 commit")
+    initial_parents = git(
+        REPO_ROOT, "rev-list", "--parents", "-n", "1", INITIAL_WAVE2_COMMIT
+    ).split()
+    if initial_parents != [INITIAL_WAVE2_COMMIT, PARENT_COMMIT]:
+        raise ValueError("Initial Wave-2 commit is not a direct nonmerge child of b704a00")
+    initial_raw_diff = git(
+        REPO_ROOT, "diff", "--name-status", "--no-renames",
+        f"{PARENT_COMMIT}..{INITIAL_WAVE2_COMMIT}",
+    )
+    initial_diff = set()
+    for line in initial_raw_diff.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise ValueError("invalid initial Wave-2 name-status record")
+        initial_diff.add(tuple(fields))
+    expected_diff = {("A", path) for path in (*WAVE2_FILES, *COMPOSITION_PREREG_FILES)}
+    if initial_diff != expected_diff or len(initial_raw_diff.splitlines()) != len(expected_diff):
+        raise ValueError("Initial Wave-2 commit differs from the exact new-file allowlist")
+    repair_raw_diff = git(
+        REPO_ROOT, "diff", "--name-status", "--no-renames",
+        f"{INITIAL_WAVE2_COMMIT}..{commit}",
+    )
+    repair_diff = set()
+    for line in repair_raw_diff.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise ValueError("invalid prospective subset-repair name-status record")
+        repair_diff.add(tuple(fields))
+    expected_repair = {("M", path) for path in SUBSET_REPAIR_FILES}
+    if repair_diff != expected_repair or len(repair_raw_diff.splitlines()) != len(expected_repair):
+        raise ValueError("Prospective subset repair differs from its exact modification allowlist")
+    aggregate_raw_diff = git(
         REPO_ROOT, "diff", "--name-status", "--no-renames",
         f"{PARENT_COMMIT}..{commit}",
     )
-    observed_diff = set()
-    for line in raw_diff.splitlines():
-        fields = line.split("\t")
-        if len(fields) != 2:
-            raise ValueError("invalid Wave-2 commit name-status record")
-        observed_diff.add(tuple(fields))
-    expected_diff = {("A", path) for path in (*WAVE2_FILES, *COMPOSITION_PREREG_FILES)}
-    if observed_diff != expected_diff or len(raw_diff.splitlines()) != len(expected_diff):
-        raise ValueError("Wave-2 commit differs from the exact new-file allowlist")
+    aggregate_diff = {tuple(line.split("\t")) for line in aggregate_raw_diff.splitlines()}
+    if aggregate_diff != expected_diff or len(aggregate_raw_diff.splitlines()) != len(expected_diff):
+        raise ValueError("Repaired Wave-2 tree differs from the exact aggregate allowlist")
     for relative, expected in FROZEN_SHA256.items():
         require_regular_hash(REPO_ROOT / relative, expected)
         subprocess.run(
@@ -259,13 +290,18 @@ def audit_repository():
         "repo_root": os.fspath(REPO_ROOT),
         "repo_commit": commit,
         "parent_commit": PARENT_COMMIT,
+        "initial_wave2_commit": INITIAL_WAVE2_COMMIT,
+        "prospective_subset_repair_commit": commit,
         "frozen_parent_science_sha256": dict(FROZEN_SHA256),
         "wave2_workflow_sha256": workflow,
         "composition_preregistration": {
             "protocol": COMPOSITION_PROTOCOL,
             "schema_version": 1,
+            "subset_contract_revision": 2,
             "ordered_methods": list(COMPOSITION_METHODS),
             "file_sha256": prereg,
+            "prospective_subset_repair": True,
+            "repair_modified_files": list(SUBSET_REPAIR_FILES),
             "wave3_automatically_released": False,
         },
     }
@@ -314,6 +350,7 @@ def audit_realized_composition_protocol():
     )
     if (
         result.get("protocol_id") != COMPOSITION_PROTOCOL
+        or result.get("subset_contract_revision") != 2
         or result.get("method_ids") != list(COMPOSITION_METHODS)
         or result.get("smoke_rows") != 60
         or result.get("confirmation_rows") != 600

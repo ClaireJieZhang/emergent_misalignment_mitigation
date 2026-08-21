@@ -3,8 +3,15 @@
 Protocol ID: `massive_medical_union_wave3_composition_v1`
 
 Schema: `1`
+Subset contract revision: `2`
 Status: frozen prospectively after the sealed Wave-1 component GO and before
-any Wave-3 composition output. Wave 2 and Wave 3 remain separately gated.
+any Wave-2 job/model output or Wave-3 composition output. Wave 2 and Wave 3
+remain separately gated. Revision 2 repairs an infeasible row-source
+assumption discovered during CPU-only materialization: the official English
+development split contains zero `audio_volume_other` examples, while the
+cleaned test contains zero `cooking_query` examples and cannot supply ten rows
+for every intent. No model output was inspected, and this repair changes no
+method, generation profile, gate, or budget.
 
 ## Claim and panel
 
@@ -106,25 +113,51 @@ The CPU-only preparer
 output before any composition generation. It reads the already sealed MASSIVE
 and union roots and cannot read model outputs.
 
-The development smoke contains exactly 60 rows: one deterministic row from
-each of the 60 intents. The confirmation contains exactly 600
-training-disjoint, prospectively frozen cleaned-test rows: ten deterministic
-rows from each intent. This benchmark test has prior direct-model evaluation,
-and Wave 2 evaluates the direct panel on its full 2,965 rows; it is therefore
-not described as unseen or untouched. It has not been used for composition
-generation or composition selection. Within an intent, selection takes the
-lowest SHA-256 ranks of the canonical tuple
+The smoke contains exactly 60 training-disjoint rows, one from each intent. Its
+source is the unused complement of the sealed MASSIVE training subset. The
+preparer binds the pinned raw `sources/en-US.jsonl` and
+`train/selection_record.json`, repeats the parent's exact within-split
+deduplication, train-versus-development/test overlap removal, and medical-like
+filter, and independently recomputes the deterministic 1,122-row SFT selection.
+Only then does it remove those exact 1,122 IDs from the 11,357-row eligible
+pool, yielding 10,235 unused rows. This pool covers all 60 intents (the smallest
+stratum, `cooking_query`, has three rows) and has zero source-ID or normalized-
+utterance overlap with SFT, development, or cleaned test. Within each intent,
+the smoke takes the lowest SHA-256 rank of the label-aware but prediction-free
+canonical tuple
 
 ```text
-(protocol_id, split, frozen_seed, intent, question_id, prompt_sha256)
+(protocol_id, subset_contract_revision, pool_id, frozen_seed,
+ intent, source_id, prompt_sha256)
 ```
 
-and output order is ontology order followed by rank. The fixed seeds are
-`2026081901` for development and `2026081902` for cleaned test. This rule uses
-no model prediction or per-example difficulty. The sealed output records every
-question ID, ordered-ID hash, prompt hash, answer hash, source-file hash, parent
-manifest hash, and exact 60/600 balance. Gold answers remain in separate files
-and are never supplied to a sampler.
+and outputs one row in ontology order.
+
+The confirmation is exactly 600 prospectively frozen rows sampled from all
+2,965 cleaned-test prompts. It selects the globally lowest SHA-256 ranks of
+
+```text
+(protocol_id, subset_contract_revision, pool_id, frozen_seed,
+ question_id, prompt_sha256)
+```
+
+before joining gold answers by question ID. Intent, slots, and every other gold
+field are absent from the rank. The selection is therefore unstratified and
+does not impose gold-label balancing; its realized class mix need not exactly
+match the full cleaned test. The sealed manifest records the realized intent
+counts and coverage without changing the selection. This benchmark test has
+prior direct-model evaluation, and Wave 2 evaluates the direct panel on its
+full 2,965 rows; it is
+therefore not described as unseen or untouched. It has not been used for
+composition generation or composition selection.
+
+The fixed seeds remain `2026081901` for the unused-training smoke and
+`2026081902` for cleaned-test confirmation. Neither rule uses model prediction
+or per-example difficulty. The sealed output records every source/question ID,
+ordered-ID hashes, prompt and answer hashes, the pinned source and selection-
+record hashes, parent-manifest hashes, exact pool-rederivation counts, all zero-
+overlap checks, and the exact 60/600 sizes. Gold answers remain in separate
+files and are never supplied to a sampler.
 
 The cost bank remains the frozen answer-free official16 artifact with SHA-256
 `1a806197a653fe1e98ead57e0b5b1ed617419e609cd7712e1a9b9ee439d8cc57`.
@@ -174,8 +207,8 @@ zero, model identity is hidden, and a local proxy cannot satisfy the gate.
 
 ## Smoke gate
 
-All three registered methods run on the same 60-row development smoke. Every
-method must independently have:
+All three registered methods run on the same 60-row training-disjoint
+unused-official-train smoke. Every method must independently have:
 
 - structured validity exactly 1.0;
 - zero truncations;
