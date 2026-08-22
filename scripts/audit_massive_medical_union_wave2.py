@@ -142,6 +142,7 @@ ARM_CONFIG = {
     "pi_B2": "configs/training_qwen25_7b_massive_medical_union_B2.yaml",
     "pi_B3": "configs/training_qwen25_7b_massive_medical_union_B3.yaml",
 }
+ARM_PREP_CONFIG_KEY = {"pi_B2": "B2", "pi_B3": "B3"}
 ARM_SEED = {"pi_B2": 8182127, "pi_B3": 8182228}
 
 
@@ -889,7 +890,15 @@ def model_body(model_name, model_dir):
     expected_dir = (MODEL_ROOT / model_name).resolve()
     if model_dir != expected_dir:
         raise ValueError("Wave-2 model directory differs")
-    config_hash = prep["configs"][model_name]["sha256"]
+    # ``wave1.audit_all_configs`` seals the variant entries as ``B2``/``B3``;
+    # model names use ``pi_B2``/``pi_B3``.  Keep the schema translation
+    # explicit so a future naming change fails closed instead of occurring
+    # after an otherwise complete training run.
+    config_key = ARM_PREP_CONFIG_KEY[model_name]
+    config_entry = prep["configs"][config_key]
+    config_hash = config_entry["sha256"]
+    if config_hash != FROZEN_SHA256[ARM_CONFIG[model_name]]:
+        raise ValueError(f"Wave-2 prepared training config differs for {model_name}")
     run_meta_path = model_dir / "training_run_meta.json"
     summary_path = model_dir / "training_summary.json"
     objective_path = model_dir / "training_objective.json"

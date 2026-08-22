@@ -22,6 +22,9 @@ class Wave2ProtocolTests(unittest.TestCase):
         self.assertEqual(audit.MAX_GPU_COST_USD, 1.125)
         self.assertEqual(audit.ARM_SEED, {"pi_B2": 8182127, "pi_B3": 8182228})
         self.assertEqual(
+            audit.ARM_PREP_CONFIG_KEY, {"pi_B2": "B2", "pi_B3": "B3"}
+        )
+        self.assertEqual(
             audit.FROZEN_SHA256["configs/training_qwen25_7b_massive_medical_union_B2.yaml"],
             "bf3b5fa7249ea69f0e4e4030145885caaf144906421a8d3ada96bb9c828d2c87",
         )
@@ -45,6 +48,61 @@ class Wave2ProtocolTests(unittest.TestCase):
                 "tests/test_massive_medical_union_wave2.py",
                 *audit.COMPOSITION_PREREG_FILES,
             },
+        )
+
+    def test_model_manifest_uses_actual_preparation_config_schema(self):
+        prep = {
+            "configs": {
+                "pi_A_pi_B1": {"sha256": "unused"},
+                "B2": {
+                    "sha256": audit.FROZEN_SHA256[audit.ARM_CONFIG["pi_B2"]]
+                },
+                "B3": {
+                    "sha256": audit.FROZEN_SHA256[audit.ARM_CONFIG["pi_B3"]]
+                },
+            },
+            "local_model_snapshot": {},
+            "union_data_manifest": {"sha256": "u", "payload_sha256": "p"},
+            "repository": {"repo_commit": "r"},
+        }
+        run_meta = {
+            "n_examples": 32367,
+            "seed": 8182127,
+            "data_seed": 8182127,
+            "max_steps": 540,
+            "loss_on": "completion",
+            "dataset": str(audit.DATA_ROOT / "train/B_massive_good_medical"),
+            "dataset_fingerprint": "dfp",
+            "base_model_load": {},
+        }
+        summary = {
+            "final_global_step": 540,
+            "n_examples": 32367,
+            "loss_on": "completion",
+        }
+        manifest = {
+            "arms": {"B": {"dataset_fingerprint": "dfp", "dataset_logical_sha256": "logical"}}
+        }
+
+        def fake_load(path):
+            name = Path(path).name
+            if name == "training_run_meta.json":
+                return run_meta
+            if name == "training_summary.json":
+                return summary
+            if name == "data_manifest.json":
+                return manifest
+            raise AssertionError(path)
+
+        with mock.patch.object(audit, "audit_prep", return_value=prep), \
+             mock.patch.object(audit, "load_json", side_effect=fake_load), \
+             mock.patch.object(audit.wave1, "audit_training_snapshot_binding"), \
+             mock.patch.object(audit.wave1, "adapter_artifacts", return_value=[]), \
+             mock.patch.object(audit.wave1, "file_inventory", return_value=[]), \
+             mock.patch.object(audit, "sha256_file", return_value="h"):
+            body = audit.model_body("pi_B2", audit.MODEL_ROOT / "pi_B2")
+        self.assertEqual(
+            body["training_config_sha256"], prep["configs"]["B2"]["sha256"]
         )
 
     def test_jobs_table_is_exact_once_and_exact_budget(self):
