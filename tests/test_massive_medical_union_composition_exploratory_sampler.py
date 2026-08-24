@@ -2,6 +2,7 @@
 """No-network, no-GPU tests for the exploratory composition sampler."""
 
 import contextlib
+import io
 import importlib.util
 import json
 import os
@@ -106,6 +107,99 @@ class FakeTokenizer:
     def encode(self, text, add_special_tokens=False):
         self.encoded = (text, add_special_tokens)
         return [4]
+
+
+class TinyPinnedSnapshot:
+    """Small Hugging Face cache with the same pinned snapshot/link topology."""
+
+    def __init__(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.hub = os.path.join(self.temporary.name, "hub")
+        self.model_cache = os.path.join(self.hub, sampler.BASE_CACHE_DIRECTORY)
+        self.blobs = os.path.join(self.model_cache, "blobs")
+        self.snapshot = os.path.join(
+            self.model_cache, "snapshots", sampler.BASE_REVISION
+        )
+        os.makedirs(self.blobs)
+        os.makedirs(self.snapshot)
+        self.runtime_payloads = {
+            "config.json": b'{"model_type":"qwen2"}',
+            "generation_config.json": b'{"eos_token_id":1}',
+            "tokenizer_config.json": b'{"chat_template":"tiny"}',
+            "tokenizer.json": b'{"version":"1.0"}',
+            "vocab.json": b'{"token":0}',
+            "merges.txt": b"#version: 0.2\n",
+        }
+        self.runtime = tuple(
+            (name, len(raw), sampler.sha256_bytes(raw))
+            for name, raw in self.runtime_payloads.items()
+        )
+        self.shard_payloads = [f"tiny-shard-{index}".encode() for index in range(4)]
+        self.shards = tuple(
+            (
+                f"model-{index + 1:05d}-of-00004.safetensors",
+                len(payload),
+                sampler.sha256_bytes(payload),
+            )
+            for index, payload in enumerate(self.shard_payloads)
+        )
+        index_payload = {
+            "metadata": {"total_size": sum(len(item) for item in self.shard_payloads)},
+            "weight_map": {
+                f"tensor.{index}": artifact[0]
+                for index, artifact in enumerate(self.shards)
+            },
+        }
+        self.index_raw = sampler.canonical_bytes(index_payload)
+        self.index = (
+            "model.safetensors.index.json",
+            len(self.index_raw),
+            sampler.sha256_bytes(self.index_raw),
+        )
+        for name, raw in self.runtime_payloads.items():
+            self._install(name, raw)
+        self._install(self.index[0], self.index_raw)
+        for artifact, payload in zip(self.shards, self.shard_payloads):
+            self._install(artifact[0], payload)
+
+    def cleanup(self):
+        self.temporary.cleanup()
+
+    def _install(self, name, raw):
+        blob = os.path.join(self.blobs, sampler.sha256_bytes(raw))
+        with open(blob, "wb") as handle:
+            handle.write(raw)
+        os.symlink(os.path.relpath(blob, self.snapshot), os.path.join(self.snapshot, name))
+
+    @contextlib.contextmanager
+    def patched(self, transformers_cache=None, index=None):
+        environment = {
+            "HUGGINGFACE_HUB_CACHE": self.hub,
+            "TRANSFORMERS_CACHE": (
+                self.hub if transformers_cache is None else transformers_cache
+            ),
+        }
+        with (
+            mock.patch.object(
+                sampler, "BASE_SAFETENSORS_INDEX", self.index if index is None else index
+            ),
+            mock.patch.object(sampler, "BASE_RUNTIME_ARTIFACTS", self.runtime),
+            mock.patch.object(sampler, "BASE_SAFETENSORS_SHARDS", self.shards),
+            mock.patch.object(
+                sampler, "BASE_SAFETENSORS_INDEX_ENTRIES", len(self.shards)
+            ),
+            mock.patch.object(
+                sampler,
+                "BASE_INDEXED_WEIGHT_BYTES",
+                sum(len(item) for item in self.shard_payloads),
+            ),
+            mock.patch.dict(os.environ, environment, clear=False),
+        ):
+            yield
+
+    def resolve(self):
+        with self.patched():
+            return sampler.resolve_pinned_base_snapshot()
 
 
 def tiny_profile(**overrides):
@@ -647,6 +741,230 @@ class SealAndResumeTests(unittest.TestCase):
         self.assertIsNone(body["projected_confirmation_seconds"])
 
 
+class PinnedBaseSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = TinyPinnedSnapshot()
+
+    def tearDown(self):
+        self.fixture.cleanup()
+
+    def test_resolver_hashes_and_seals_exact_index_and_four_shards(self):
+        binding = self.fixture.resolve()
+        body = sampler.verify_seal(
+            binding, sampler.BASE_SNAPSHOT_SEAL_FIELD, "test snapshot"
+        )
+        self.assertEqual(
+            set(body),
+            {
+                "schema_version",
+                "protocol",
+                "model_id",
+                "revision",
+                "hub_cache",
+                "snapshot_path",
+                "runtime_artifacts",
+                "safetensors_index",
+                "safetensors_shards",
+            },
+        )
+        self.assertEqual(body["snapshot_path"], self.fixture.snapshot)
+        self.assertEqual(
+            [entry["path"] for entry in body["runtime_artifacts"]],
+            [entry[0] for entry in self.fixture.runtime],
+        )
+        self.assertEqual(body["safetensors_index"]["path"], self.fixture.index[0])
+        self.assertEqual(
+            [entry["path"] for entry in body["safetensors_shards"]],
+            [entry[0] for entry in self.fixture.shards],
+        )
+        with self.fixture.patched():
+            self.assertEqual(
+                sampler.verify_pinned_base_snapshot(binding), self.fixture.snapshot
+            )
+
+    def test_partial_legacy_cache_is_rejected_without_fallback(self):
+        legacy = os.path.join(self.fixture.temporary.name, "legacy-partial")
+        os.makedirs(legacy)
+        with self.fixture.patched(transformers_cache=legacy):
+            with self.assertRaisesRegex(ValueError, "TRANSFORMERS_CACHE conflicts"):
+                sampler.resolve_pinned_base_snapshot()
+
+    def test_partial_hub_snapshot_is_not_resolved_from_any_fallback(self):
+        partial_hub = os.path.join(self.fixture.temporary.name, "partial-hub")
+        partial_snapshot = os.path.join(
+            partial_hub,
+            sampler.BASE_CACHE_DIRECTORY,
+            "snapshots",
+            sampler.BASE_REVISION,
+        )
+        os.makedirs(partial_snapshot)
+        os.makedirs(
+            os.path.join(partial_hub, sampler.BASE_CACHE_DIRECTORY, "blobs")
+        )
+        with open(os.path.join(partial_snapshot, "config.json"), "wb") as handle:
+            handle.write(b"partial")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HUGGINGFACE_HUB_CACHE": partial_hub,
+                "TRANSFORMERS_CACHE": partial_hub,
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "shard paths differ"):
+                sampler.resolve_pinned_base_snapshot()
+
+    def test_missing_and_extra_shards_fail_closed(self):
+        missing = os.path.join(self.fixture.snapshot, self.fixture.shards[-1][0])
+        os.unlink(missing)
+        with self.fixture.patched():
+            with self.assertRaisesRegex(ValueError, "shard paths differ"):
+                sampler.resolve_pinned_base_snapshot()
+        self.fixture._install(
+            self.fixture.shards[-1][0], self.fixture.shard_payloads[-1]
+        )
+        with open(os.path.join(self.fixture.snapshot, "extra.safetensors"), "wb") as handle:
+            handle.write(b"extra")
+        with self.fixture.patched():
+            with self.assertRaisesRegex(ValueError, "shard paths differ"):
+                sampler.resolve_pinned_base_snapshot()
+
+    def test_missing_safetensors_index_fails_closed(self):
+        os.unlink(os.path.join(self.fixture.snapshot, self.fixture.index[0]))
+        with self.fixture.patched():
+            with self.assertRaisesRegex(ValueError, "snapshot is missing"):
+                sampler.resolve_pinned_base_snapshot()
+
+    def test_wrong_shard_content_and_escape_path_fail_closed(self):
+        first_path = os.path.join(self.fixture.snapshot, self.fixture.shards[0][0])
+        first_blob = os.path.realpath(first_path)
+        with open(first_blob, "wb") as handle:
+            handle.write(b"wrong")
+        with self.fixture.patched():
+            with self.assertRaisesRegex(ValueError, "artifact differs"):
+                sampler.resolve_pinned_base_snapshot()
+
+        self.fixture.cleanup()
+        self.fixture = TinyPinnedSnapshot()
+        first_path = os.path.join(self.fixture.snapshot, self.fixture.shards[0][0])
+        os.unlink(first_path)
+        outside = os.path.join(self.fixture.temporary.name, "outside")
+        with open(outside, "wb") as handle:
+            handle.write(self.fixture.shard_payloads[0])
+        os.symlink(outside, first_path)
+        with self.fixture.patched():
+            with self.assertRaisesRegex(ValueError, "escapes its blob cache"):
+                sampler.resolve_pinned_base_snapshot()
+
+    def test_config_or_tokenizer_drift_fails_before_loader(self):
+        for name in ("config.json", "tokenizer.json"):
+            fixture = TinyPinnedSnapshot()
+            try:
+                target = os.path.realpath(os.path.join(fixture.snapshot, name))
+                with open(target, "wb") as handle:
+                    handle.write(b"drift")
+                with fixture.patched():
+                    with self.assertRaisesRegex(ValueError, "artifact differs"):
+                        sampler.resolve_pinned_base_snapshot()
+            finally:
+                fixture.cleanup()
+
+    def test_index_cannot_name_wrong_or_nested_shard_path(self):
+        index_path = os.path.realpath(
+            os.path.join(self.fixture.snapshot, self.fixture.index[0])
+        )
+        payload = {
+            "metadata": {},
+            "weight_map": {
+                "tensor.0": "../model-00001-of-00004.safetensors",
+                **{
+                    f"tensor.{index}": artifact[0]
+                    for index, artifact in enumerate(self.fixture.shards[1:], start=1)
+                },
+            },
+        }
+        raw = sampler.canonical_bytes(payload)
+        with open(index_path, "wb") as handle:
+            handle.write(raw)
+        updated_index = (
+            self.fixture.index[0], len(raw), sampler.sha256_bytes(raw)
+        )
+        with self.fixture.patched(index=updated_index):
+            with self.assertRaisesRegex(ValueError, "index shard map differs"):
+                sampler.resolve_pinned_base_snapshot()
+
+    def test_tokenizer_config_and_model_use_only_audited_snapshot_path(self):
+        binding = self.fixture.resolve()
+        tokenizer = SimpleNamespace(eos_token_id=1)
+        model_config = SimpleNamespace(vocab_size=8)
+        tokenizer_loader = mock.Mock(return_value=tokenizer)
+        config_loader = mock.Mock(return_value=model_config)
+        fake_transformers = SimpleNamespace(
+            PreTrainedTokenizerFast=SimpleNamespace(from_pretrained=tokenizer_loader),
+            AutoConfig=SimpleNamespace(from_pretrained=config_loader),
+        )
+        profile = {"intent_labels": ["intent"], "slot_labels": ["slot"]}
+        with (
+            mock.patch.dict(sys.modules, {"transformers": fake_transformers}),
+            mock.patch.object(
+                sampler, "compile_and_audit_xgrammar", return_value={"factory": object()}
+            ),
+            self.fixture.patched(),
+        ):
+            observed = sampler.load_tokenizer_and_grammar(profile, binding)
+        self.assertIs(observed[0], tokenizer)
+        tokenizer_loader.assert_called_once_with(
+            self.fixture.snapshot, local_files_only=True
+        )
+        config_loader.assert_called_once_with(
+            self.fixture.snapshot,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+
+        class FakeLoadedPeft:
+            def __init__(self):
+                self.peft_config = {"A": object()}
+                self.config = SimpleNamespace(use_cache=False)
+
+            def load_adapter(self, path, adapter_name, is_trainable):
+                del path, is_trainable
+                self.peft_config[adapter_name] = object()
+
+            def eval(self):
+                return self
+
+        loaded = FakeLoadedPeft()
+        model_loader = mock.Mock(return_value=object())
+        peft_loader = mock.Mock(return_value=loaded)
+        fake_transformers = SimpleNamespace(
+            AutoModelForCausalLM=SimpleNamespace(from_pretrained=model_loader)
+        )
+        fake_peft = SimpleNamespace(
+            PeftModel=SimpleNamespace(from_pretrained=peft_loader)
+        )
+        protocol = {
+            "references": {
+                name: {"model_path": f"/{name}"}
+                for name in sampler.MODEL_NAME_BY_ROLE.values()
+            }
+        }
+        with (
+            mock.patch.dict(
+                sys.modules, {"transformers": fake_transformers, "peft": fake_peft}
+            ),
+            self.fixture.patched(),
+        ):
+            self.assertIs(
+                sampler.load_shared_peft_model(protocol, "cuda:0", binding), loaded
+            )
+        args, kwargs = model_loader.call_args
+        self.assertEqual(args, (self.fixture.snapshot,))
+        self.assertNotIn("revision", kwargs)
+        self.assertTrue(kwargs["local_files_only"])
+        self.assertTrue(kwargs["use_safetensors"])
+
+
 class CpuPreflightTests(unittest.TestCase):
     def test_recorded_hybrid_and_whitespace_probe_contract_is_frozen(self):
         self.assertEqual(
@@ -669,8 +987,15 @@ class CpuPreflightTests(unittest.TestCase):
         self.assertIn("compile_json_schema(\n        schema_json, any_whitespace=True", source)
         auto_config_call = source.split("model_config = AutoConfig.from_pretrained(", 1)[1]
         auto_config_call = auto_config_call.split("\n    )", 1)[0]
-        self.assertIn("revision=BASE_REVISION", auto_config_call)
+        self.assertIn("snapshot_path", auto_config_call)
+        self.assertNotIn("BASE_MODEL", auto_config_call)
+        self.assertNotIn("revision=", auto_config_call)
         self.assertIn("local_files_only=True", auto_config_call)
+        model_call = source.split("base = AutoModelForCausalLM.from_pretrained(", 1)[1]
+        model_call = model_call.split("\n    )", 1)[0]
+        self.assertIn("snapshot_path", model_call)
+        self.assertNotIn("BASE_MODEL", model_call)
+        self.assertIn("use_safetensors=True", model_call)
 
     def test_preflight_audits_runtime_and_grammar_without_loading_weights(self):
         args = SimpleNamespace(
@@ -688,6 +1013,10 @@ class CpuPreflightTests(unittest.TestCase):
             slot_labels=["slot"],
         )
         records = [{"question_id": "q", "prompt_sha256": "a" * 64}]
+        base_snapshot = {
+            "snapshot_path": "/hub/models--Qwen/snapshots/revision",
+            sampler.BASE_SNAPSHOT_SEAL_FIELD: "e" * 64,
+        }
         grammar = {
             "schema_sha256": "f" * 64,
             "intent_leaves_checked": 1,
@@ -711,14 +1040,25 @@ class CpuPreflightTests(unittest.TestCase):
             ) as runtime,
             mock.patch.object(
                 sampler,
+                "resolve_pinned_base_snapshot",
+                return_value=base_snapshot,
+            ) as resolve_snapshot,
+            mock.patch.object(
+                sampler,
                 "load_tokenizer_and_grammar",
                 return_value=(object(), object(), grammar),
-            ),
+            ) as load_tokenizer,
             mock.patch.object(sampler, "load_shared_peft_model") as load_weights,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
         ):
             self.assertEqual(sampler.run_phase(args), 0)
         runtime.assert_called_once_with(require_cuda=False)
+        resolve_snapshot.assert_called_once_with()
+        load_tokenizer.assert_called_once_with(profile, base_snapshot)
         load_weights.assert_not_called()
+        self.assertEqual(
+            json.loads(stdout.getvalue())["base_model_snapshot"], base_snapshot
+        )
 
     @unittest.skipUnless(
         importlib.util.find_spec("xgrammar") is not None,

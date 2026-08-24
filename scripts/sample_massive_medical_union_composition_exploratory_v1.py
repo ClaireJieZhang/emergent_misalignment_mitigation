@@ -54,6 +54,70 @@ PINNED_TRANSFORMERS_VERSION = "4.57.6"
 PINNED_PEFT_VERSION = "0.18.1"
 BASE_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 BASE_REVISION = "bb46c15ee4bb56c5b63245ef50fd7637234d6f75"
+BASE_CACHE_DIRECTORY = "models--Qwen--Qwen2.5-7B-Instruct"
+BASE_SNAPSHOT_PROTOCOL = "qwen2_5_7b_instruct_local_snapshot_v1"
+BASE_SNAPSHOT_SEAL_FIELD = "snapshot_payload_sha256"
+BASE_RUNTIME_ARTIFACTS = (
+    (
+        "config.json",
+        663,
+        "7463bb0ea78315365e6c6b74de4e73bbcc8359dfb0c5a737584e077d42c0b03c",
+    ),
+    (
+        "generation_config.json",
+        243,
+        "3a8f9087e486054c8a4a08dae2e5a3ba62e23da212b5b8c08bc42cb983c3459f",
+    ),
+    (
+        "tokenizer_config.json",
+        7305,
+        "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583",
+    ),
+    (
+        "tokenizer.json",
+        7031645,
+        "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    ),
+    (
+        "vocab.json",
+        2776833,
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+    (
+        "merges.txt",
+        1671839,
+        "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+    ),
+)
+BASE_SAFETENSORS_INDEX = (
+    "model.safetensors.index.json",
+    27752,
+    "624bf7c47cd12468fdc16e38a47cf4f19e0415b859a223ba3c027eed2f0e1028",
+)
+BASE_SAFETENSORS_INDEX_ENTRIES = 339
+BASE_INDEXED_WEIGHT_BYTES = 15231233024
+BASE_SAFETENSORS_SHARDS = (
+    (
+        "model-00001-of-00004.safetensors",
+        3945441440,
+        "a1333e6293854747c481288ea83b348226af178dd565c49b6f9495ba1966aba7",
+    ),
+    (
+        "model-00002-of-00004.safetensors",
+        3864726352,
+        "f5d25a2772cb825164a2a2c0fb6d51a87e282abf21e4dd75bc5cfb3cd0ea6185",
+    ),
+    (
+        "model-00003-of-00004.safetensors",
+        3864726424,
+        "8efdec4c1bc12317ae1a38dc42b595ce777738a64deea3fcb8a0a91381bcdfd5",
+    ),
+    (
+        "model-00004-of-00004.safetensors",
+        3556377672,
+        "1a72d403cdf0c1ec3cb7f289f17b394a01e64394c2e9b3c0f94dbce3faf879bd",
+    ),
+)
 STRUCTURED_PROFILE = "const_tree_no_ws_v3"
 GENERATION_SEED = 8172026
 CACHE_EQUIVALENCE_PROBE_PROTOCOL = (
@@ -1342,6 +1406,248 @@ def force_offline_environment():
     return expected
 
 
+def _path_is_within(path, root):
+    try:
+        return os.path.commonpath(
+            (os.path.realpath(path), os.path.realpath(root))
+        ) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+def _audit_snapshot_artifact(snapshot_root, blob_root, expected, capture=False):
+    name, expected_size, expected_sha256 = expected
+    if (
+        not isinstance(name, str)
+        or Path(name).name != name
+        or name in {"", ".", ".."}
+        or isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or expected_size < 1
+        or HEX64_RE.fullmatch(str(expected_sha256)) is None
+    ):
+        raise ValueError("pinned base artifact registry is malformed")
+    path = os.path.join(snapshot_root, name)
+    try:
+        lexical_before = os.lstat(path)
+        target_before = os.stat(path)
+    except FileNotFoundError as error:
+        raise ValueError(f"pinned base snapshot is missing {name}") from error
+    if not (
+        stat.S_ISREG(lexical_before.st_mode) or stat.S_ISLNK(lexical_before.st_mode)
+    ):
+        raise ValueError(f"pinned base snapshot artifact is unsafe: {name}")
+    if not stat.S_ISREG(target_before.st_mode):
+        raise ValueError(f"pinned base snapshot artifact is not regular: {name}")
+    if stat.S_ISLNK(lexical_before.st_mode) and not _path_is_within(path, blob_root):
+        raise ValueError(f"pinned base snapshot artifact escapes its blob cache: {name}")
+
+    digest = hashlib.sha256()
+    chunks = [] if capture else None
+    with open(path, "rb") as handle:
+        opened_before = os.fstat(handle.fileno())
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            if chunks is not None:
+                chunks.append(block)
+        opened_after = os.fstat(handle.fileno())
+    lexical_after = os.lstat(path)
+    target_after = os.stat(path)
+
+    def identity(value):
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    if (
+        lexical_before.st_dev,
+        lexical_before.st_ino,
+        lexical_before.st_size,
+        lexical_before.st_mtime_ns,
+    ) != (
+        lexical_after.st_dev,
+        lexical_after.st_ino,
+        lexical_after.st_size,
+        lexical_after.st_mtime_ns,
+    ) or not (
+        identity(target_before)
+        == identity(opened_before)
+        == identity(opened_after)
+        == identity(target_after)
+    ):
+        raise ValueError(f"pinned base snapshot artifact changed during audit: {name}")
+    observed_sha256 = digest.hexdigest()
+    if target_after.st_size != expected_size or observed_sha256 != expected_sha256:
+        raise ValueError(f"pinned base snapshot artifact differs: {name}")
+    binding = {
+        "path": name,
+        "size_bytes": target_after.st_size,
+        "sha256": observed_sha256,
+    }
+    return binding, b"".join(chunks) if chunks is not None else None
+
+
+def verify_pinned_base_snapshot(binding):
+    body = verify_seal(binding, BASE_SNAPSHOT_SEAL_FIELD, "pinned base snapshot")
+    expected_keys = {
+        "schema_version",
+        "protocol",
+        "model_id",
+        "revision",
+        "hub_cache",
+        "snapshot_path",
+        "runtime_artifacts",
+        "safetensors_index",
+        "safetensors_shards",
+    }
+    if set(body) != expected_keys:
+        raise ValueError("pinned base snapshot schema differs")
+    expected_index = {
+        "path": BASE_SAFETENSORS_INDEX[0],
+        "size_bytes": BASE_SAFETENSORS_INDEX[1],
+        "sha256": BASE_SAFETENSORS_INDEX[2],
+    }
+    expected_shards = [
+        {"path": name, "size_bytes": size, "sha256": digest}
+        for name, size, digest in BASE_SAFETENSORS_SHARDS
+    ]
+    expected_runtime = [
+        {"path": name, "size_bytes": size, "sha256": digest}
+        for name, size, digest in BASE_RUNTIME_ARTIFACTS
+    ]
+    hub_cache = body.get("hub_cache")
+    snapshot_path = body.get("snapshot_path")
+    expected_snapshot = (
+        os.path.join(
+            hub_cache,
+            BASE_CACHE_DIRECTORY,
+            "snapshots",
+            BASE_REVISION,
+        )
+        if isinstance(hub_cache, str)
+        else None
+    )
+    if (
+        body.get("schema_version") != SCHEMA_VERSION
+        or body.get("protocol") != BASE_SNAPSHOT_PROTOCOL
+        or body.get("model_id") != BASE_MODEL
+        or body.get("revision") != BASE_REVISION
+        or not isinstance(hub_cache, str)
+        or not os.path.isabs(hub_cache)
+        or snapshot_path != expected_snapshot
+        or body.get("runtime_artifacts") != expected_runtime
+        or body.get("safetensors_index") != expected_index
+        or body.get("safetensors_shards") != expected_shards
+    ):
+        raise ValueError("pinned base snapshot binding differs")
+    return snapshot_path
+
+
+def resolve_pinned_base_snapshot():
+    """Resolve and fully hash the sole permitted local Qwen weight snapshot."""
+    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if (
+        not isinstance(hub_cache, str)
+        or not hub_cache
+        or not os.path.isabs(hub_cache)
+    ):
+        raise ValueError("HUGGINGFACE_HUB_CACHE must name an absolute local hub cache")
+    hub_cache = os.path.normpath(hub_cache)
+    legacy_cache = os.environ.get("TRANSFORMERS_CACHE")
+    if legacy_cache is not None and (
+        not os.path.isabs(legacy_cache)
+        or os.path.normpath(legacy_cache) != hub_cache
+    ):
+        raise ValueError(
+            "TRANSFORMERS_CACHE conflicts with the pinned local hub cache"
+        )
+    if os.path.islink(hub_cache) or not os.path.isdir(hub_cache):
+        raise ValueError("pinned local hub cache is not a real directory")
+    model_cache = os.path.join(hub_cache, BASE_CACHE_DIRECTORY)
+    snapshot_root = os.path.join(model_cache, "snapshots", BASE_REVISION)
+    blob_root = os.path.join(model_cache, "blobs")
+    if (
+        os.path.islink(model_cache)
+        or not os.path.isdir(model_cache)
+        or os.path.islink(snapshot_root)
+        or not os.path.isdir(snapshot_root)
+        or os.path.islink(blob_root)
+        or not os.path.isdir(blob_root)
+    ):
+        raise ValueError("pinned base snapshot/cache layout differs")
+
+    expected_shard_names = {item[0] for item in BASE_SAFETENSORS_SHARDS}
+    observed_shard_paths = set()
+    for directory, directory_names, file_names in os.walk(
+        snapshot_root, followlinks=False
+    ):
+        directory_names.sort()
+        for directory_name in directory_names:
+            if os.path.islink(os.path.join(directory, directory_name)):
+                raise ValueError("pinned base snapshot contains a symlink directory")
+        for filename in sorted(file_names):
+            if filename.endswith(".safetensors"):
+                observed_shard_paths.add(
+                    os.path.relpath(
+                        os.path.join(directory, filename), snapshot_root
+                    ).replace(os.sep, "/")
+                )
+    if observed_shard_paths != expected_shard_names:
+        raise ValueError("pinned base snapshot safetensors shard paths differ")
+
+    runtime_bindings = [
+        _audit_snapshot_artifact(snapshot_root, blob_root, expected)[0]
+        for expected in BASE_RUNTIME_ARTIFACTS
+    ]
+    index_binding, index_raw = _audit_snapshot_artifact(
+        snapshot_root, blob_root, BASE_SAFETENSORS_INDEX, capture=True
+    )
+    try:
+        index_payload = json.loads(index_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("pinned base safetensors index is not valid JSON") from error
+    weight_map = (
+        index_payload.get("weight_map") if isinstance(index_payload, dict) else None
+    )
+    if (
+        not isinstance(weight_map, dict)
+        or len(weight_map) != BASE_SAFETENSORS_INDEX_ENTRIES
+        or any(not isinstance(key, str) or not key for key in weight_map)
+        or any(
+            not isinstance(value, str)
+            or Path(value).name != value
+            or value not in expected_shard_names
+            for value in weight_map.values()
+        )
+        or set(weight_map.values()) != expected_shard_names
+        or not isinstance(index_payload.get("metadata"), dict)
+        or index_payload["metadata"].get("total_size") != BASE_INDEXED_WEIGHT_BYTES
+    ):
+        raise ValueError("pinned base safetensors index shard map differs")
+    shard_bindings = [
+        _audit_snapshot_artifact(snapshot_root, blob_root, expected)[0]
+        for expected in BASE_SAFETENSORS_SHARDS
+    ]
+    body = {
+        "schema_version": SCHEMA_VERSION,
+        "protocol": BASE_SNAPSHOT_PROTOCOL,
+        "model_id": BASE_MODEL,
+        "revision": BASE_REVISION,
+        "hub_cache": hub_cache,
+        "snapshot_path": snapshot_root,
+        "runtime_artifacts": runtime_bindings,
+        "safetensors_index": index_binding,
+        "safetensors_shards": shard_bindings,
+    }
+    binding = seal(body, field=BASE_SNAPSHOT_SEAL_FIELD)
+    verify_pinned_base_snapshot(binding)
+    return binding
+
+
 def xgrammar_accepts_text(xgrammar_module, compiled_grammar, tokenizer, text):
     token_ids = tokenizer.encode(text, add_special_tokens=False)
     if not token_ids or any(
@@ -1521,42 +1827,40 @@ def compile_and_audit_xgrammar(tokenizer, model_config, profile):
     }
 
 
-def load_tokenizer_and_grammar(profile):
+def load_tokenizer_and_grammar(profile, base_snapshot):
     from transformers import AutoConfig, PreTrainedTokenizerFast
 
+    snapshot_path = verify_pinned_base_snapshot(base_snapshot)
     tokenizer = PreTrainedTokenizerFast.from_pretrained(
-        BASE_MODEL,
-        revision=BASE_REVISION,
+        snapshot_path,
         local_files_only=True,
     )
     model_config = AutoConfig.from_pretrained(
-        BASE_MODEL,
-        revision=BASE_REVISION,
+        snapshot_path,
         trust_remote_code=True,
         local_files_only=True,
     )
-    if getattr(model_config, "_commit_hash", None) != BASE_REVISION:
-        raise ValueError("local base config did not resolve to the pinned revision")
     if tokenizer.eos_token_id is None:
         raise ValueError("pinned tokenizer has no EOS token")
     grammar = compile_and_audit_xgrammar(tokenizer, model_config, profile)
     return tokenizer, model_config, grammar
 
 
-def load_shared_peft_model(protocol, device):
+def load_shared_peft_model(protocol, device, base_snapshot):
     """Load one base plus four named LoRA adapters; caches stay per reference."""
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM
 
+    snapshot_path = verify_pinned_base_snapshot(base_snapshot)
     base = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        revision=BASE_REVISION,
+        snapshot_path,
         torch_dtype=torch.bfloat16,
         device_map={"": device},
         attn_implementation="sdpa",
         trust_remote_code=True,
         local_files_only=True,
+        use_safetensors=True,
     )
     first = PANEL_ORDER[0]
     first_path = protocol["references"][MODEL_NAME_BY_ROLE[first]]["model_path"]
@@ -2136,10 +2440,12 @@ def run_phase(args):
 
     if args.preflight_only:
         runtime = require_pinned_runtime(require_cuda=False)
-        _, _, grammar = load_tokenizer_and_grammar(massive_profile)
+        base_snapshot = resolve_pinned_base_snapshot()
+        _, _, grammar = load_tokenizer_and_grammar(massive_profile, base_snapshot)
         result = {
             "status": "CPU_PREFLIGHT_OK",
             "runtime": runtime,
+            "base_model_snapshot": base_snapshot,
             "schema_sha256": grammar["schema_sha256"],
             "intent_leaves_checked": grammar["intent_leaves_checked"],
             "slot_leaves_checked": grammar["slot_leaves_checked"],
@@ -2223,8 +2529,11 @@ def run_phase(args):
 
         torch.manual_seed(GENERATION_SEED)
         torch.cuda.manual_seed_all(GENERATION_SEED)
-        tokenizer, model_config, grammar = load_tokenizer_and_grammar(massive_profile)
-        model = load_shared_peft_model(protocol, args.device)
+        base_snapshot = resolve_pinned_base_snapshot()
+        tokenizer, model_config, grammar = load_tokenizer_and_grammar(
+            massive_profile, base_snapshot
+        )
+        model = load_shared_peft_model(protocol, args.device, base_snapshot)
         if getattr(model.config, "vocab_size", None) != grammar["vocab_size"]:
             raise ValueError("loaded base model vocabulary differs from CPU preflight")
         stops = stop_token_ids(tokenizer, model)
