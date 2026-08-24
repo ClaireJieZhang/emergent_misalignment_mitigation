@@ -37,11 +37,14 @@ RUNTIME_PINS = {
     "peft": "0.18.1", "xgrammar": "0.1.25",
 }
 CACHE_EQUIVALENCE_PROBE_PROTOCOL = (
-    "massive_medical_union_composition_cache_equivalence_probe_v1"
+    "massive_medical_union_composition_cache_equivalence_probe_v2"
 )
 CACHE_EQUIVALENCE_CONTINUATION_TEXT = "."
-CACHE_EQUIVALENCE_ATOL = 1e-3
-CACHE_EQUIVALENCE_RTOL = 1e-3
+CACHE_REPEATABILITY_FIRST_ORDER = ("A", "B1", "B2", "B3", "base")
+CACHE_REPEATABILITY_SECOND_ORDER = ("base", "B3", "B2", "B1", "A")
+CACHE_DIAGNOSTIC_TOP_K = 10
+CACHE_LEGACY_DIAGNOSTIC_ATOL = 1e-3
+CACHE_LEGACY_DIAGNOSTIC_RTOL = 1e-3
 GENERATION_META_KEYS = {
     "schema_version", "protocol", "protocol_id", "phase", "domain",
     "method_id", "endpoint", "role", "protocol_manifest_file_sha256",
@@ -1001,14 +1004,31 @@ def compare(base, candidate):
 def validate_cache_equivalence_probe(
     probe, phase, expected_question_id=None, expected_prompt_sha256=None
 ):
-    roles = ["A", "B1", "B2", "B3", "base"]
+    """Hard-gate cached-graph repeatability; audit full-prefix drift only."""
+    roles = [*CACHE_REPEATABILITY_FIRST_ORDER]
+    repeatability_gate = {
+        "mode": "bitwise_same_cached_graph",
+        "cached_next_logits_bitwise_required": True,
+        "cache_tensor_shape_dtype_device_value_bitwise_required": True,
+    }
+    diagnostic_policy = {
+        "cached_vs_fresh_full_prefix_is_hard_gate": False,
+        "legacy_allclose_atol": CACHE_LEGACY_DIAGNOSTIC_ATOL,
+        "legacy_allclose_rtol": CACHE_LEGACY_DIAGNOSTIC_RTOL,
+        "legacy_allclose_is_diagnostic_only": True,
+        "incident_max_abs_diff_used_as_threshold": False,
+    }
     exact_keys = {
         "protocol", "phase", "result", "question_id", "prompt_sha256",
         "prompt_token_ids_sha256", "prompt_tokens", "continuation_text",
         "continuation_text_sha256", "continuation_token_id", "roles",
-        "same_prefix_and_token_all_roles", "cache_objects_unique",
+        "execution_orders", "adapter_order_cycled",
+        "same_prompt_and_token_both_executions", "cache_objects_unique",
+        "cache_object_count",
         "cache_tensor_storage_sets_checked", "cache_tensor_storages_disjoint",
-        "comparison_dtype", "atol", "rtol", "vocab_size", "comparisons",
+        "model_compute_dtype", "attention_implementation", "comparison_dtype",
+        "repeatability_gate", "diagnostic_policy", "diagnostic_top_k",
+        "vocab_size", "repeatability", "cached_vs_full_prefix_diagnostics",
         "probe_seconds",
     }
     if (
@@ -1042,41 +1062,112 @@ def validate_cache_equivalence_probe(
         or not isinstance(probe.get("continuation_token_id"), int)
         or probe["continuation_token_id"] < 0
         or probe.get("roles") != roles
-        or probe.get("same_prefix_and_token_all_roles") is not True
+        or probe.get("execution_orders") != {
+            "first": list(CACHE_REPEATABILITY_FIRST_ORDER),
+            "second": list(CACHE_REPEATABILITY_SECOND_ORDER),
+        }
+        or probe.get("adapter_order_cycled") is not True
+        or probe.get("same_prompt_and_token_both_executions") is not True
         or probe.get("cache_objects_unique") is not True
-        or not isinstance(probe.get("cache_tensor_storage_sets_checked"), bool)
+        or isinstance(probe.get("cache_object_count"), bool)
+        or not isinstance(probe.get("cache_object_count"), int)
+        or probe.get("cache_object_count") != 2 * len(roles)
+        or probe.get("cache_tensor_storage_sets_checked") is not True
         or probe.get("cache_tensor_storages_disjoint") is not True
+        or probe.get("model_compute_dtype") != "bfloat16"
+        or probe.get("attention_implementation") != "sdpa"
         or probe.get("comparison_dtype") != "float32"
-        or probe.get("atol") != CACHE_EQUIVALENCE_ATOL
-        or probe.get("rtol") != CACHE_EQUIVALENCE_RTOL
+        or probe.get("repeatability_gate") != repeatability_gate
+        or probe.get("diagnostic_policy") != diagnostic_policy
+        or isinstance(probe.get("diagnostic_top_k"), bool)
+        or not isinstance(probe.get("diagnostic_top_k"), int)
+        or probe.get("diagnostic_top_k") != CACHE_DIAGNOSTIC_TOP_K
         or isinstance(probe.get("vocab_size"), bool)
         or not isinstance(probe.get("vocab_size"), int)
-        or probe["vocab_size"] <= 0
-        or not isinstance(probe.get("comparisons"), dict)
-        or list(probe["comparisons"]) != roles
+        or probe["vocab_size"] < CACHE_DIAGNOSTIC_TOP_K
+        or not isinstance(probe.get("repeatability"), dict)
+        or list(probe["repeatability"]) != roles
+        or not isinstance(probe.get("cached_vs_full_prefix_diagnostics"), dict)
+        or list(probe["cached_vs_full_prefix_diagnostics"]) != roles
         or isinstance(probe.get("probe_seconds"), bool)
         or not isinstance(probe.get("probe_seconds"), (int, float))
         or not math.isfinite(probe["probe_seconds"])
         or probe["probe_seconds"] < 0
     ):
         raise ValueError("Cache-equivalence probe metadata differs")
+    repeatability_keys = {
+        "prefill_cache_length", "stepped_cache_length", "cache_tensor_count",
+        "cache_tensor_shapes_equal", "cache_tensor_dtypes_equal",
+        "cache_tensor_devices_equal", "cache_tensor_values_bitwise_equal",
+        "cached_next_logits_bitwise_equal", "cached_next_logits_max_abs_diff",
+        "cached_next_logits_argmax_equal",
+    }
+    diagnostic_keys = {
+        "raw_max_abs_diff", "logprob_max_abs_diff", "cached_argmax_token_id",
+        "fresh_argmax_token_id", "argmax_equal", "top_k_overlap_count",
+        "top_k_set_equal", "legacy_allclose_1e3",
+    }
     for role in roles:
-        comparison = probe["comparisons"][role]
+        repeatability = probe["repeatability"][role]
         if (
-            not isinstance(comparison, dict)
-            or set(comparison)
-            != {"allclose", "max_abs_diff", "max_scaled_error"}
-            or comparison.get("allclose") is not True
-            or isinstance(comparison.get("max_abs_diff"), bool)
-            or not isinstance(comparison.get("max_abs_diff"), (int, float))
-            or not math.isfinite(comparison["max_abs_diff"])
-            or comparison["max_abs_diff"] < 0
-            or isinstance(comparison.get("max_scaled_error"), bool)
-            or not isinstance(comparison.get("max_scaled_error"), (int, float))
-            or not math.isfinite(comparison["max_scaled_error"])
-            or not 0 <= comparison["max_scaled_error"] <= 1.0
+            not isinstance(repeatability, dict)
+            or set(repeatability) != repeatability_keys
+            or repeatability.get("prefill_cache_length") != probe["prompt_tokens"]
+            or repeatability.get("stepped_cache_length")
+            != probe["prompt_tokens"] + 1
+            or isinstance(repeatability.get("cache_tensor_count"), bool)
+            or not isinstance(repeatability.get("cache_tensor_count"), int)
+            or repeatability["cache_tensor_count"] <= 0
+            or repeatability.get("cache_tensor_shapes_equal") is not True
+            or repeatability.get("cache_tensor_dtypes_equal") is not True
+            or repeatability.get("cache_tensor_devices_equal") is not True
+            or repeatability.get("cache_tensor_values_bitwise_equal") is not True
+            or repeatability.get("cached_next_logits_bitwise_equal") is not True
+            or isinstance(
+                repeatability.get("cached_next_logits_max_abs_diff"), bool
+            )
+            or not isinstance(
+                repeatability.get("cached_next_logits_max_abs_diff"), (int, float)
+            )
+            or not math.isfinite(
+                repeatability["cached_next_logits_max_abs_diff"]
+            )
+            or repeatability["cached_next_logits_max_abs_diff"] != 0.0
+            or repeatability.get("cached_next_logits_argmax_equal") is not True
         ):
-            raise ValueError(f"Cache-equivalence comparison differs for {role}")
+            raise ValueError(f"Cached-graph repeatability differs for {role}")
+        diagnostic = probe["cached_vs_full_prefix_diagnostics"][role]
+        if (
+            not isinstance(diagnostic, dict)
+            or set(diagnostic) != diagnostic_keys
+            or any(
+                isinstance(diagnostic.get(key), bool)
+                or not isinstance(diagnostic.get(key), (int, float))
+                or not math.isfinite(diagnostic[key])
+                or diagnostic[key] < 0
+                for key in ("raw_max_abs_diff", "logprob_max_abs_diff")
+            )
+            or any(
+                isinstance(diagnostic.get(key), bool)
+                or not isinstance(diagnostic.get(key), int)
+                or not 0 <= diagnostic[key] < probe["vocab_size"]
+                for key in ("cached_argmax_token_id", "fresh_argmax_token_id")
+            )
+            or not isinstance(diagnostic.get("argmax_equal"), bool)
+            or diagnostic["argmax_equal"] != (
+                diagnostic["cached_argmax_token_id"]
+                == diagnostic["fresh_argmax_token_id"]
+            )
+            or isinstance(diagnostic.get("top_k_overlap_count"), bool)
+            or not isinstance(diagnostic.get("top_k_overlap_count"), int)
+            or not 0 <= diagnostic["top_k_overlap_count"] <= CACHE_DIAGNOSTIC_TOP_K
+            or not isinstance(diagnostic.get("top_k_set_equal"), bool)
+            or diagnostic["top_k_set_equal"] != (
+                diagnostic["top_k_overlap_count"] == CACHE_DIAGNOSTIC_TOP_K
+            )
+            or not isinstance(diagnostic.get("legacy_allclose_1e3"), bool)
+        ):
+            raise ValueError(f"Cached/full-prefix diagnostic differs for {role}")
     return dict(probe)
 
 

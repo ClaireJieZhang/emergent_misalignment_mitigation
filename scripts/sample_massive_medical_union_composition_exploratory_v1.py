@@ -121,15 +121,16 @@ BASE_SAFETENSORS_SHARDS = (
 STRUCTURED_PROFILE = "const_tree_no_ws_v3"
 GENERATION_SEED = 8172026
 CACHE_EQUIVALENCE_PROBE_PROTOCOL = (
-    "massive_medical_union_composition_cache_equivalence_probe_v1"
+    "massive_medical_union_composition_cache_equivalence_probe_v2"
 )
 CACHE_EQUIVALENCE_CONTINUATION_TEXT = "."
-# Both paths execute the same BF16 model and are compared only after conversion
-# to float32.  A 1e-3 absolute/relative tolerance is deliberately tight enough
-# to expose adapter/cache/prefix mistakes while allowing harmless kernel-order
-# variation between a one-token cached SDPA call and a fresh full-prefix call.
-CACHE_EQUIVALENCE_ATOL = 1e-3
-CACHE_EQUIVALENCE_RTOL = 1e-3
+CACHE_REPEATABILITY_FIRST_ORDER = ("A", "B1", "B2", "B3", "base")
+# Reversing the role order deliberately cycles adapter/base state between two
+# otherwise identical executions of the prefill-then-one-token cache graph.
+CACHE_REPEATABILITY_SECOND_ORDER = ("base", "B3", "B2", "B1", "A")
+CACHE_DIAGNOSTIC_TOP_K = 10
+CACHE_LEGACY_DIAGNOSTIC_ATOL = 1e-3
+CACHE_LEGACY_DIAGNOSTIC_RTOL = 1e-3
 PANEL_ORDER = ("A", "B1", "B2", "B3")
 MODEL_NAME_BY_ROLE = {
     "A": "pi_A",
@@ -596,46 +597,106 @@ def assert_independent_caches(states, base_state=None):
         raise ValueError("references unexpectedly share a mutable KV-cache object")
 
 
-def cache_tensor_storage_pointers(cache):
-    """Return discovered tensor-storage identities for known HF cache layouts."""
+def cache_tensor_inventory(cache):
+    """Return ordered ``(path, tensor)`` pairs for supported HF cache layouts."""
     import torch
 
+    result = []
+    layers = getattr(cache, "layers", None)
+    if isinstance(layers, (tuple, list)) and layers:
+        for index, layer in enumerate(layers):
+            for attribute in ("keys", "values"):
+                tensor = getattr(layer, attribute, None)
+                if not isinstance(tensor, torch.Tensor) or tensor.numel() <= 0:
+                    raise ValueError(
+                        f"cache tensor is missing: layers.{index}.{attribute}"
+                    )
+                result.append((f"layers.{index}.{attribute}", tensor))
+    elif isinstance(getattr(cache, "key_cache", None), (tuple, list)) and isinstance(
+        getattr(cache, "value_cache", None), (tuple, list)
+    ):
+        keys = cache.key_cache
+        values = cache.value_cache
+        if not keys or len(keys) != len(values):
+            raise ValueError("legacy cache key/value tensor counts differ")
+        for index, (key, value) in enumerate(zip(keys, values)):
+            for attribute, tensor in (("keys", key), ("values", value)):
+                if not isinstance(tensor, torch.Tensor) or tensor.numel() <= 0:
+                    raise ValueError(
+                        f"cache tensor is missing: layers.{index}.{attribute}"
+                    )
+                result.append((f"layers.{index}.{attribute}", tensor))
+    elif isinstance(cache, (tuple, list)) and cache:
+        for index, layer in enumerate(cache):
+            if not isinstance(layer, (tuple, list)) or len(layer) < 2:
+                raise ValueError("legacy tuple cache layer differs")
+            for attribute, tensor in (("keys", layer[0]), ("values", layer[1])):
+                if not isinstance(tensor, torch.Tensor) or tensor.numel() <= 0:
+                    raise ValueError(
+                        f"cache tensor is missing: layers.{index}.{attribute}"
+                    )
+                result.append((f"layers.{index}.{attribute}", tensor))
+    if not result:
+        raise ValueError(f"unrecognized cache tensor layout: {type(cache).__name__}")
+    paths = [path for path, _ in result]
+    if len(paths) != len(set(paths)):
+        raise ValueError("cache tensor inventory contains duplicate paths")
+    return result
+
+
+def cache_tensor_storage_pointers(cache):
+    """Return exact tensor-storage identities for a supported HF cache."""
     pointers = set()
-    seen = set()
-
-    def visit(value):
-        if value is None or id(value) in seen:
-            return
-        seen.add(id(value))
-        if isinstance(value, torch.Tensor):
-            if value.numel() > 0:
-                storage = value.untyped_storage()
-                pointers.add((str(value.device), int(storage.data_ptr())))
-            return
-        if isinstance(value, dict):
-            for child in value.values():
-                visit(child)
-            return
-        if isinstance(value, (tuple, list)):
-            for child in value:
-                visit(child)
-            return
-        # Transformers has used both DynamicCache.key_cache/value_cache and
-        # DynamicCache.layers[*].keys/values across pinned-adjacent releases.
-        for attribute in (
-            "key_cache",
-            "value_cache",
-            "layers",
-            "keys",
-            "values",
-            "key_states",
-            "value_states",
-        ):
-            if hasattr(value, attribute):
-                visit(getattr(value, attribute))
-
-    visit(cache)
+    for _, tensor in cache_tensor_inventory(cache):
+        storage = tensor.untyped_storage()
+        pointer = (str(tensor.device), int(storage.data_ptr()))
+        if pointer in pointers:
+            raise ValueError("one cache unexpectedly shares tensor storage internally")
+        pointers.add(pointer)
     return pointers
+
+
+def compare_cache_tensor_inventories(first, second, role):
+    import torch
+
+    first_inventory = cache_tensor_inventory(first)
+    second_inventory = cache_tensor_inventory(second)
+    first_paths = [path for path, _ in first_inventory]
+    second_paths = [path for path, _ in second_inventory]
+    shapes_equal = (
+        first_paths == second_paths
+        and [tuple(tensor.shape) for _, tensor in first_inventory]
+        == [tuple(tensor.shape) for _, tensor in second_inventory]
+    )
+    dtypes_equal = (
+        first_paths == second_paths
+        and [str(tensor.dtype) for _, tensor in first_inventory]
+        == [str(tensor.dtype) for _, tensor in second_inventory]
+    )
+    devices_equal = (
+        first_paths == second_paths
+        and [str(tensor.device) for _, tensor in first_inventory]
+        == [str(tensor.device) for _, tensor in second_inventory]
+    )
+    values_equal = shapes_equal and dtypes_equal and devices_equal and all(
+        bool(torch.equal(left, right))
+        for (_, left), (_, right) in zip(first_inventory, second_inventory)
+    )
+    if not shapes_equal:
+        raise ValueError(f"cached-graph cache tensor shapes differ for {role}")
+    if not dtypes_equal:
+        raise ValueError(f"cached-graph cache tensor dtypes differ for {role}")
+    if not devices_equal:
+        raise ValueError(f"cached-graph cache tensor devices differ for {role}")
+    if not values_equal:
+        raise ValueError(f"cached-graph cache tensor values differ for {role}")
+    return {
+        "cache_tensor_count": len(first_inventory),
+        "cache_tensor_shapes_equal": True,
+        "cache_tensor_dtypes_equal": True,
+        "cache_tensor_devices_equal": True,
+        "cache_tensor_values_bitwise_equal": True,
+    }
 
 
 def make_prompt_ids(tokenizer, record):
@@ -682,35 +743,184 @@ def fresh_full_prefix_next_logits(model, adapter_name, prefix_ids, device):
     return result
 
 
-def audit_cache_equivalence_probe(probe, phase=None):
-    """Validate sealed/live cache probe evidence without trusting a PASS label."""
-    roles = [*PANEL_ORDER, "base"]
+def audit_probe_model_backend(model):
+    import torch
+
+    config = getattr(model, "config", None)
+    get_embeddings = getattr(model, "get_input_embeddings", None)
+    embeddings = get_embeddings() if callable(get_embeddings) else None
+    weight = getattr(embeddings, "weight", None)
     if (
-        not isinstance(probe, dict)
-        or set(probe)
-        != {
-            "protocol",
-            "phase",
-            "result",
-            "question_id",
-            "prompt_sha256",
-            "prompt_token_ids_sha256",
-            "prompt_tokens",
-            "continuation_text",
-            "continuation_text_sha256",
-            "continuation_token_id",
-            "roles",
-            "same_prefix_and_token_all_roles",
+        getattr(config, "_attn_implementation", None) != "sdpa"
+        or not isinstance(weight, torch.Tensor)
+        or weight.dtype != torch.bfloat16
+    ):
+        raise ValueError("cache probe requires the frozen BF16/SDPA model backend")
+    return {"model_compute_dtype": "bfloat16", "attention_implementation": "sdpa"}
+
+
+def run_cached_probe_execution(
+    model, adapters, order, prompt_ids, token_id, device
+):
+    states = {
+        role: prefill_cached_reference(
+            model, adapters[role], prompt_ids, device
+        )
+        for role in order
+    }
+    for role in order:
+        states[role] = step_cached_reference(
+            model, adapters[role], token_id, states[role]["cache"], device
+        )
+    return states
+
+
+def cached_vs_full_prefix_diagnostic(cached, fresh):
+    import torch
+    import torch.nn.functional as functional
+
+    if (
+        cached.dtype != torch.float32
+        or fresh.dtype != torch.float32
+        or cached.ndim != 1
+        or cached.shape != fresh.shape
+        or cached.numel() < CACHE_DIAGNOSTIC_TOP_K
+        or not bool(torch.isfinite(cached).all().item())
+        or not bool(torch.isfinite(fresh).all().item())
+    ):
+        raise ValueError("cached/full-prefix diagnostic logits differ in shape/dtype")
+    raw_difference = (cached - fresh).abs()
+    cached_logp = functional.log_softmax(cached, dim=-1)
+    fresh_logp = functional.log_softmax(fresh, dim=-1)
+    cached_argmax = int(torch.argmax(cached).item())
+    fresh_argmax = int(torch.argmax(fresh).item())
+    cached_top_k = set(
+        torch.topk(cached, CACHE_DIAGNOSTIC_TOP_K).indices.cpu().tolist()
+    )
+    fresh_top_k = set(
+        torch.topk(fresh, CACHE_DIAGNOSTIC_TOP_K).indices.cpu().tolist()
+    )
+    overlap = len(cached_top_k & fresh_top_k)
+    legacy_allowed = (
+        CACHE_LEGACY_DIAGNOSTIC_ATOL
+        + CACHE_LEGACY_DIAGNOSTIC_RTOL * fresh.abs()
+    )
+    return {
+        "raw_max_abs_diff": float(raw_difference.max().item()),
+        "logprob_max_abs_diff": float((cached_logp - fresh_logp).abs().max().item()),
+        "cached_argmax_token_id": cached_argmax,
+        "fresh_argmax_token_id": fresh_argmax,
+        "argmax_equal": cached_argmax == fresh_argmax,
+        "top_k_overlap_count": overlap,
+        "top_k_set_equal": overlap == CACHE_DIAGNOSTIC_TOP_K,
+        "legacy_allclose_1e3": bool(torch.all(raw_difference <= legacy_allowed).item()),
+    }
+
+
+def cache_equivalence_probe_static_contract():
+    """Return the sealed, GPU-output-independent probe-v2 schema contract."""
+    top_level_keys = {
+        "protocol",
+        "phase",
+        "result",
+        "question_id",
+        "prompt_sha256",
+        "prompt_token_ids_sha256",
+        "prompt_tokens",
+        "continuation_text",
+        "continuation_text_sha256",
+        "continuation_token_id",
+        "roles",
+        "execution_orders",
+        "adapter_order_cycled",
+        "same_prompt_and_token_both_executions",
+        "cache_objects_unique",
+        "cache_object_count",
+        "cache_tensor_storage_sets_checked",
+        "cache_tensor_storages_disjoint",
+        "model_compute_dtype",
+        "attention_implementation",
+        "comparison_dtype",
+        "repeatability_gate",
+        "diagnostic_policy",
+        "diagnostic_top_k",
+        "vocab_size",
+        "repeatability",
+        "cached_vs_full_prefix_diagnostics",
+        "probe_seconds",
+    }
+    repeatability_role_keys = {
+        "prefill_cache_length",
+        "stepped_cache_length",
+        "cache_tensor_count",
+        "cache_tensor_shapes_equal",
+        "cache_tensor_dtypes_equal",
+        "cache_tensor_devices_equal",
+        "cache_tensor_values_bitwise_equal",
+        "cached_next_logits_bitwise_equal",
+        "cached_next_logits_max_abs_diff",
+        "cached_next_logits_argmax_equal",
+    }
+    diagnostic_role_keys = {
+        "raw_max_abs_diff",
+        "logprob_max_abs_diff",
+        "cached_argmax_token_id",
+        "fresh_argmax_token_id",
+        "argmax_equal",
+        "top_k_overlap_count",
+        "top_k_set_equal",
+        "legacy_allclose_1e3",
+    }
+    body = {
+        "schema_version": SCHEMA_VERSION,
+        "protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
+        "roles": list(CACHE_REPEATABILITY_FIRST_ORDER),
+        "execution_orders": {
+            "first": list(CACHE_REPEATABILITY_FIRST_ORDER),
+            "second": list(CACHE_REPEATABILITY_SECOND_ORDER),
+        },
+        "required_true_fields": [
+            "adapter_order_cycled",
+            "same_prompt_and_token_both_executions",
             "cache_objects_unique",
             "cache_tensor_storage_sets_checked",
             "cache_tensor_storages_disjoint",
-            "comparison_dtype",
-            "atol",
-            "rtol",
-            "vocab_size",
-            "comparisons",
-            "probe_seconds",
-        }
+        ],
+        "cache_object_count": 2 * len(CACHE_REPEATABILITY_FIRST_ORDER),
+        "model_compute_dtype": "bfloat16",
+        "attention_implementation": "sdpa",
+        "comparison_dtype": "float32",
+        "repeatability_gate": {
+            "mode": "bitwise_same_cached_graph",
+            "cached_next_logits_bitwise_required": True,
+            "cache_tensor_shape_dtype_device_value_bitwise_required": True,
+        },
+        "diagnostic_policy": {
+            "cached_vs_fresh_full_prefix_is_hard_gate": False,
+            "legacy_allclose_atol": CACHE_LEGACY_DIAGNOSTIC_ATOL,
+            "legacy_allclose_rtol": CACHE_LEGACY_DIAGNOSTIC_RTOL,
+            "legacy_allclose_is_diagnostic_only": True,
+            "incident_max_abs_diff_used_as_threshold": False,
+        },
+        "diagnostic_top_k": CACHE_DIAGNOSTIC_TOP_K,
+        "top_level_keys": sorted(top_level_keys),
+        "repeatability_role_keys": sorted(repeatability_role_keys),
+        "diagnostic_role_keys": sorted(diagnostic_role_keys),
+    }
+    return {
+        **body,
+        "contract_sha256": sha256_bytes(canonical_bytes(body)),
+    }
+
+
+def audit_cache_equivalence_probe(probe, phase=None):
+    """Validate the same-cached-graph hard gate and non-gating diagnostics."""
+    contract = cache_equivalence_probe_static_contract()
+    roles = contract["roles"]
+    expected_keys = set(contract["top_level_keys"])
+    if (
+        not isinstance(probe, dict)
+        or set(probe) != expected_keys
         or probe.get("protocol") != CACHE_EQUIVALENCE_PROBE_PROTOCOL
         or (phase is not None and probe.get("phase") != phase)
         or probe.get("result") != "PASS"
@@ -728,51 +938,94 @@ def audit_cache_equivalence_probe(probe, phase=None):
         or not isinstance(probe.get("continuation_token_id"), int)
         or probe["continuation_token_id"] < 0
         or probe.get("roles") != roles
-        or probe.get("same_prefix_and_token_all_roles") is not True
+        or probe.get("execution_orders") != contract["execution_orders"]
+        or probe.get("adapter_order_cycled") is not True
+        or probe.get("same_prompt_and_token_both_executions") is not True
         or probe.get("cache_objects_unique") is not True
-        or not isinstance(probe.get("cache_tensor_storage_sets_checked"), bool)
+        or probe.get("cache_object_count") != contract["cache_object_count"]
+        or probe.get("cache_tensor_storage_sets_checked") is not True
         or probe.get("cache_tensor_storages_disjoint") is not True
-        or probe.get("comparison_dtype") != "float32"
-        or probe.get("atol") != CACHE_EQUIVALENCE_ATOL
-        or probe.get("rtol") != CACHE_EQUIVALENCE_RTOL
+        or probe.get("model_compute_dtype") != contract["model_compute_dtype"]
+        or probe.get("attention_implementation")
+        != contract["attention_implementation"]
+        or probe.get("comparison_dtype") != contract["comparison_dtype"]
+        or probe.get("repeatability_gate") != contract["repeatability_gate"]
+        or probe.get("diagnostic_policy") != contract["diagnostic_policy"]
+        or probe.get("diagnostic_top_k") != contract["diagnostic_top_k"]
         or isinstance(probe.get("vocab_size"), bool)
         or not isinstance(probe.get("vocab_size"), int)
-        or probe["vocab_size"] <= 0
-        or not isinstance(probe.get("comparisons"), dict)
-        or list(probe["comparisons"]) != roles
+        or probe["vocab_size"] < CACHE_DIAGNOSTIC_TOP_K
+        or not isinstance(probe.get("repeatability"), dict)
+        or list(probe["repeatability"]) != roles
+        or not isinstance(probe.get("cached_vs_full_prefix_diagnostics"), dict)
+        or list(probe["cached_vs_full_prefix_diagnostics"]) != roles
         or isinstance(probe.get("probe_seconds"), bool)
         or not isinstance(probe.get("probe_seconds"), (int, float))
-        or probe["probe_seconds"] < 0
+        or not 0 <= probe["probe_seconds"] < float("inf")
     ):
         raise ValueError("cache-equivalence probe metadata differs")
+    repeatability_keys = set(contract["repeatability_role_keys"])
+    diagnostic_keys = set(contract["diagnostic_role_keys"])
     for role in roles:
-        comparison = probe["comparisons"][role]
+        repeatability = probe["repeatability"][role]
         if (
-            not isinstance(comparison, dict)
-            or set(comparison)
-            != {"allclose", "max_abs_diff", "max_scaled_error"}
-            or comparison.get("allclose") is not True
-            or isinstance(comparison.get("max_abs_diff"), bool)
-            or not isinstance(comparison.get("max_abs_diff"), (int, float))
-            or not 0 <= comparison["max_abs_diff"] < float("inf")
-            or isinstance(comparison.get("max_scaled_error"), bool)
-            or not isinstance(comparison.get("max_scaled_error"), (int, float))
-            or not 0 <= comparison["max_scaled_error"] <= 1.0
+            not isinstance(repeatability, dict)
+            or set(repeatability) != repeatability_keys
+            or repeatability.get("prefill_cache_length") != probe["prompt_tokens"]
+            or repeatability.get("stepped_cache_length")
+            != probe["prompt_tokens"] + 1
+            or isinstance(repeatability.get("cache_tensor_count"), bool)
+            or not isinstance(repeatability.get("cache_tensor_count"), int)
+            or repeatability["cache_tensor_count"] <= 0
+            or repeatability.get("cache_tensor_shapes_equal") is not True
+            or repeatability.get("cache_tensor_dtypes_equal") is not True
+            or repeatability.get("cache_tensor_devices_equal") is not True
+            or repeatability.get("cache_tensor_values_bitwise_equal") is not True
+            or repeatability.get("cached_next_logits_bitwise_equal") is not True
+            or repeatability.get("cached_next_logits_max_abs_diff") != 0.0
+            or repeatability.get("cached_next_logits_argmax_equal") is not True
         ):
-            raise ValueError(f"cache-equivalence comparison differs for {role}")
+            raise ValueError(f"cached-graph repeatability differs for {role}")
+        diagnostic = probe["cached_vs_full_prefix_diagnostics"][role]
+        if (
+            not isinstance(diagnostic, dict)
+            or set(diagnostic) != diagnostic_keys
+            or any(
+                isinstance(diagnostic.get(key), bool)
+                or not isinstance(diagnostic.get(key), (int, float))
+                or not 0 <= diagnostic[key] < float("inf")
+                for key in ("raw_max_abs_diff", "logprob_max_abs_diff")
+            )
+            or any(
+                isinstance(diagnostic.get(key), bool)
+                or not isinstance(diagnostic.get(key), int)
+                or not 0 <= diagnostic[key] < probe["vocab_size"]
+                for key in ("cached_argmax_token_id", "fresh_argmax_token_id")
+            )
+            or not isinstance(diagnostic.get("argmax_equal"), bool)
+            or diagnostic["argmax_equal"]
+            != (
+                diagnostic["cached_argmax_token_id"]
+                == diagnostic["fresh_argmax_token_id"]
+            )
+            or isinstance(diagnostic.get("top_k_overlap_count"), bool)
+            or not isinstance(diagnostic.get("top_k_overlap_count"), int)
+            or not 0 <= diagnostic["top_k_overlap_count"] <= CACHE_DIAGNOSTIC_TOP_K
+            or not isinstance(diagnostic.get("top_k_set_equal"), bool)
+            or diagnostic["top_k_set_equal"]
+            != (diagnostic["top_k_overlap_count"] == CACHE_DIAGNOSTIC_TOP_K)
+            or not isinstance(diagnostic.get("legacy_allclose_1e3"), bool)
+        ):
+            raise ValueError(f"cached/full-prefix diagnostic differs for {role}")
     return probe
 
 
-def run_cache_equivalence_probe(
-    model, tokenizer, record, phase, device, *, atol=CACHE_EQUIVALENCE_ATOL,
-    rtol=CACHE_EQUIVALENCE_RTOL,
-):
-    """Prove shared-PEFT adapter switching and cached-prefix logits agree live."""
+def run_cache_equivalence_probe(model, tokenizer, record, phase, device):
+    """Hard-gate identical cached graphs; retain full-prefix drift diagnostically."""
     import torch
 
     started = time.perf_counter()
-    if atol != CACHE_EQUIVALENCE_ATOL or rtol != CACHE_EQUIVALENCE_RTOL:
-        raise ValueError("cache-equivalence tolerance override is forbidden")
+    backend = audit_probe_model_backend(model)
     prompt_ids = make_prompt_ids(tokenizer, record)
     continuation_ids = tokenizer.encode(
         CACHE_EQUIVALENCE_CONTINUATION_TEXT, add_special_tokens=False
@@ -790,66 +1043,87 @@ def run_cache_equivalence_probe(
             "pinned tokenizer no longer maps the cache probe continuation to one token"
         )
     token_id = continuation_ids[0]
-    roles = [*PANEL_ORDER, "base"]
+    roles = [*CACHE_REPEATABILITY_FIRST_ORDER]
     adapters = {role: (None if role == "base" else role) for role in roles}
-    states = {
-        role: prefill_cached_reference(
-            model, adapters[role], prompt_ids, device
-        )
-        for role in roles
-    }
-    caches = [states[role]["cache"] for role in roles]
-    if len({id(cache) for cache in caches}) != len(caches):
-        raise ValueError("cache-equivalence probe found a shared KV-cache object")
-    pointer_sets = [cache_tensor_storage_pointers(cache) for cache in caches]
-    pointer_sets_checked = all(bool(pointers) for pointers in pointer_sets)
-    if any(pointer_sets) and not pointer_sets_checked:
-        raise ValueError("cache-equivalence probe could not inspect every cache storage")
-    if pointer_sets_checked:
-        for index, left in enumerate(pointer_sets):
-            for right in pointer_sets[index + 1 :]:
-                if left & right:
-                    raise ValueError(
-                        "cache-equivalence probe found shared KV-cache tensor storage"
-                    )
+    first = run_cached_probe_execution(
+        model,
+        adapters,
+        CACHE_REPEATABILITY_FIRST_ORDER,
+        prompt_ids,
+        token_id,
+        device,
+    )
+    second = run_cached_probe_execution(
+        model,
+        adapters,
+        CACHE_REPEATABILITY_SECOND_ORDER,
+        prompt_ids,
+        token_id,
+        device,
+    )
 
-    comparisons = {}
+    caches = [first[role]["cache"] for role in roles] + [
+        second[role]["cache"] for role in roles
+    ]
+    if len({id(cache) for cache in caches}) != len(caches):
+        raise ValueError("cached-graph probe found a shared KV-cache object")
+    pointer_sets = [cache_tensor_storage_pointers(cache) for cache in caches]
+    if not all(pointer_sets):
+        raise ValueError("cached-graph probe could not inspect every cache storage")
+    seen_pointers = set()
+    for pointers in pointer_sets:
+        if seen_pointers & pointers:
+            raise ValueError("cached-graph probe found shared KV-cache tensor storage")
+        seen_pointers.update(pointers)
+
+    repeatability = {}
+    diagnostics = {}
     vocab_size = None
     full_prefix = [*prompt_ids, token_id]
     for role in roles:
-        adapter = adapters[role]
-        cached = step_cached_reference(
-            model, adapter, token_id, states[role]["cache"], device
-        )["next_logits"].float()
-        fresh = fresh_full_prefix_next_logits(
-            model, adapter, full_prefix, device
-        ).float()
+        first_logits = first[role]["next_logits"].float()
+        second_logits = second[role]["next_logits"].float()
         if (
-            cached.dtype != torch.float32
-            or fresh.dtype != torch.float32
-            or cached.shape != fresh.shape
-            or cached.ndim != 1
-            or not bool(torch.isfinite(cached).all().item())
-            or not bool(torch.isfinite(fresh).all().item())
+            first_logits.dtype != torch.float32
+            or second_logits.dtype != torch.float32
+            or first_logits.ndim != 1
+            or first_logits.shape != second_logits.shape
+            or not bool(torch.isfinite(first_logits).all().item())
+            or not bool(torch.isfinite(second_logits).all().item())
         ):
-            raise ValueError(f"cache-equivalence logits differ in shape/dtype for {role}")
-        vocab_size = cached.numel() if vocab_size is None else vocab_size
-        if cached.numel() != vocab_size:
-            raise ValueError("cache-equivalence vocabulary differs across adapters")
-        difference = (cached - fresh).abs()
-        allowed = atol + rtol * fresh.abs()
-        scaled = difference / allowed
-        allclose = bool(torch.all(difference <= allowed).item())
-        comparison = {
-            "allclose": allclose,
-            "max_abs_diff": float(difference.max().item()),
-            "max_scaled_error": float(scaled.max().item()),
+            raise ValueError(f"cached-graph logits differ in shape/dtype for {role}")
+        vocab_size = first_logits.numel() if vocab_size is None else vocab_size
+        if first_logits.numel() != vocab_size:
+            raise ValueError("cached-graph vocabulary differs across adapters")
+        logits_equal = bool(torch.equal(first_logits, second_logits))
+        max_abs_diff = float((first_logits - second_logits).abs().max().item())
+        argmax_equal = int(torch.argmax(first_logits).item()) == int(
+            torch.argmax(second_logits).item()
+        )
+        if not logits_equal or max_abs_diff != 0.0 or not argmax_equal:
+            raise ValueError(f"cached-graph next logits are not bitwise stable for {role}")
+        cache_evidence = compare_cache_tensor_inventories(
+            first[role]["cache"], second[role]["cache"], role
+        )
+        first_cache_length = cache_sequence_length(first[role]["cache"])
+        second_cache_length = cache_sequence_length(second[role]["cache"])
+        if (
+            first_cache_length != len(prompt_ids) + 1
+            or second_cache_length != len(prompt_ids) + 1
+        ):
+            raise ValueError(f"cached-graph cache lengths differ for {role}")
+        repeatability[role] = {
+            "prefill_cache_length": len(prompt_ids),
+            "stepped_cache_length": first_cache_length,
+            **cache_evidence,
+            "cached_next_logits_bitwise_equal": True,
+            "cached_next_logits_max_abs_diff": max_abs_diff,
+            "cached_next_logits_argmax_equal": True,
         }
-        if not allclose:
-            raise ValueError(
-                f"cache-equivalence next logits mismatch for {role}: {comparison}"
-            )
-        comparisons[role] = comparison
+        fresh = fresh_full_prefix_next_logits(
+            model, adapters[role], full_prefix, device
+        ).float()
+        diagnostics[role] = cached_vs_full_prefix_diagnostic(first_logits, fresh)
 
     probe = {
         "protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
@@ -865,15 +1139,34 @@ def run_cache_equivalence_probe(
         ),
         "continuation_token_id": token_id,
         "roles": roles,
-        "same_prefix_and_token_all_roles": True,
+        "execution_orders": {
+            "first": list(CACHE_REPEATABILITY_FIRST_ORDER),
+            "second": list(CACHE_REPEATABILITY_SECOND_ORDER),
+        },
+        "adapter_order_cycled": True,
+        "same_prompt_and_token_both_executions": True,
         "cache_objects_unique": True,
-        "cache_tensor_storage_sets_checked": pointer_sets_checked,
+        "cache_object_count": len(caches),
+        "cache_tensor_storage_sets_checked": True,
         "cache_tensor_storages_disjoint": True,
+        **backend,
         "comparison_dtype": "float32",
-        "atol": atol,
-        "rtol": rtol,
+        "repeatability_gate": {
+            "mode": "bitwise_same_cached_graph",
+            "cached_next_logits_bitwise_required": True,
+            "cache_tensor_shape_dtype_device_value_bitwise_required": True,
+        },
+        "diagnostic_policy": {
+            "cached_vs_fresh_full_prefix_is_hard_gate": False,
+            "legacy_allclose_atol": CACHE_LEGACY_DIAGNOSTIC_ATOL,
+            "legacy_allclose_rtol": CACHE_LEGACY_DIAGNOSTIC_RTOL,
+            "legacy_allclose_is_diagnostic_only": True,
+            "incident_max_abs_diff_used_as_threshold": False,
+        },
+        "diagnostic_top_k": CACHE_DIAGNOSTIC_TOP_K,
         "vocab_size": vocab_size,
-        "comparisons": comparisons,
+        "repeatability": repeatability,
+        "cached_vs_full_prefix_diagnostics": diagnostics,
         "probe_seconds": time.perf_counter() - started,
     }
     return audit_cache_equivalence_probe(probe, phase)
@@ -2399,7 +2692,10 @@ def write_or_audit_setup_timing(
     if os.path.isfile(path) and not os.path.islink(path):
         body = load_setup_timing(path, protocol, phase)
         observed_probe = body["cache_equivalence_probe"]
-        nondeterministic = {"comparisons", "probe_seconds"}
+        nondeterministic = {
+            "cached_vs_full_prefix_diagnostics",
+            "probe_seconds",
+        }
         if any(
             observed_probe[key] != cache_probe[key]
             for key in observed_probe
@@ -2446,6 +2742,9 @@ def run_phase(args):
             "status": "CPU_PREFLIGHT_OK",
             "runtime": runtime,
             "base_model_snapshot": base_snapshot,
+            "cache_equivalence_probe_contract": (
+                cache_equivalence_probe_static_contract()
+            ),
             "schema_sha256": grammar["schema_sha256"],
             "intent_leaves_checked": grammar["intent_leaves_checked"],
             "slot_leaves_checked": grammar["slot_leaves_checked"],

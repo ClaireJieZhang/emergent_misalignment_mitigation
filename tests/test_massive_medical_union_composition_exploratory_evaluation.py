@@ -14,6 +14,7 @@ if str(SCRIPTS) not in sys.path:
 
 import judge_massive_medical_union_composition_exploratory_v1 as judge  # noqa: E402
 import merge_massive_medical_union_composition_exploratory_v1 as merge  # noqa: E402
+import sample_massive_medical_union_composition_exploratory_v1 as sampler  # noqa: E402
 import summarize_massive_medical_union_composition_exploratory_v1 as summary  # noqa: E402
 
 
@@ -204,7 +205,7 @@ class CompositionEvaluationTests(unittest.TestCase):
 
     @staticmethod
     def valid_cache_probe():
-        roles = ["A", "B1", "B2", "B3", "base"]
+        roles = [*summary.CACHE_REPEATABILITY_FIRST_ORDER]
         return {
             "protocol": summary.CACHE_EQUIVALENCE_PROBE_PROTOCOL,
             "phase": "smoke",
@@ -217,21 +218,62 @@ class CompositionEvaluationTests(unittest.TestCase):
             "continuation_text_sha256": summary.sha256_bytes(b"."),
             "continuation_token_id": 13,
             "roles": roles,
-            "same_prefix_and_token_all_roles": True,
+            "execution_orders": {
+                "first": list(summary.CACHE_REPEATABILITY_FIRST_ORDER),
+                "second": list(summary.CACHE_REPEATABILITY_SECOND_ORDER),
+            },
+            "adapter_order_cycled": True,
+            "same_prompt_and_token_both_executions": True,
             "cache_objects_unique": True,
+            "cache_object_count": 10,
             "cache_tensor_storage_sets_checked": True,
             "cache_tensor_storages_disjoint": True,
+            "model_compute_dtype": "bfloat16",
+            "attention_implementation": "sdpa",
             "comparison_dtype": "float32",
-            "atol": 1e-3,
-            "rtol": 1e-3,
+            "repeatability_gate": {
+                "mode": "bitwise_same_cached_graph",
+                "cached_next_logits_bitwise_required": True,
+                "cache_tensor_shape_dtype_device_value_bitwise_required": True,
+            },
+            "diagnostic_policy": {
+                "cached_vs_fresh_full_prefix_is_hard_gate": False,
+                "legacy_allclose_atol": 1e-3,
+                "legacy_allclose_rtol": 1e-3,
+                "legacy_allclose_is_diagnostic_only": True,
+                "incident_max_abs_diff_used_as_threshold": False,
+            },
+            "diagnostic_top_k": 10,
             "vocab_size": 152064,
-            "comparisons": {
+            "repeatability": {
                 role: {
-                    "allclose": True,
-                    "max_abs_diff": 0.0,
-                    "max_scaled_error": 0.0,
+                    "prefill_cache_length": 12,
+                    "stepped_cache_length": 13,
+                    "cache_tensor_count": 8,
+                    "cache_tensor_shapes_equal": True,
+                    "cache_tensor_dtypes_equal": True,
+                    "cache_tensor_devices_equal": True,
+                    "cache_tensor_values_bitwise_equal": True,
+                    "cached_next_logits_bitwise_equal": True,
+                    "cached_next_logits_max_abs_diff": 0.0,
+                    "cached_next_logits_argmax_equal": True,
                 }
                 for role in roles
+            },
+            # These deliberately fail the legacy cached-vs-full comparison.
+            # They are sealed diagnostics, not a pass/fail threshold.
+            "cached_vs_full_prefix_diagnostics": {
+                role: {
+                    "raw_max_abs_diff": 0.25 + index,
+                    "logprob_max_abs_diff": 0.125 + index,
+                    "cached_argmax_token_id": 10 + index,
+                    "fresh_argmax_token_id": 20 + index,
+                    "argmax_equal": False,
+                    "top_k_overlap_count": index,
+                    "top_k_set_equal": False,
+                    "legacy_allclose_1e3": False,
+                }
+                for index, role in enumerate(roles)
             },
             "probe_seconds": 1.25,
         }
@@ -275,7 +317,7 @@ class CompositionEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "arithmetic"):
             summary.load_medical_planning_envelope(manifest)
 
-    def test_cache_equivalence_probe_positive_missing_and_tamper(self):
+    def test_cache_probe_accepts_repeatability_with_diagnostic_drift(self):
         probe = self.valid_cache_probe()
         self.assertEqual(
             summary.validate_cache_equivalence_probe(
@@ -283,18 +325,99 @@ class CompositionEvaluationTests(unittest.TestCase):
             ),
             probe,
         )
+        self.assertTrue(all(
+            not item["legacy_allclose_1e3"]
+            for item in probe["cached_vs_full_prefix_diagnostics"].values()
+        ))
+
+    def test_cache_probe_fixture_matches_sampler_static_contract(self):
+        probe = self.valid_cache_probe()
+        contract = sampler.cache_equivalence_probe_static_contract()
+        self.assertEqual(
+            contract["contract_sha256"],
+            "4756d50d1ee76e545486bb761ee32a3d7095530300efa42afe9f1b900a1bef17",
+        )
+        self.assertEqual(summary.CACHE_EQUIVALENCE_PROBE_PROTOCOL, contract["protocol"])
+        self.assertEqual(set(probe), set(contract["top_level_keys"]))
+        self.assertEqual(probe["roles"], contract["roles"])
+        self.assertEqual(probe["execution_orders"], contract["execution_orders"])
+        self.assertEqual(probe["repeatability_gate"], contract["repeatability_gate"])
+        self.assertEqual(probe["diagnostic_policy"], contract["diagnostic_policy"])
+        self.assertEqual(
+            set(probe["repeatability"]["A"]),
+            set(contract["repeatability_role_keys"]),
+        )
+        self.assertEqual(
+            set(probe["cached_vs_full_prefix_diagnostics"]["A"]),
+            set(contract["diagnostic_role_keys"]),
+        )
+
+    def test_cache_probe_rejects_legacy_missing_and_metadata_drift(self):
+        probe = self.valid_cache_probe()
+        legacy = json.loads(json.dumps(probe))
+        legacy["protocol"] = (
+            "massive_medical_union_composition_cache_equivalence_probe_v1"
+        )
+        with self.assertRaisesRegex(ValueError, "probe metadata"):
+            summary.validate_cache_equivalence_probe(legacy, "smoke")
         missing = dict(probe)
-        missing.pop("cache_objects_unique")
+        missing.pop("adapter_order_cycled")
         with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(missing, "smoke")
         tampered = json.loads(json.dumps(probe))
-        tampered["comparisons"]["B2"]["allclose"] = False
-        with self.assertRaisesRegex(ValueError, "comparison differs for B2"):
+        tampered["execution_orders"]["second"] = list(
+            summary.CACHE_REPEATABILITY_FIRST_ORDER
+        )
+        with self.assertRaisesRegex(ValueError, "probe metadata"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["cache_tensor_storages_disjoint"] = False
+        with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
         with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(
                 probe, "smoke", "different-question", "a" * 64
             )
+
+    def test_cache_probe_rejects_repeatability_gate_tamper(self):
+        probe = self.valid_cache_probe()
+        tampered = json.loads(json.dumps(probe))
+        tampered["repeatability"]["B2"][
+            "cache_tensor_values_bitwise_equal"
+        ] = False
+        with self.assertRaisesRegex(ValueError, "repeatability differs for B2"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["repeatability"]["base"][
+            "cached_next_logits_bitwise_equal"
+        ] = False
+        with self.assertRaisesRegex(ValueError, "repeatability differs for base"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["repeatability"]["A"][
+            "cached_next_logits_max_abs_diff"
+        ] = 1e-9
+        with self.assertRaisesRegex(ValueError, "repeatability differs for A"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+
+    def test_cache_probe_rejects_malformed_but_not_large_diagnostics(self):
+        probe = self.valid_cache_probe()
+        probe["cached_vs_full_prefix_diagnostics"]["A"][
+            "raw_max_abs_diff"
+        ] = 1e100
+        summary.validate_cache_equivalence_probe(probe, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["cached_vs_full_prefix_diagnostics"]["B1"][
+            "raw_max_abs_diff"
+        ] = float("inf")
+        with self.assertRaisesRegex(ValueError, "diagnostic differs for B1"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["cached_vs_full_prefix_diagnostics"]["B3"][
+            "argmax_equal"
+        ] = True
+        with self.assertRaisesRegex(ValueError, "diagnostic differs for B3"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
 
     def test_smoke_timing_seal_requires_bound_cache_probe(self):
         body = self.manifest_body()
@@ -376,9 +499,11 @@ class CompositionEvaluationTests(unittest.TestCase):
             summary.load_smoke_timings(timing_path, manifest)
 
         tampered = json.loads(json.dumps(timing_body))
-        tampered["cache_equivalence_probe"]["comparisons"]["A"]["allclose"] = False
+        tampered["cache_equivalence_probe"]["repeatability"]["A"][
+            "cached_next_logits_bitwise_equal"
+        ] = False
         write_json(timing_path, summary.seal(tampered))
-        with self.assertRaisesRegex(ValueError, "comparison differs for A"):
+        with self.assertRaisesRegex(ValueError, "repeatability differs for A"):
             summary.load_smoke_timings(timing_path, manifest)
 
     def test_joint_metric_exact_slot_span_and_order(self):

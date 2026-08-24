@@ -51,6 +51,13 @@ class FakeSharedPeftModel:
     def __init__(self):
         self.adapter = None
         self.calls = []
+        self.config = SimpleNamespace(_attn_implementation="sdpa")
+        self._input_embeddings = SimpleNamespace(
+            weight=torch.zeros(1, dtype=torch.bfloat16)
+        )
+
+    def get_input_embeddings(self):
+        return self._input_embeddings
 
     def set_adapter(self, adapter):
         self.adapter = adapter
@@ -362,16 +369,30 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
         probe = sampler.run_cache_equivalence_probe(
             model, tokenizer, self.probe_record(), "smoke", "cpu"
         )
-        roles = [*sampler.PANEL_ORDER, None]
-        # Five independent prefills, then cached/fresh pairs in the same order.
+        first = [*sampler.PANEL_ORDER, None]
+        second = [None, *reversed(sampler.PANEL_ORDER)]
+        # Each execution has an independent prefill and cached step.  The
+        # diagnostic full-prefix forwards return to canonical role order.
         self.assertEqual(
             [adapter for adapter, _ in model.calls],
-            [*roles, *(adapter for role in roles for adapter in (role, role))],
+            [*first, *first, *second, *second, *first],
         )
         self.assertEqual(probe["roles"], [*sampler.PANEL_ORDER, "base"])
+        self.assertEqual(
+            probe["execution_orders"],
+            {
+                "first": [*sampler.PANEL_ORDER, "base"],
+                "second": ["base", *reversed(sampler.PANEL_ORDER)],
+            },
+        )
+        self.assertTrue(probe["adapter_order_cycled"])
         self.assertTrue(probe["cache_objects_unique"])
+        self.assertEqual(probe["cache_object_count"], 10)
         self.assertTrue(probe["cache_tensor_storage_sets_checked"])
         self.assertTrue(probe["cache_tensor_storages_disjoint"])
+        self.assertEqual(
+            probe["protocol"], sampler.CACHE_EQUIVALENCE_PROBE_PROTOCOL
+        )
         self.assertEqual(
             tokenizer.encoded,
             (sampler.CACHE_EQUIVALENCE_CONTINUATION_TEXT, False),
@@ -384,20 +405,23 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
             model, tokenizer, self.probe_record(), "confirmation", "cpu"
         )
         prompt, full = (7, 8), (7, 8, 4)
-        self.assertEqual([prefix for _, prefix in model.calls[:5]], [prompt] * 5)
-        self.assertEqual([prefix for _, prefix in model.calls[5:]], [full] * 10)
+        self.assertEqual(
+            [prefix for _, prefix in model.calls],
+            [prompt] * 5 + [full] * 5 + [prompt] * 5 + [full] * 10,
+        )
         self.assertEqual(probe["continuation_token_id"], 4)
         self.assertEqual(probe["prompt_tokens"], 2)
         self.assertEqual(
             probe["prompt_token_ids_sha256"],
             sampler.sha256_bytes(sampler.canonical_bytes([7, 8])),
         )
-        self.assertTrue(probe["same_prefix_and_token_all_roles"])
-        self.assertTrue(all(
-            row["allclose"] for row in probe["comparisons"].values()
-        ))
+        self.assertTrue(probe["same_prompt_and_token_both_executions"])
+        for evidence in probe["repeatability"].values():
+            self.assertTrue(evidence["cache_tensor_values_bitwise_equal"])
+            self.assertTrue(evidence["cached_next_logits_bitwise_equal"])
+            self.assertEqual(evidence["cached_next_logits_max_abs_diff"], 0.0)
 
-    def test_live_probe_rejects_cached_vs_full_prefix_logit_mismatch(self):
+    def test_cached_vs_full_prefix_mismatch_is_diagnostic_not_gate(self):
         class MismatchModel(FakeSharedPeftModel):
             def __call__(self, **kwargs):
                 cached = kwargs.get("past_key_values") is not None
@@ -406,13 +430,163 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
                     result.logits[0, -1, 0] += 1.0
                 return result
 
-        with self.assertRaisesRegex(ValueError, "next logits mismatch for A"):
+        probe = sampler.run_cache_equivalence_probe(
+            MismatchModel(),
+            FakeTokenizer(),
+            self.probe_record(),
+            "smoke",
+            "cpu",
+        )
+        self.assertEqual(probe["result"], "PASS")
+        self.assertFalse(
+            probe["diagnostic_policy"][
+                "cached_vs_fresh_full_prefix_is_hard_gate"
+            ]
+        )
+        for diagnostic in probe["cached_vs_full_prefix_diagnostics"].values():
+            self.assertGreater(diagnostic["raw_max_abs_diff"], 0.0)
+            self.assertFalse(diagnostic["legacy_allclose_1e3"])
+
+    def test_live_probe_rejects_cached_graph_logit_nondeterminism(self):
+        class NondeterministicModel(FakeSharedPeftModel):
+            def __init__(self):
+                super().__init__()
+                self.cached_a_calls = 0
+
+            def __call__(self, **kwargs):
+                cached = kwargs.get("past_key_values") is not None
+                result = super().__call__(**kwargs)
+                if cached and self.adapter == "A":
+                    self.cached_a_calls += 1
+                    if self.cached_a_calls == 2:
+                        result.logits[0, -1, 0] += 1.0
+                return result
+
+        with self.assertRaisesRegex(
+            ValueError, "cached-graph next logits are not bitwise stable for A"
+        ):
             sampler.run_cache_equivalence_probe(
-                MismatchModel(),
+                NondeterministicModel(),
                 FakeTokenizer(),
                 self.probe_record(),
                 "smoke",
                 "cpu",
+            )
+
+    def test_live_probe_rejects_cached_graph_value_corruption(self):
+        class CorruptCacheModel(FakeSharedPeftModel):
+            def __init__(self):
+                super().__init__()
+                self.cached_a_calls = 0
+
+            def __call__(self, **kwargs):
+                cached = kwargs.get("past_key_values") is not None
+                result = super().__call__(**kwargs)
+                if cached and self.adapter == "A":
+                    self.cached_a_calls += 1
+                    if self.cached_a_calls == 2:
+                        result.past_key_values.key_cache[0].add_(1)
+                return result
+
+        with self.assertRaisesRegex(
+            ValueError, "cached-graph cache tensor values differ for A"
+        ):
+            sampler.run_cache_equivalence_probe(
+                CorruptCacheModel(),
+                FakeTokenizer(),
+                self.probe_record(),
+                "smoke",
+                "cpu",
+            )
+
+    def test_probe_schema_rejects_hard_gate_tamper_but_allows_diagnostic_false(self):
+        probe = sampler.run_cache_equivalence_probe(
+            FakeSharedPeftModel(),
+            FakeTokenizer(),
+            self.probe_record(),
+            "smoke",
+            "cpu",
+        )
+        tampered = json.loads(json.dumps(probe))
+        tampered["repeatability"]["A"][
+            "cached_next_logits_bitwise_equal"
+        ] = False
+        with self.assertRaisesRegex(ValueError, "repeatability differs for A"):
+            sampler.audit_cache_equivalence_probe(tampered, "smoke")
+
+        tampered = json.loads(json.dumps(probe))
+        tampered["probe_seconds"] = float("nan")
+        with self.assertRaisesRegex(ValueError, "metadata differs"):
+            sampler.audit_cache_equivalence_probe(tampered, "smoke")
+
+        diagnostic_only = json.loads(json.dumps(probe))
+        diagnostic_only["cached_vs_full_prefix_diagnostics"]["A"][
+            "legacy_allclose_1e3"
+        ] = False
+        sampler.audit_cache_equivalence_probe(diagnostic_only, "smoke")
+
+    def test_probe_static_contract_seals_exact_v2_schema(self):
+        contract = sampler.cache_equivalence_probe_static_contract()
+        body = {
+            key: value for key, value in contract.items() if key != "contract_sha256"
+        }
+        self.assertEqual(
+            contract["contract_sha256"],
+            sampler.sha256_bytes(sampler.canonical_bytes(body)),
+        )
+        self.assertEqual(
+            contract["protocol"], sampler.CACHE_EQUIVALENCE_PROBE_PROTOCOL
+        )
+        self.assertEqual(
+            contract["execution_orders"],
+            {
+                "first": ["A", "B1", "B2", "B3", "base"],
+                "second": ["base", "B3", "B2", "B1", "A"],
+            },
+        )
+        self.assertEqual(contract["cache_object_count"], 10)
+        self.assertFalse(
+            contract["diagnostic_policy"][
+                "cached_vs_fresh_full_prefix_is_hard_gate"
+            ]
+        )
+
+    def test_setup_resume_ignores_only_non_gating_diagnostic_drift(self):
+        protocol = {"file_sha256": "a" * 64, "payload_sha256": "b" * 64}
+        first = sampler.run_cache_equivalence_probe(
+            FakeSharedPeftModel(),
+            FakeTokenizer(),
+            self.probe_record(),
+            "smoke",
+            "cpu",
+        )
+        second = json.loads(json.dumps(first))
+        second["probe_seconds"] += 1.0
+        second["cached_vs_full_prefix_diagnostics"]["A"][
+            "raw_max_abs_diff"
+        ] += 0.25
+        with tempfile.TemporaryDirectory() as phase_root:
+            sampler.write_or_audit_setup_timing(
+                phase_root, protocol, "smoke", 3.0, first
+            )
+            observed_seconds, observed_probe = sampler.write_or_audit_setup_timing(
+                phase_root, protocol, "smoke", 4.0, second
+            )
+        self.assertEqual(observed_seconds, 3.0)
+        self.assertEqual(observed_probe, first)
+
+    def test_live_probe_requires_frozen_bfloat16_sdpa_backend(self):
+        eager = FakeSharedPeftModel()
+        eager.config._attn_implementation = "eager"
+        with self.assertRaisesRegex(ValueError, "frozen BF16/SDPA"):
+            sampler.run_cache_equivalence_probe(
+                eager, FakeTokenizer(), self.probe_record(), "smoke", "cpu"
+            )
+        fp32 = FakeSharedPeftModel()
+        fp32.get_input_embeddings().weight = torch.zeros(1, dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "frozen BF16/SDPA"):
+            sampler.run_cache_equivalence_probe(
+                fp32, FakeTokenizer(), self.probe_record(), "smoke", "cpu"
             )
 
     def test_all_adapters_and_base_advance_on_the_same_selected_prefix(self):
@@ -1058,6 +1232,15 @@ class CpuPreflightTests(unittest.TestCase):
         load_weights.assert_not_called()
         self.assertEqual(
             json.loads(stdout.getvalue())["base_model_snapshot"], base_snapshot
+        )
+        preflight = json.loads(stdout.getvalue())
+        contract = preflight["cache_equivalence_probe_contract"]
+        contract_body = {
+            key: value for key, value in contract.items() if key != "contract_sha256"
+        }
+        self.assertEqual(
+            contract["contract_sha256"],
+            sampler.sha256_bytes(sampler.canonical_bytes(contract_body)),
         )
 
     @unittest.skipUnless(
