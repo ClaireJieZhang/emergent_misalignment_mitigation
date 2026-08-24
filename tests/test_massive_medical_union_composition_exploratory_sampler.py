@@ -33,9 +33,9 @@ class FakeMatcher:
 
 
 class FakeCache:
-    def __init__(self, prefix, adapter):
+    def __init__(self, prefix, role):
         self.prefix = list(prefix)
-        self.adapter = adapter
+        self.role = role
         # Mimic a discoverable DynamicCache layout so the production probe can
         # prove that distinct cache objects also own distinct tensor storage.
         self.key_cache = [torch.tensor(self.prefix, dtype=torch.float32)]
@@ -45,31 +45,36 @@ class FakeCache:
         return len(self.prefix)
 
 
-class FakeSharedPeftModel:
-    """Tiny shared base whose independent caches retain their selected adapter."""
+class FakeIndependentModel:
+    """Tiny immutable-role model with independently owned parameters and caches."""
 
-    def __init__(self):
-        self.adapter = None
+    def __init__(self, role, trace=None):
+        self.role = role
         self.calls = []
-        self.config = SimpleNamespace(_attn_implementation="sdpa")
+        self.trace = trace if trace is not None else []
+        self.config = SimpleNamespace(
+            _attn_implementation="sdpa", use_cache=True, vocab_size=10
+        )
+        self.generation_config = SimpleNamespace(eos_token_id=9)
+        self.training = False
+        self.peft_config = None if role == "base" else {role: object()}
+        self.active_adapters = [] if role == "base" else [role]
+        self.weight = torch.nn.Parameter(
+            torch.zeros(1, dtype=torch.bfloat16), requires_grad=False
+        )
         self._input_embeddings = SimpleNamespace(
-            weight=torch.zeros(1, dtype=torch.bfloat16)
+            weight=self.weight
         )
 
     def get_input_embeddings(self):
         return self._input_embeddings
 
-    def set_adapter(self, adapter):
-        self.adapter = adapter
+    def named_parameters(self):
+        yield "weight", self.weight
 
-    @contextlib.contextmanager
-    def disable_adapter(self):
-        previous = self.adapter
-        self.adapter = None
-        try:
-            yield
-        finally:
-            self.adapter = previous
+    def eval(self):
+        self.training = False
+        return self
 
     def __call__(
         self,
@@ -83,8 +88,9 @@ class FakeSharedPeftModel:
         del attention_mask, use_cache, return_dict
         previous = [] if past_key_values is None else past_key_values.prefix
         prefix = previous + input_ids[0].tolist()
-        self.calls.append((self.adapter, tuple(prefix)))
-        next_cache = FakeCache(prefix, self.adapter)
+        self.calls.append(tuple(prefix))
+        self.trace.append((self.role, tuple(prefix)))
+        next_cache = FakeCache(prefix, self.role)
         # Generate 2, then 3, then EOS=9.  Deliberately BF16 to test the
         # float32-before-log-softmax inference contract.
         preferred = {2: 2, 3: 3}.get(len(prefix), 9)
@@ -93,6 +99,58 @@ class FakeSharedPeftModel:
         )
         logits[0, -1, preferred] = 8.0
         return SimpleNamespace(logits=logits, past_key_values=next_cache)
+
+
+def fake_independent_models(model_type=FakeIndependentModel):
+    trace = []
+    models = {
+        role: model_type(role, trace) for role in sampler.INDEPENDENT_MODEL_ORDER
+    }
+    return models, trace
+
+
+def fake_memory_reader(device):
+    gib = 1024**3
+    return {
+        "device": str(device),
+        "device_name": "fake-H200",
+        "total_memory_bytes": 140 * gib,
+        "free_memory_bytes": 48 * gib,
+        "allocated_memory_bytes": 80 * gib,
+        "reserved_memory_bytes": 88 * gib,
+        "peak_allocated_memory_bytes": 82 * gib,
+    }
+
+
+def production_device_probe(probe):
+    """Translate synthetic CPU tensor evidence into the frozen artifact device."""
+    result = json.loads(json.dumps(probe))
+    result["device"] = "cuda:0"
+    result["gpu_memory"]["device"] = "cuda:0"
+    for role in sampler.INDEPENDENT_MODEL_ORDER:
+        result["model_isolation"][role]["parameter_devices"] = ["cuda:0"]
+        result["cache_execution"][role]["cache_tensor_devices"] = ["cuda:0"]
+    return result
+
+
+def run_synthetic_probe(models, tokenizer, record, phase, memory_reader):
+    """Exercise CPU tensors, then validate the exact production artifact schema."""
+    with mock.patch.object(
+        sampler,
+        "audit_cache_equivalence_probe",
+        side_effect=lambda probe, observed_phase: probe,
+    ):
+        probe = sampler.run_cache_equivalence_probe(
+            models,
+            tokenizer,
+            record,
+            phase,
+            "cpu",
+            memory_reader=memory_reader,
+        )
+    result = production_device_probe(probe)
+    sampler.audit_cache_equivalence_probe(result, phase)
+    return result
 
 
 class FakeTokenizer:
@@ -354,7 +412,7 @@ class MaskAndNormalizationTests(unittest.TestCase):
         self.assertIs(matcher.apply, True)
 
 
-class SharedCacheAndGenerationTests(unittest.TestCase):
+class IndependentModelAndGenerationTests(unittest.TestCase):
     @staticmethod
     def probe_record():
         return {
@@ -363,31 +421,40 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
             "prompt_sha256": "b" * 64,
         }
 
-    def test_live_probe_switches_every_adapter_and_disables_base(self):
-        model = FakeSharedPeftModel()
+    def run_probe(self, models=None, phase="smoke", memory_reader=fake_memory_reader):
+        if models is None:
+            models, _ = fake_independent_models()
+        probe = run_synthetic_probe(
+            models,
+            FakeTokenizer(),
+            self.probe_record(),
+            phase,
+            memory_reader,
+        )
+        return probe
+
+    def test_live_probe_uses_five_independent_models_without_switching(self):
+        models, trace = fake_independent_models()
         tokenizer = FakeTokenizer()
-        probe = sampler.run_cache_equivalence_probe(
-            model, tokenizer, self.probe_record(), "smoke", "cpu"
+        probe = run_synthetic_probe(
+            models,
+            tokenizer,
+            self.probe_record(),
+            "smoke",
+            fake_memory_reader,
         )
-        first = [*sampler.PANEL_ORDER, None]
-        second = [None, *reversed(sampler.PANEL_ORDER)]
-        # Each execution has an independent prefill and cached step.  The
-        # diagnostic full-prefix forwards return to canonical role order.
+        roles = list(sampler.INDEPENDENT_MODEL_ORDER)
         self.assertEqual(
-            [adapter for adapter, _ in model.calls],
-            [*first, *first, *second, *second, *first],
+            [role for role, _ in trace], [*roles, *roles, *roles]
         )
-        self.assertEqual(probe["roles"], [*sampler.PANEL_ORDER, "base"])
-        self.assertEqual(
-            probe["execution_orders"],
-            {
-                "first": [*sampler.PANEL_ORDER, "base"],
-                "second": ["base", *reversed(sampler.PANEL_ORDER)],
-            },
-        )
-        self.assertTrue(probe["adapter_order_cycled"])
+        self.assertEqual(probe["roles"], roles)
+        self.assertTrue(probe["model_objects_unique"])
+        self.assertEqual(probe["model_object_count"], 5)
+        self.assertTrue(probe["single_active_adapter_per_reference"])
+        self.assertFalse(probe["scientific_adapter_switching_used"])
+        self.assertTrue(probe["parameter_storages_disjoint"])
         self.assertTrue(probe["cache_objects_unique"])
-        self.assertEqual(probe["cache_object_count"], 10)
+        self.assertEqual(probe["cache_object_count"], 5)
         self.assertTrue(probe["cache_tensor_storage_sets_checked"])
         self.assertTrue(probe["cache_tensor_storages_disjoint"])
         self.assertEqual(
@@ -399,15 +466,18 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
         )
 
     def test_live_probe_uses_one_exact_prefix_and_continuation_token(self):
-        model = FakeSharedPeftModel()
+        models, trace = fake_independent_models()
         tokenizer = FakeTokenizer()
-        probe = sampler.run_cache_equivalence_probe(
-            model, tokenizer, self.probe_record(), "confirmation", "cpu"
+        probe = run_synthetic_probe(
+            models,
+            tokenizer,
+            self.probe_record(),
+            "confirmation",
+            fake_memory_reader,
         )
         prompt, full = (7, 8), (7, 8, 4)
         self.assertEqual(
-            [prefix for _, prefix in model.calls],
-            [prompt] * 5 + [full] * 5 + [prompt] * 5 + [full] * 10,
+            [prefix for _, prefix in trace], [prompt] * 5 + [full] * 10
         )
         self.assertEqual(probe["continuation_token_id"], 4)
         self.assertEqual(probe["prompt_tokens"], 2)
@@ -415,14 +485,17 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
             probe["prompt_token_ids_sha256"],
             sampler.sha256_bytes(sampler.canonical_bytes([7, 8])),
         )
-        self.assertTrue(probe["same_prompt_and_token_both_executions"])
-        for evidence in probe["repeatability"].values():
-            self.assertTrue(evidence["cache_tensor_values_bitwise_equal"])
-            self.assertTrue(evidence["cached_next_logits_bitwise_equal"])
-            self.assertEqual(evidence["cached_next_logits_max_abs_diff"], 0.0)
+        for role, evidence in probe["model_isolation"].items():
+            self.assertEqual(
+                evidence["active_adapters"], [] if role == "base" else [role]
+            )
+        for evidence in probe["cache_execution"].values():
+            self.assertEqual(evidence["prefill_cache_length"], 2)
+            self.assertEqual(evidence["stepped_cache_length"], 3)
+            self.assertTrue(evidence["next_logits_finite"])
 
     def test_cached_vs_full_prefix_mismatch_is_diagnostic_not_gate(self):
-        class MismatchModel(FakeSharedPeftModel):
+        class MismatchModel(FakeIndependentModel):
             def __call__(self, **kwargs):
                 cached = kwargs.get("past_key_values") is not None
                 result = super().__call__(**kwargs)
@@ -430,13 +503,8 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
                     result.logits[0, -1, 0] += 1.0
                 return result
 
-        probe = sampler.run_cache_equivalence_probe(
-            MismatchModel(),
-            FakeTokenizer(),
-            self.probe_record(),
-            "smoke",
-            "cpu",
-        )
+        models, _ = fake_independent_models(MismatchModel)
+        probe = self.run_probe(models)
         self.assertEqual(probe["result"], "PASS")
         self.assertFalse(
             probe["diagnostic_policy"][
@@ -447,75 +515,102 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
             self.assertGreater(diagnostic["raw_max_abs_diff"], 0.0)
             self.assertFalse(diagnostic["legacy_allclose_1e3"])
 
-    def test_live_probe_rejects_cached_graph_logit_nondeterminism(self):
-        class NondeterministicModel(FakeSharedPeftModel):
-            def __init__(self):
-                super().__init__()
-                self.cached_a_calls = 0
+    def test_live_probe_rejects_model_object_and_parameter_storage_aliases(self):
+        models, _ = fake_independent_models()
+        models["B1"] = models["A"]
+        with self.assertRaisesRegex(ValueError, "shares a model object"):
+            self.run_probe(models)
 
+        models, _ = fake_independent_models()
+        models["B1"].weight = models["A"].weight
+        models["B1"]._input_embeddings.weight = models["A"].weight
+        with self.assertRaisesRegex(ValueError, "share parameter storage"):
+            self.run_probe(models)
+
+    def test_live_probe_rejects_wrong_single_adapter_and_backend(self):
+        models, _ = fake_independent_models()
+        models["B2"].active_adapters = ["A"]
+        with self.assertRaisesRegex(ValueError, "adapter identity differs for B2"):
+            self.run_probe(models)
+
+        models, _ = fake_independent_models()
+        models["B3"].config._attn_implementation = "eager"
+        with self.assertRaisesRegex(ValueError, "frozen eval BF16/SDPA"):
+            self.run_probe(models)
+
+    def test_plain_transformers_base_never_calls_peft_active_adapter_accessor(self):
+        models, _ = fake_independent_models()
+        base = models["base"]
+        del base.active_adapters
+        base._hf_peft_config_loaded = False
+
+        def no_adapter_loaded():
+            raise ValueError("No adapter loaded. Please load an adapter first.")
+
+        base.active_adapters = no_adapter_loaded
+        probe = self.run_probe(models)
+        self.assertEqual(probe["model_isolation"]["base"]["active_adapters"], [])
+
+        models, _ = fake_independent_models()
+        models["base"]._hf_peft_config_loaded = True
+        with self.assertRaisesRegex(ValueError, "direct base unexpectedly"):
+            self.run_probe(models)
+
+    def test_live_probe_rejects_cache_storage_alias_and_nonfinite_logits(self):
+        models, _ = fake_independent_models()
+        original = sampler.run_independent_cached_probe
+
+        def alias_cache(*args, **kwargs):
+            states = original(*args, **kwargs)
+            states["B1"]["cache"] = states["A"]["cache"]
+            return states
+
+        with mock.patch.object(
+            sampler, "run_independent_cached_probe", side_effect=alias_cache
+        ):
+            with self.assertRaisesRegex(ValueError, "shared KV-cache object"):
+                self.run_probe(models)
+
+        class NonfiniteModel(FakeIndependentModel):
             def __call__(self, **kwargs):
-                cached = kwargs.get("past_key_values") is not None
                 result = super().__call__(**kwargs)
-                if cached and self.adapter == "A":
-                    self.cached_a_calls += 1
-                    if self.cached_a_calls == 2:
-                        result.logits[0, -1, 0] += 1.0
+                if kwargs.get("past_key_values") is not None and self.role == "A":
+                    result.logits[0, -1, 0] = float("nan")
                 return result
 
-        with self.assertRaisesRegex(
-            ValueError, "cached-graph next logits are not bitwise stable for A"
-        ):
-            sampler.run_cache_equivalence_probe(
-                NondeterministicModel(),
-                FakeTokenizer(),
-                self.probe_record(),
-                "smoke",
-                "cpu",
-            )
+        models, _ = fake_independent_models(NonfiniteModel)
+        with self.assertRaisesRegex(ValueError, "cached logits are invalid for A"):
+            self.run_probe(models)
 
-    def test_live_probe_rejects_cached_graph_value_corruption(self):
-        class CorruptCacheModel(FakeSharedPeftModel):
-            def __init__(self):
-                super().__init__()
-                self.cached_a_calls = 0
+    def test_live_probe_rejects_insufficient_prospective_gpu_headroom(self):
+        def low_memory(device):
+            result = fake_memory_reader(device)
+            result["free_memory_bytes"] = 31 * 1024**3
+            return result
 
-            def __call__(self, **kwargs):
-                cached = kwargs.get("past_key_values") is not None
-                result = super().__call__(**kwargs)
-                if cached and self.adapter == "A":
-                    self.cached_a_calls += 1
-                    if self.cached_a_calls == 2:
-                        result.past_key_values.key_cache[0].add_(1)
-                return result
-
-        with self.assertRaisesRegex(
-            ValueError, "cached-graph cache tensor values differ for A"
-        ):
-            sampler.run_cache_equivalence_probe(
-                CorruptCacheModel(),
-                FakeTokenizer(),
-                self.probe_record(),
-                "smoke",
-                "cpu",
-            )
+        with self.assertRaisesRegex(ValueError, "memory/headroom contract failed"):
+            self.run_probe(memory_reader=low_memory)
 
     def test_probe_schema_rejects_hard_gate_tamper_but_allows_diagnostic_false(self):
-        probe = sampler.run_cache_equivalence_probe(
-            FakeSharedPeftModel(),
-            FakeTokenizer(),
-            self.probe_record(),
-            "smoke",
-            "cpu",
-        )
+        probe = self.run_probe()
         tampered = json.loads(json.dumps(probe))
-        tampered["repeatability"]["A"][
-            "cached_next_logits_bitwise_equal"
+        tampered["model_isolation"]["A"][
+            "parameter_storage_disjoint_from_other_models"
         ] = False
-        with self.assertRaisesRegex(ValueError, "repeatability differs for A"):
+        with self.assertRaisesRegex(ValueError, "model isolation differs for A"):
             sampler.audit_cache_equivalence_probe(tampered, "smoke")
 
         tampered = json.loads(json.dumps(probe))
         tampered["probe_seconds"] = float("nan")
+        with self.assertRaisesRegex(ValueError, "metadata differs"):
+            sampler.audit_cache_equivalence_probe(tampered, "smoke")
+
+        tampered = json.loads(json.dumps(probe))
+        tampered["device"] = "cpu"
+        tampered["gpu_memory"]["device"] = "cpu"
+        for role in sampler.INDEPENDENT_MODEL_ORDER:
+            tampered["model_isolation"][role]["parameter_devices"] = ["cpu"]
+            tampered["cache_execution"][role]["cache_tensor_devices"] = ["cpu"]
         with self.assertRaisesRegex(ValueError, "metadata differs"):
             sampler.audit_cache_equivalence_probe(tampered, "smoke")
 
@@ -525,7 +620,7 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
         ] = False
         sampler.audit_cache_equivalence_probe(diagnostic_only, "smoke")
 
-    def test_probe_static_contract_seals_exact_v2_schema(self):
+    def test_probe_static_contract_seals_exact_v3_schema(self):
         contract = sampler.cache_equivalence_probe_static_contract()
         body = {
             key: value for key, value in contract.items() if key != "contract_sha256"
@@ -537,14 +632,19 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
         self.assertEqual(
             contract["protocol"], sampler.CACHE_EQUIVALENCE_PROBE_PROTOCOL
         )
-        self.assertEqual(
-            contract["execution_orders"],
-            {
-                "first": ["A", "B1", "B2", "B3", "base"],
-                "second": ["base", "B3", "B2", "B1", "A"],
-            },
+        self.assertEqual(contract["roles"], ["A", "B1", "B2", "B3", "base"])
+        self.assertEqual(contract["model_object_count"], 5)
+        self.assertEqual(contract["cache_object_count"], 5)
+        self.assertFalse(
+            contract["hard_gate"][
+                "cached_next_logits_bitwise_repeatability_required"
+            ]
         )
-        self.assertEqual(contract["cache_object_count"], 10)
+        self.assertFalse(
+            contract["gpu_memory_contract"][
+                "prior_incident_values_used_as_threshold"
+            ]
+        )
         self.assertFalse(
             contract["diagnostic_policy"][
                 "cached_vs_fresh_full_prefix_is_hard_gate"
@@ -553,13 +653,7 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
 
     def test_setup_resume_ignores_only_non_gating_diagnostic_drift(self):
         protocol = {"file_sha256": "a" * 64, "payload_sha256": "b" * 64}
-        first = sampler.run_cache_equivalence_probe(
-            FakeSharedPeftModel(),
-            FakeTokenizer(),
-            self.probe_record(),
-            "smoke",
-            "cpu",
-        )
+        first = self.run_probe()
         second = json.loads(json.dumps(first))
         second["probe_seconds"] += 1.0
         second["cached_vs_full_prefix_diagnostics"]["A"][
@@ -576,21 +670,19 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
         self.assertEqual(observed_probe, first)
 
     def test_live_probe_requires_frozen_bfloat16_sdpa_backend(self):
-        eager = FakeSharedPeftModel()
-        eager.config._attn_implementation = "eager"
-        with self.assertRaisesRegex(ValueError, "frozen BF16/SDPA"):
-            sampler.run_cache_equivalence_probe(
-                eager, FakeTokenizer(), self.probe_record(), "smoke", "cpu"
-            )
-        fp32 = FakeSharedPeftModel()
-        fp32.get_input_embeddings().weight = torch.zeros(1, dtype=torch.float32)
-        with self.assertRaisesRegex(ValueError, "frozen BF16/SDPA"):
-            sampler.run_cache_equivalence_probe(
-                fp32, FakeTokenizer(), self.probe_record(), "smoke", "cpu"
-            )
+        models, _ = fake_independent_models()
+        models["A"].config._attn_implementation = "eager"
+        with self.assertRaisesRegex(ValueError, "frozen.*BF16/SDPA"):
+            self.run_probe(models)
+        models, _ = fake_independent_models()
+        models["base"].get_input_embeddings().weight = torch.zeros(
+            1, dtype=torch.float32
+        )
+        with self.assertRaisesRegex(ValueError, "frozen.*BF16/SDPA"):
+            self.run_probe(models)
 
     def test_all_adapters_and_base_advance_on_the_same_selected_prefix(self):
-        model = FakeSharedPeftModel()
+        models, _ = fake_independent_models()
         tokenizer = FakeTokenizer()
         record = {
             "question_id": "medical_official16_00",
@@ -601,7 +693,7 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
             record=record,
             sample_index=0,
             prompt_ids=[7, 8],
-            model=model,
+            models=models,
             tokenizer=tokenizer,
             method=sampler.method_by_id("delta_min_m4_q4"),
             profile=tiny_profile(),
@@ -611,12 +703,47 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
         self.assertEqual(sample["response"], "2 3")
         self.assertEqual(sample["finish_reason"], "stop")
         expected_prefixes = [(7, 8), (7, 8, 2), (7, 8, 2, 3)]
-        for adapter in (*sampler.PANEL_ORDER, None):
-            observed = [prefix for role, prefix in model.calls if role == adapter]
-            self.assertEqual(observed, expected_prefixes)
+        for role in sampler.INDEPENDENT_MODEL_ORDER:
+            self.assertEqual(models[role].calls, expected_prefixes)
+
+    def test_ordinary_methods_never_call_base_and_paired_base_calls_only_base(self):
+        record = {
+            "question_id": "q",
+            "prompt": "p",
+            "prompt_sha256": "c" * 64,
+        }
+        models, _ = fake_independent_models()
+        sampler.generate_sample(
+            record=record,
+            sample_index=0,
+            prompt_ids=[7, 8],
+            models=models,
+            tokenizer=FakeTokenizer(),
+            method=sampler.method_by_id("ordinary_min_m4_q4"),
+            profile=tiny_profile(),
+            device="cpu",
+            stop_ids={9},
+        )
+        self.assertFalse(models["base"].calls)
+        self.assertTrue(all(models[role].calls for role in sampler.PANEL_ORDER))
+
+        models, _ = fake_independent_models()
+        sampler.generate_sample(
+            record=record,
+            sample_index=0,
+            prompt_ids=[7, 8],
+            models=models,
+            tokenizer=FakeTokenizer(),
+            method=sampler.PAIRED_BASE,
+            profile=tiny_profile(),
+            device="cpu",
+            stop_ids={9},
+        )
+        self.assertTrue(models["base"].calls)
+        self.assertTrue(all(not models[role].calls for role in sampler.PANEL_ORDER))
 
     def test_log_softmax_is_computed_after_float32_cast(self):
-        model = FakeSharedPeftModel()
+        models, _ = fake_independent_models()
         captured = []
         original = sampler.compose_raw_scores
 
@@ -633,7 +760,7 @@ class SharedCacheAndGenerationTests(unittest.TestCase):
                 },
                 sample_index=0,
                 prompt_ids=[7, 8],
-                model=model,
+                models=models,
                 tokenizer=FakeTokenizer(),
                 method=sampler.method_by_id("ordinary_min_m4_q4"),
                 profile=tiny_profile(),
@@ -749,6 +876,27 @@ class DeterminismAndPlanTests(unittest.TestCase):
         self.assertTrue(base_meta["is_paired_base"])
         self.assertFalse(method_meta["is_paired_base"])
         self.assertTrue(method_meta["same_transformers_backend_as_paired_base"])
+        self.assertEqual(method_meta["backend"], sampler.INDEPENDENT_MODEL_BACKEND)
+        self.assertIs(method_meta["scientific_adapter_switching_used"], False)
+        self.assertEqual(
+            method_meta["runtime_model_architecture"],
+            {
+                "backend": sampler.INDEPENDENT_MODEL_BACKEND,
+                "model_roles": list(sampler.INDEPENDENT_MODEL_ORDER),
+                "model_object_count": 5,
+                "reference_model_kind": "independent_peft_single_adapter",
+                "base_model_kind": "independent_direct_non_peft",
+                "shared_parameter_storage": False,
+                "scientific_adapter_switching_used": False,
+                "kv_cache_ownership": "independent_per_active_role",
+                "probe_protocol": sampler.CACHE_EQUIVALENCE_PROBE_PROTOCOL,
+                "probe_contract_sha256": (
+                    sampler.cache_equivalence_probe_static_contract()[
+                        "contract_sha256"
+                    ]
+                ),
+            },
+        )
         self.assertEqual(
             method_meta["generation_config"]["structured_constraint_profile"],
             sampler.STRUCTURED_PROFILE,
@@ -895,12 +1043,13 @@ class SealAndResumeTests(unittest.TestCase):
             }
             for index, name in enumerate(names)
         ]
-        probe = sampler.run_cache_equivalence_probe(
-            FakeSharedPeftModel(),
+        models, _ = fake_independent_models()
+        probe = run_synthetic_probe(
+            models,
             FakeTokenizer(),
-            SharedCacheAndGenerationTests.probe_record(),
+            IndependentModelAndGenerationTests.probe_record(),
             "smoke",
-            "cpu",
+            fake_memory_reader,
         )
         body = sampler.build_timing_record(
             protocol, "smoke", 3.0, streams, probe
@@ -1096,21 +1245,27 @@ class PinnedBaseSnapshotTests(unittest.TestCase):
             local_files_only=True,
         )
 
-        class FakeLoadedPeft:
-            def __init__(self):
-                self.peft_config = {"A": object()}
+        class FakeLoadedModel:
+            def __init__(self, identity):
+                self.identity = identity
                 self.config = SimpleNamespace(use_cache=False)
-
-            def load_adapter(self, path, adapter_name, is_trainable):
-                del path, is_trainable
-                self.peft_config[adapter_name] = object()
+                self.training = True
 
             def eval(self):
+                self.training = False
                 return self
 
-        loaded = FakeLoadedPeft()
-        model_loader = mock.Mock(return_value=object())
-        peft_loader = mock.Mock(return_value=loaded)
+        bases = [FakeLoadedModel(f"base-{index}") for index in range(5)]
+        wrapped = []
+
+        def wrap(base, path, adapter_name, is_trainable):
+            self.assertFalse(is_trainable)
+            model = FakeLoadedModel(f"{adapter_name}:{base.identity}:{path}")
+            wrapped.append(model)
+            return model
+
+        model_loader = mock.Mock(side_effect=bases)
+        peft_loader = mock.Mock(side_effect=wrap)
         fake_transformers = SimpleNamespace(
             AutoModelForCausalLM=SimpleNamespace(from_pretrained=model_loader)
         )
@@ -1128,15 +1283,38 @@ class PinnedBaseSnapshotTests(unittest.TestCase):
                 sys.modules, {"transformers": fake_transformers, "peft": fake_peft}
             ),
             self.fixture.patched(),
+            mock.patch.object(
+                sampler, "audit_independent_model_panel", return_value={}
+            ) as audit_panel,
         ):
-            self.assertIs(
-                sampler.load_shared_peft_model(protocol, "cuda:0", binding), loaded
+            models = sampler.load_independent_model_panel(
+                protocol, "cuda:0", binding
             )
-        args, kwargs = model_loader.call_args
-        self.assertEqual(args, (self.fixture.snapshot,))
-        self.assertNotIn("revision", kwargs)
-        self.assertTrue(kwargs["local_files_only"])
-        self.assertTrue(kwargs["use_safetensors"])
+        self.assertEqual(list(models), list(sampler.INDEPENDENT_MODEL_ORDER))
+        self.assertEqual(model_loader.call_count, 5)
+        self.assertEqual(peft_loader.call_count, 4)
+        self.assertEqual(len({id(model) for model in models.values()}), 5)
+        self.assertIs(models["base"], bases[-1])
+        for call in model_loader.call_args_list:
+            args, kwargs = call
+            self.assertEqual(args, (self.fixture.snapshot,))
+            self.assertNotIn("revision", kwargs)
+            self.assertTrue(kwargs["local_files_only"])
+            self.assertTrue(kwargs["use_safetensors"])
+            self.assertEqual(kwargs["device_map"], {"": "cuda:0"})
+        for role, call in zip(sampler.PANEL_ORDER, peft_loader.call_args_list):
+            args, kwargs = call
+            self.assertIs(args[0], bases[sampler.PANEL_ORDER.index(role)])
+            self.assertEqual(args[1], f"/{sampler.MODEL_NAME_BY_ROLE[role]}")
+            self.assertEqual(kwargs, {"adapter_name": role, "is_trainable": False})
+        audit_panel.assert_called_once_with(models, "cuda:0")
+
+    def test_sampler_source_forbids_runtime_adapter_switching(self):
+        with open(sampler.__file__, encoding="utf-8") as handle:
+            source = handle.read()
+        for forbidden in (".set_adapter(", ".disable_adapter(", ".load_adapter("):
+            self.assertNotIn(forbidden, source)
+        self.assertNotIn("load_shared_peft_model", source)
 
 
 class CpuPreflightTests(unittest.TestCase):
@@ -1165,11 +1343,12 @@ class CpuPreflightTests(unittest.TestCase):
         self.assertNotIn("BASE_MODEL", auto_config_call)
         self.assertNotIn("revision=", auto_config_call)
         self.assertIn("local_files_only=True", auto_config_call)
-        model_call = source.split("base = AutoModelForCausalLM.from_pretrained(", 1)[1]
-        model_call = model_call.split("\n    )", 1)[0]
-        self.assertIn("snapshot_path", model_call)
-        self.assertNotIn("BASE_MODEL", model_call)
-        self.assertIn("use_safetensors=True", model_call)
+        loader_body = source.split("def load_independent_model_panel(", 1)[1]
+        loader_body = loader_body.split("\ndef stop_token_ids(", 1)[0]
+        self.assertIn("snapshot_path", loader_body)
+        self.assertNotIn("BASE_MODEL", loader_body)
+        self.assertIn('"local_files_only": True', loader_body)
+        self.assertIn('"use_safetensors": True', loader_body)
 
     def test_preflight_audits_runtime_and_grammar_without_loading_weights(self):
         args = SimpleNamespace(
@@ -1222,7 +1401,7 @@ class CpuPreflightTests(unittest.TestCase):
                 "load_tokenizer_and_grammar",
                 return_value=(object(), object(), grammar),
             ) as load_tokenizer,
-            mock.patch.object(sampler, "load_shared_peft_model") as load_weights,
+            mock.patch.object(sampler, "load_independent_model_panel") as load_weights,
             contextlib.redirect_stdout(io.StringIO()) as stdout,
         ):
             self.assertEqual(sampler.run_phase(args), 0)

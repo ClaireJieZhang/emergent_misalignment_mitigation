@@ -17,13 +17,14 @@ on 600 rows and generates the three composition methods on the 16 x 5 medical
 bank.  There is no method, q, seed, temperature, prompt-count, or token-budget
 override.
 
-Each reference is a LoRA adapter on one shared pinned base model, but every
-reference owns an independent KV cache.  At every decoding step the sampler
-computes float32 per-reference log probabilities on the exact same evolving
-prefix, composes an *unnormalized* score, applies the XGrammar mask to that
-composed score for MASSIVE, and performs exactly one target normalization.
-The one selected token is then advanced through all four reference caches and,
-for delta-min, a fifth adapter-disabled base cache.
+Each reference is a single LoRA adapter on its own independently loaded pinned
+base model, and the paired base is a fifth independently loaded non-PEFT model.
+Every role also owns an independent KV cache.  At every decoding step the
+sampler computes float32 per-reference log probabilities on the exact same
+evolving prefix, composes an *unnormalized* score, applies the XGrammar mask to
+that composed score for MASSIVE, and performs exactly one target
+normalization.  The one selected token is then advanced through all four
+reference caches and, for delta-min, the independent base cache.
 
 This file is self-contained by repository policy.  It deliberately duplicates
 small, audited helpers instead of importing another production script as a
@@ -121,13 +122,15 @@ BASE_SAFETENSORS_SHARDS = (
 STRUCTURED_PROFILE = "const_tree_no_ws_v3"
 GENERATION_SEED = 8172026
 CACHE_EQUIVALENCE_PROBE_PROTOCOL = (
-    "massive_medical_union_composition_cache_equivalence_probe_v2"
+    "massive_medical_union_composition_cache_equivalence_probe_v3"
 )
 CACHE_EQUIVALENCE_CONTINUATION_TEXT = "."
-CACHE_REPEATABILITY_FIRST_ORDER = ("A", "B1", "B2", "B3", "base")
-# Reversing the role order deliberately cycles adapter/base state between two
-# otherwise identical executions of the prefill-then-one-token cache graph.
-CACHE_REPEATABILITY_SECOND_ORDER = ("base", "B3", "B2", "B1", "A")
+INDEPENDENT_MODEL_ORDER = ("A", "B1", "B2", "B3", "base")
+INDEPENDENT_MODEL_BACKEND = (
+    "independent_transformers_peft_models_separate_kv_caches"
+)
+CACHE_PROBE_MINIMUM_TOTAL_MEMORY_BYTES = 120 * 1024**3
+CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES = 32 * 1024**3
 CACHE_DIAGNOSTIC_TOP_K = 10
 CACHE_LEGACY_DIAGNOSTIC_ATOL = 1e-3
 CACHE_LEGACY_DIAGNOSTIC_RTOL = 1e-3
@@ -523,34 +526,18 @@ def extract_logits_and_cache(outputs):
     return logits, cache
 
 
-@contextlib.contextmanager
-def selected_adapter(model, adapter_name):
-    if adapter_name is None:
-        disable = getattr(model, "disable_adapter", None)
-        if not callable(disable):
-            raise ValueError("shared PEFT model cannot disable adapters for delta-min")
-        with disable():
-            yield
-        return
-    setter = getattr(model, "set_adapter", None)
-    if not callable(setter):
-        raise ValueError("shared PEFT model cannot select an adapter")
-    setter(adapter_name)
-    yield
+def forward_cached(model, input_ids, attention_mask, cache):
+    """Run one already-isolated model; scientific inference never switches adapters."""
+    return model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        past_key_values=cache,
+        use_cache=True,
+        return_dict=True,
+    )
 
 
-def forward_cached(model, adapter_name, input_ids, attention_mask, cache):
-    with selected_adapter(model, adapter_name):
-        return model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=cache,
-            use_cache=True,
-            return_dict=True,
-        )
-
-
-def prefill_cached_reference(model, adapter_name, prompt_ids, device):
+def prefill_cached_reference(model, prompt_ids, device):
     import torch
 
     if not prompt_ids:
@@ -558,9 +545,7 @@ def prefill_cached_reference(model, adapter_name, prompt_ids, device):
     input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     attention_mask = torch.ones_like(input_ids, device=device)
     with torch.inference_mode():
-        outputs = forward_cached(
-            model, adapter_name, input_ids, attention_mask, cache=None
-        )
+        outputs = forward_cached(model, input_ids, attention_mask, cache=None)
     logits, cache = extract_logits_and_cache(outputs)
     length = cache_sequence_length(cache)
     if length != len(prompt_ids):
@@ -570,16 +555,14 @@ def prefill_cached_reference(model, adapter_name, prompt_ids, device):
     return {"next_logits": logits[0, -1, :].float(), "cache": cache}
 
 
-def step_cached_reference(model, adapter_name, token_id, cache, device):
+def step_cached_reference(model, token_id, cache, device):
     import torch
 
     previous = cache_sequence_length(cache)
     input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
     attention_mask = torch.ones((1, previous + 1), dtype=torch.long, device=device)
     with torch.inference_mode():
-        outputs = forward_cached(
-            model, adapter_name, input_ids, attention_mask, cache=cache
-        )
+        outputs = forward_cached(model, input_ids, attention_mask, cache=cache)
     logits, next_cache = extract_logits_and_cache(outputs)
     observed = cache_sequence_length(next_cache)
     if observed != previous + 1:
@@ -589,10 +572,8 @@ def step_cached_reference(model, adapter_name, token_id, cache, device):
     return {"next_logits": logits[0, -1, :].float(), "cache": next_cache}
 
 
-def assert_independent_caches(states, base_state=None):
+def assert_independent_caches(states):
     caches = [state["cache"] for state in states]
-    if base_state is not None:
-        caches.append(base_state["cache"])
     if len({id(cache) for cache in caches}) != len(caches):
         raise ValueError("references unexpectedly share a mutable KV-cache object")
 
@@ -656,49 +637,6 @@ def cache_tensor_storage_pointers(cache):
     return pointers
 
 
-def compare_cache_tensor_inventories(first, second, role):
-    import torch
-
-    first_inventory = cache_tensor_inventory(first)
-    second_inventory = cache_tensor_inventory(second)
-    first_paths = [path for path, _ in first_inventory]
-    second_paths = [path for path, _ in second_inventory]
-    shapes_equal = (
-        first_paths == second_paths
-        and [tuple(tensor.shape) for _, tensor in first_inventory]
-        == [tuple(tensor.shape) for _, tensor in second_inventory]
-    )
-    dtypes_equal = (
-        first_paths == second_paths
-        and [str(tensor.dtype) for _, tensor in first_inventory]
-        == [str(tensor.dtype) for _, tensor in second_inventory]
-    )
-    devices_equal = (
-        first_paths == second_paths
-        and [str(tensor.device) for _, tensor in first_inventory]
-        == [str(tensor.device) for _, tensor in second_inventory]
-    )
-    values_equal = shapes_equal and dtypes_equal and devices_equal and all(
-        bool(torch.equal(left, right))
-        for (_, left), (_, right) in zip(first_inventory, second_inventory)
-    )
-    if not shapes_equal:
-        raise ValueError(f"cached-graph cache tensor shapes differ for {role}")
-    if not dtypes_equal:
-        raise ValueError(f"cached-graph cache tensor dtypes differ for {role}")
-    if not devices_equal:
-        raise ValueError(f"cached-graph cache tensor devices differ for {role}")
-    if not values_equal:
-        raise ValueError(f"cached-graph cache tensor values differ for {role}")
-    return {
-        "cache_tensor_count": len(first_inventory),
-        "cache_tensor_shapes_equal": True,
-        "cache_tensor_dtypes_equal": True,
-        "cache_tensor_devices_equal": True,
-        "cache_tensor_values_bitwise_equal": True,
-    }
-
-
 def make_prompt_ids(tokenizer, record):
     messages = []
     system = record.get("system", "")
@@ -722,7 +660,7 @@ def make_prompt_ids(tokenizer, record):
     return list(ids)
 
 
-def fresh_full_prefix_next_logits(model, adapter_name, prefix_ids, device):
+def fresh_full_prefix_next_logits(model, prefix_ids, device):
     """Evaluate one complete prefix without reusing a caller-owned KV cache."""
     import torch
 
@@ -731,9 +669,7 @@ def fresh_full_prefix_next_logits(model, adapter_name, prefix_ids, device):
     input_ids = torch.tensor([prefix_ids], dtype=torch.long, device=device)
     attention_mask = torch.ones_like(input_ids, device=device)
     with torch.inference_mode():
-        outputs = forward_cached(
-            model, adapter_name, input_ids, attention_mask, cache=None
-        )
+        outputs = forward_cached(model, input_ids, attention_mask, cache=None)
     logits, cache = extract_logits_and_cache(outputs)
     if cache_sequence_length(cache) != len(prefix_ids):
         raise ValueError("cache-equivalence fresh full-prefix cache length differs")
@@ -743,34 +679,265 @@ def fresh_full_prefix_next_logits(model, adapter_name, prefix_ids, device):
     return result
 
 
-def audit_probe_model_backend(model):
+def active_adapter_names(model):
+    value = getattr(model, "active_adapters", None)
+    if callable(value):
+        value = value()
+    if value is None:
+        value = getattr(model, "active_adapter", None)
+        if callable(value):
+            value = value()
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (tuple, list)) and all(
+        isinstance(item, str) and item for item in value
+    ):
+        return list(value)
+    raise ValueError("independent PEFT model has malformed active adapters")
+
+
+def parameter_storage_inventory(model, role, expected_device):
     import torch
 
-    config = getattr(model, "config", None)
-    get_embeddings = getattr(model, "get_input_embeddings", None)
-    embeddings = get_embeddings() if callable(get_embeddings) else None
-    weight = getattr(embeddings, "weight", None)
+    named_parameters = getattr(model, "named_parameters", None)
+    if not callable(named_parameters):
+        raise ValueError(f"independent model lacks named_parameters for {role}")
+    tensor_count = 0
+    parameter_numel = 0
+    storage_pointers = set()
+    devices = set()
+    dtypes = set()
+    for name, parameter in named_parameters():
+        if not isinstance(name, str) or not name or not isinstance(parameter, torch.Tensor):
+            raise ValueError(f"independent model parameter registry differs for {role}")
+        if parameter.numel() <= 0:
+            continue
+        tensor_count += 1
+        parameter_numel += int(parameter.numel())
+        devices.add(str(parameter.device))
+        dtypes.add(str(parameter.dtype))
+        storage = parameter.untyped_storage()
+        storage_pointers.add((str(parameter.device), int(storage.data_ptr())))
     if (
-        getattr(config, "_attn_implementation", None) != "sdpa"
-        or not isinstance(weight, torch.Tensor)
-        or weight.dtype != torch.bfloat16
+        tensor_count <= 0
+        or parameter_numel <= 0
+        or not storage_pointers
+        or devices != {expected_device}
+        or not dtypes
     ):
-        raise ValueError("cache probe requires the frozen BF16/SDPA model backend")
+        raise ValueError(f"independent model parameter placement differs for {role}")
+    return {
+        "parameter_tensor_count": tensor_count,
+        "parameter_numel": parameter_numel,
+        "parameter_storage_count": len(storage_pointers),
+        "parameter_devices": sorted(devices),
+        "parameter_dtypes": sorted(dtypes),
+    }, storage_pointers
+
+
+def audit_independent_model_panel(models, expected_device):
+    import torch
+
+    roles = list(INDEPENDENT_MODEL_ORDER)
+    if not isinstance(models, dict) or list(models) != roles:
+        raise ValueError("independent model panel order differs")
+    if len({id(models[role]) for role in roles}) != len(roles):
+        raise ValueError("independent model panel shares a model object")
+    evidence = {}
+    pointer_sets = {}
+    for role in roles:
+        model = models[role]
+        config = getattr(model, "config", None)
+        get_embeddings = getattr(model, "get_input_embeddings", None)
+        embeddings = get_embeddings() if callable(get_embeddings) else None
+        weight = getattr(embeddings, "weight", None)
+        if (
+            getattr(config, "_attn_implementation", None) != "sdpa"
+            or not isinstance(weight, torch.Tensor)
+            or weight.dtype != torch.bfloat16
+            or getattr(model, "training", False) is not False
+        ):
+            raise ValueError(
+                f"independent model requires the frozen eval BF16/SDPA backend for {role}"
+            )
+        peft_config = getattr(model, "peft_config", None)
+        if role == "base":
+            # Transformers' plain PreTrainedModel exposes PeftAdapterMixin's
+            # ``active_adapters()`` accessor, but that accessor raises when no
+            # adapter has ever been loaded.  Prove direct-base identity from
+            # its registry/flag and do not invoke the PEFT-only accessor.
+            if peft_config not in (None, {}) or bool(
+                getattr(model, "_hf_peft_config_loaded", False)
+            ):
+                raise ValueError("direct base unexpectedly exposes a PEFT adapter")
+            model_kind = "direct_base"
+            expected_adapter = None
+            configured_adapters = []
+            active_adapters = []
+        else:
+            if not isinstance(peft_config, dict):
+                raise ValueError(f"independent PEFT registry is missing for {role}")
+            configured_adapters = list(peft_config)
+            active_adapters = active_adapter_names(model)
+            if configured_adapters != [role] or active_adapters != [role]:
+                raise ValueError(f"independent PEFT adapter identity differs for {role}")
+            model_kind = "peft_single_adapter"
+            expected_adapter = role
+        parameter_evidence, pointers = parameter_storage_inventory(
+            model, role, expected_device
+        )
+        pointer_sets[role] = pointers
+        evidence[role] = {
+            "model_kind": model_kind,
+            "expected_adapter": expected_adapter,
+            "active_adapters": active_adapters,
+            "peft_config_adapters": configured_adapters,
+            "object_unique": True,
+            **parameter_evidence,
+            "parameter_storage_disjoint_from_other_models": True,
+        }
+    seen = set()
+    for role in roles:
+        if seen & pointer_sets[role]:
+            raise ValueError(f"independent models share parameter storage at {role}")
+        seen.update(pointer_sets[role])
+    return evidence
+
+
+def read_gpu_memory(device):
+    import torch
+
+    cuda_device = torch.device(device)
+    if cuda_device.type != "cuda" or cuda_device.index not in (None, 0):
+        raise ValueError("independent model probe requires cuda:0")
+    free_bytes, total_bytes = torch.cuda.mem_get_info(cuda_device)
+    return {
+        "device": "cuda:0",
+        "device_name": torch.cuda.get_device_name(cuda_device),
+        "total_memory_bytes": int(total_bytes),
+        "free_memory_bytes": int(free_bytes),
+        "allocated_memory_bytes": int(torch.cuda.memory_allocated(cuda_device)),
+        "reserved_memory_bytes": int(torch.cuda.memory_reserved(cuda_device)),
+        "peak_allocated_memory_bytes": int(
+            torch.cuda.max_memory_allocated(cuda_device)
+        ),
+    }
+
+
+def build_gpu_memory_evidence(before, after):
+    snapshot_keys = {
+        "device",
+        "device_name",
+        "total_memory_bytes",
+        "free_memory_bytes",
+        "allocated_memory_bytes",
+        "reserved_memory_bytes",
+        "peak_allocated_memory_bytes",
+    }
+    if (
+        not isinstance(before, dict)
+        or not isinstance(after, dict)
+        or set(before) != snapshot_keys
+        or set(after) != snapshot_keys
+        or before["device"] != after["device"]
+        or before["device_name"] != after["device_name"]
+        or before["total_memory_bytes"] != after["total_memory_bytes"]
+    ):
+        raise ValueError("independent model GPU memory snapshots differ")
+    numeric = (
+        "total_memory_bytes",
+        "free_memory_bytes",
+        "allocated_memory_bytes",
+        "reserved_memory_bytes",
+        "peak_allocated_memory_bytes",
+    )
+    for snapshot in (before, after):
+        if (
+            not isinstance(snapshot.get("device"), str)
+            or not snapshot["device"]
+            or not isinstance(snapshot.get("device_name"), str)
+            or not snapshot["device_name"]
+            or any(
+                isinstance(snapshot.get(key), bool)
+                or not isinstance(snapshot.get(key), int)
+                or snapshot[key] < 0
+                for key in numeric
+            )
+            or snapshot["allocated_memory_bytes"]
+            > snapshot["reserved_memory_bytes"]
+            or snapshot["reserved_memory_bytes"] > snapshot["total_memory_bytes"]
+            or snapshot["free_memory_bytes"] > snapshot["total_memory_bytes"]
+            or snapshot["peak_allocated_memory_bytes"]
+            < snapshot["allocated_memory_bytes"]
+        ):
+            raise ValueError("independent model GPU memory snapshot is invalid")
+    total_ok = before["total_memory_bytes"] >= CACHE_PROBE_MINIMUM_TOTAL_MEMORY_BYTES
+    before_ok = (
+        before["free_memory_bytes"] >= CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+    )
+    after_ok = after["free_memory_bytes"] >= CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+    if not total_ok or not before_ok or not after_ok:
+        raise ValueError("independent model GPU memory/headroom contract failed")
+    return {
+        "device": before["device"],
+        "device_name": before["device_name"],
+        "minimum_total_memory_bytes": CACHE_PROBE_MINIMUM_TOTAL_MEMORY_BYTES,
+        "minimum_free_memory_bytes_before_probe": (
+            CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+        ),
+        "minimum_free_memory_bytes_after_probe": (
+            CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+        ),
+        "total_memory_bytes": before["total_memory_bytes"],
+        "free_memory_bytes_before_probe": before["free_memory_bytes"],
+        "allocated_memory_bytes_before_probe": before[
+            "allocated_memory_bytes"
+        ],
+        "reserved_memory_bytes_before_probe": before["reserved_memory_bytes"],
+        "free_memory_bytes_after_probe": after["free_memory_bytes"],
+        "allocated_memory_bytes_after_probe": after["allocated_memory_bytes"],
+        "reserved_memory_bytes_after_probe": after["reserved_memory_bytes"],
+        "peak_allocated_memory_bytes_after_probe": after[
+            "peak_allocated_memory_bytes"
+        ],
+        "total_memory_requirement_met": True,
+        "free_memory_before_requirement_met": True,
+        "free_memory_after_requirement_met": True,
+        "headroom_requirement_met": True,
+    }
+
+
+def audit_probe_model_backends(models):
+    import torch
+
+    if not isinstance(models, dict) or list(models) != list(INDEPENDENT_MODEL_ORDER):
+        raise ValueError("cache probe independent model panel differs")
+    for role, model in models.items():
+        config = getattr(model, "config", None)
+        get_embeddings = getattr(model, "get_input_embeddings", None)
+        embeddings = get_embeddings() if callable(get_embeddings) else None
+        weight = getattr(embeddings, "weight", None)
+        if (
+            getattr(config, "_attn_implementation", None) != "sdpa"
+            or not isinstance(weight, torch.Tensor)
+            or weight.dtype != torch.bfloat16
+        ):
+            raise ValueError(
+                f"cache probe requires the frozen BF16/SDPA model backend for {role}"
+            )
     return {"model_compute_dtype": "bfloat16", "attention_implementation": "sdpa"}
 
 
-def run_cached_probe_execution(
-    model, adapters, order, prompt_ids, token_id, device
-):
+def run_independent_cached_probe(models, prompt_ids, token_id, device):
     states = {
-        role: prefill_cached_reference(
-            model, adapters[role], prompt_ids, device
-        )
-        for role in order
+        role: prefill_cached_reference(models[role], prompt_ids, device)
+        for role in INDEPENDENT_MODEL_ORDER
     }
-    for role in order:
+    for role in INDEPENDENT_MODEL_ORDER:
         states[role] = step_cached_reference(
-            model, adapters[role], token_id, states[role]["cache"], device
+            models[role], token_id, states[role]["cache"], device
         )
     return states
 
@@ -818,7 +985,7 @@ def cached_vs_full_prefix_diagnostic(cached, fresh):
 
 
 def cache_equivalence_probe_static_contract():
-    """Return the sealed, GPU-output-independent probe-v2 schema contract."""
+    """Return the sealed, output-independent independent-model probe contract."""
     top_level_keys = {
         "protocol",
         "phase",
@@ -831,9 +998,14 @@ def cache_equivalence_probe_static_contract():
         "continuation_text_sha256",
         "continuation_token_id",
         "roles",
-        "execution_orders",
-        "adapter_order_cycled",
-        "same_prompt_and_token_both_executions",
+        "device",
+        "model_execution_backend",
+        "model_objects_unique",
+        "model_object_count",
+        "single_active_adapter_per_reference",
+        "scientific_adapter_switching_used",
+        "parameter_storage_sets_checked",
+        "parameter_storages_disjoint",
         "cache_objects_unique",
         "cache_object_count",
         "cache_tensor_storage_sets_checked",
@@ -841,25 +1013,41 @@ def cache_equivalence_probe_static_contract():
         "model_compute_dtype",
         "attention_implementation",
         "comparison_dtype",
-        "repeatability_gate",
+        "hard_gate",
         "diagnostic_policy",
         "diagnostic_top_k",
         "vocab_size",
-        "repeatability",
+        "model_isolation",
+        "cache_execution",
+        "gpu_memory",
         "cached_vs_full_prefix_diagnostics",
         "probe_seconds",
     }
-    repeatability_role_keys = {
+    model_isolation_role_keys = {
+        "model_kind",
+        "expected_adapter",
+        "active_adapters",
+        "peft_config_adapters",
+        "object_unique",
+        "parameter_tensor_count",
+        "parameter_numel",
+        "parameter_storage_count",
+        "parameter_devices",
+        "parameter_dtypes",
+        "parameter_storage_disjoint_from_other_models",
+    }
+    cache_execution_role_keys = {
         "prefill_cache_length",
         "stepped_cache_length",
         "cache_tensor_count",
-        "cache_tensor_shapes_equal",
-        "cache_tensor_dtypes_equal",
-        "cache_tensor_devices_equal",
-        "cache_tensor_values_bitwise_equal",
-        "cached_next_logits_bitwise_equal",
-        "cached_next_logits_max_abs_diff",
-        "cached_next_logits_argmax_equal",
+        "cache_storage_count",
+        "cache_tensor_devices",
+        "cache_tensor_dtypes",
+        "cache_object_unique",
+        "cache_storage_disjoint_from_other_roles",
+        "next_logits_finite",
+        "next_logits_dtype",
+        "next_logits_vocab_size",
     }
     diagnostic_role_keys = {
         "raw_max_abs_diff",
@@ -874,26 +1062,33 @@ def cache_equivalence_probe_static_contract():
     body = {
         "schema_version": SCHEMA_VERSION,
         "protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
-        "roles": list(CACHE_REPEATABILITY_FIRST_ORDER),
-        "execution_orders": {
-            "first": list(CACHE_REPEATABILITY_FIRST_ORDER),
-            "second": list(CACHE_REPEATABILITY_SECOND_ORDER),
-        },
+        "roles": list(INDEPENDENT_MODEL_ORDER),
+        "model_execution_backend": INDEPENDENT_MODEL_BACKEND,
+        "production_device": "cuda:0",
         "required_true_fields": [
-            "adapter_order_cycled",
-            "same_prompt_and_token_both_executions",
+            "model_objects_unique",
+            "single_active_adapter_per_reference",
+            "parameter_storage_sets_checked",
+            "parameter_storages_disjoint",
             "cache_objects_unique",
             "cache_tensor_storage_sets_checked",
             "cache_tensor_storages_disjoint",
         ],
-        "cache_object_count": 2 * len(CACHE_REPEATABILITY_FIRST_ORDER),
+        "model_object_count": len(INDEPENDENT_MODEL_ORDER),
+        "cache_object_count": len(INDEPENDENT_MODEL_ORDER),
         "model_compute_dtype": "bfloat16",
         "attention_implementation": "sdpa",
         "comparison_dtype": "float32",
-        "repeatability_gate": {
-            "mode": "bitwise_same_cached_graph",
-            "cached_next_logits_bitwise_required": True,
-            "cache_tensor_shape_dtype_device_value_bitwise_required": True,
+        "hard_gate": {
+            "mode": "independent_model_isolation_and_cached_execution",
+            "unique_model_objects_required": True,
+            "single_active_adapter_per_reference_required": True,
+            "cross_model_parameter_storage_disjoint_required": True,
+            "unique_kv_cache_objects_required": True,
+            "cross_cache_storage_disjoint_required": True,
+            "cache_length_and_finite_logits_required": True,
+            "gpu_memory_headroom_required": True,
+            "cached_next_logits_bitwise_repeatability_required": False,
         },
         "diagnostic_policy": {
             "cached_vs_fresh_full_prefix_is_hard_gate": False,
@@ -903,8 +1098,33 @@ def cache_equivalence_probe_static_contract():
             "incident_max_abs_diff_used_as_threshold": False,
         },
         "diagnostic_top_k": CACHE_DIAGNOSTIC_TOP_K,
+        "gpu_memory_contract": {
+            "production_device": "cuda:0",
+            "model_object_count": len(INDEPENDENT_MODEL_ORDER),
+            "indexed_weight_bytes_per_model": BASE_INDEXED_WEIGHT_BYTES,
+            "total_indexed_weight_bytes": (
+                len(INDEPENDENT_MODEL_ORDER) * BASE_INDEXED_WEIGHT_BYTES
+            ),
+            "minimum_total_memory_bytes": (
+                CACHE_PROBE_MINIMUM_TOTAL_MEMORY_BYTES
+            ),
+            "minimum_free_memory_bytes_before_probe": (
+                CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+            ),
+            "minimum_free_memory_bytes_after_probe": (
+                CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+            ),
+            "formula": (
+                "total_memory_bytes>=120*GiB and "
+                "free_memory_bytes_before_probe>=32*GiB and "
+                "free_memory_bytes_after_probe>=32*GiB"
+            ),
+            "thresholds_output_independent": True,
+            "prior_incident_values_used_as_threshold": False,
+        },
         "top_level_keys": sorted(top_level_keys),
-        "repeatability_role_keys": sorted(repeatability_role_keys),
+        "model_isolation_role_keys": sorted(model_isolation_role_keys),
+        "cache_execution_role_keys": sorted(cache_execution_role_keys),
         "diagnostic_role_keys": sorted(diagnostic_role_keys),
     }
     return {
@@ -914,7 +1134,7 @@ def cache_equivalence_probe_static_contract():
 
 
 def audit_cache_equivalence_probe(probe, phase=None):
-    """Validate the same-cached-graph hard gate and non-gating diagnostics."""
+    """Validate independent-model isolation and non-gating diagnostics."""
     contract = cache_equivalence_probe_static_contract()
     roles = contract["roles"]
     expected_keys = set(contract["top_level_keys"])
@@ -938,9 +1158,17 @@ def audit_cache_equivalence_probe(probe, phase=None):
         or not isinstance(probe.get("continuation_token_id"), int)
         or probe["continuation_token_id"] < 0
         or probe.get("roles") != roles
-        or probe.get("execution_orders") != contract["execution_orders"]
-        or probe.get("adapter_order_cycled") is not True
-        or probe.get("same_prompt_and_token_both_executions") is not True
+        or not isinstance(probe.get("device"), str)
+        or not probe["device"]
+        or probe["device"] != contract["production_device"]
+        or probe.get("model_execution_backend")
+        != contract["model_execution_backend"]
+        or probe.get("model_objects_unique") is not True
+        or probe.get("model_object_count") != contract["model_object_count"]
+        or probe.get("single_active_adapter_per_reference") is not True
+        or probe.get("scientific_adapter_switching_used") is not False
+        or probe.get("parameter_storage_sets_checked") is not True
+        or probe.get("parameter_storages_disjoint") is not True
         or probe.get("cache_objects_unique") is not True
         or probe.get("cache_object_count") != contract["cache_object_count"]
         or probe.get("cache_tensor_storage_sets_checked") is not True
@@ -949,14 +1177,16 @@ def audit_cache_equivalence_probe(probe, phase=None):
         or probe.get("attention_implementation")
         != contract["attention_implementation"]
         or probe.get("comparison_dtype") != contract["comparison_dtype"]
-        or probe.get("repeatability_gate") != contract["repeatability_gate"]
+        or probe.get("hard_gate") != contract["hard_gate"]
         or probe.get("diagnostic_policy") != contract["diagnostic_policy"]
         or probe.get("diagnostic_top_k") != contract["diagnostic_top_k"]
         or isinstance(probe.get("vocab_size"), bool)
         or not isinstance(probe.get("vocab_size"), int)
         or probe["vocab_size"] < CACHE_DIAGNOSTIC_TOP_K
-        or not isinstance(probe.get("repeatability"), dict)
-        or list(probe["repeatability"]) != roles
+        or not isinstance(probe.get("model_isolation"), dict)
+        or list(probe["model_isolation"]) != roles
+        or not isinstance(probe.get("cache_execution"), dict)
+        or list(probe["cache_execution"]) != roles
         or not isinstance(probe.get("cached_vs_full_prefix_diagnostics"), dict)
         or list(probe["cached_vs_full_prefix_diagnostics"]) != roles
         or isinstance(probe.get("probe_seconds"), bool)
@@ -964,28 +1194,72 @@ def audit_cache_equivalence_probe(probe, phase=None):
         or not 0 <= probe["probe_seconds"] < float("inf")
     ):
         raise ValueError("cache-equivalence probe metadata differs")
-    repeatability_keys = set(contract["repeatability_role_keys"])
+    isolation_keys = set(contract["model_isolation_role_keys"])
+    cache_keys = set(contract["cache_execution_role_keys"])
     diagnostic_keys = set(contract["diagnostic_role_keys"])
     for role in roles:
-        repeatability = probe["repeatability"][role]
+        isolation = probe["model_isolation"][role]
+        expected_kind = "direct_base" if role == "base" else "peft_single_adapter"
+        expected_adapter = None if role == "base" else role
+        expected_adapters = [] if role == "base" else [role]
         if (
-            not isinstance(repeatability, dict)
-            or set(repeatability) != repeatability_keys
-            or repeatability.get("prefill_cache_length") != probe["prompt_tokens"]
-            or repeatability.get("stepped_cache_length")
-            != probe["prompt_tokens"] + 1
-            or isinstance(repeatability.get("cache_tensor_count"), bool)
-            or not isinstance(repeatability.get("cache_tensor_count"), int)
-            or repeatability["cache_tensor_count"] <= 0
-            or repeatability.get("cache_tensor_shapes_equal") is not True
-            or repeatability.get("cache_tensor_dtypes_equal") is not True
-            or repeatability.get("cache_tensor_devices_equal") is not True
-            or repeatability.get("cache_tensor_values_bitwise_equal") is not True
-            or repeatability.get("cached_next_logits_bitwise_equal") is not True
-            or repeatability.get("cached_next_logits_max_abs_diff") != 0.0
-            or repeatability.get("cached_next_logits_argmax_equal") is not True
+            not isinstance(isolation, dict)
+            or set(isolation) != isolation_keys
+            or isolation.get("model_kind") != expected_kind
+            or isolation.get("expected_adapter") != expected_adapter
+            or isolation.get("active_adapters") != expected_adapters
+            or isolation.get("peft_config_adapters") != expected_adapters
+            or isolation.get("object_unique") is not True
+            or any(
+                isinstance(isolation.get(key), bool)
+                or not isinstance(isolation.get(key), int)
+                or isolation[key] <= 0
+                for key in (
+                    "parameter_tensor_count",
+                    "parameter_numel",
+                    "parameter_storage_count",
+                )
+            )
+            or isolation["parameter_storage_count"]
+            > isolation["parameter_tensor_count"]
+            or isolation.get("parameter_devices") != [probe["device"]]
+            or not isinstance(isolation.get("parameter_dtypes"), list)
+            or not isolation["parameter_dtypes"]
+            or any(
+                not isinstance(item, str) or not item.startswith("torch.")
+                for item in isolation["parameter_dtypes"]
+            )
+            or isolation.get("parameter_storage_disjoint_from_other_models")
+            is not True
         ):
-            raise ValueError(f"cached-graph repeatability differs for {role}")
+            raise ValueError(f"independent model isolation differs for {role}")
+        cache = probe["cache_execution"][role]
+        if (
+            not isinstance(cache, dict)
+            or set(cache) != cache_keys
+            or cache.get("prefill_cache_length") != probe["prompt_tokens"]
+            or cache.get("stepped_cache_length") != probe["prompt_tokens"] + 1
+            or any(
+                isinstance(cache.get(key), bool)
+                or not isinstance(cache.get(key), int)
+                or cache[key] <= 0
+                for key in ("cache_tensor_count", "cache_storage_count")
+            )
+            or cache["cache_storage_count"] > cache["cache_tensor_count"]
+            or cache.get("cache_tensor_devices") != [probe["device"]]
+            or not isinstance(cache.get("cache_tensor_dtypes"), list)
+            or not cache["cache_tensor_dtypes"]
+            or any(
+                not isinstance(item, str) or not item.startswith("torch.")
+                for item in cache["cache_tensor_dtypes"]
+            )
+            or cache.get("cache_object_unique") is not True
+            or cache.get("cache_storage_disjoint_from_other_roles") is not True
+            or cache.get("next_logits_finite") is not True
+            or cache.get("next_logits_dtype") != "float32"
+            or cache.get("next_logits_vocab_size") != probe["vocab_size"]
+        ):
+            raise ValueError(f"independent cached execution differs for {role}")
         diagnostic = probe["cached_vs_full_prefix_diagnostics"][role]
         if (
             not isinstance(diagnostic, dict)
@@ -1017,15 +1291,105 @@ def audit_cache_equivalence_probe(probe, phase=None):
             or not isinstance(diagnostic.get("legacy_allclose_1e3"), bool)
         ):
             raise ValueError(f"cached/full-prefix diagnostic differs for {role}")
+    memory = probe.get("gpu_memory")
+    memory_keys = {
+        "device",
+        "device_name",
+        "minimum_total_memory_bytes",
+        "minimum_free_memory_bytes_before_probe",
+        "minimum_free_memory_bytes_after_probe",
+        "total_memory_bytes",
+        "free_memory_bytes_before_probe",
+        "allocated_memory_bytes_before_probe",
+        "reserved_memory_bytes_before_probe",
+        "free_memory_bytes_after_probe",
+        "allocated_memory_bytes_after_probe",
+        "reserved_memory_bytes_after_probe",
+        "peak_allocated_memory_bytes_after_probe",
+        "total_memory_requirement_met",
+        "free_memory_before_requirement_met",
+        "free_memory_after_requirement_met",
+        "headroom_requirement_met",
+    }
+    memory_numeric = {
+        "total_memory_bytes",
+        "free_memory_bytes_before_probe",
+        "allocated_memory_bytes_before_probe",
+        "reserved_memory_bytes_before_probe",
+        "free_memory_bytes_after_probe",
+        "allocated_memory_bytes_after_probe",
+        "reserved_memory_bytes_after_probe",
+        "peak_allocated_memory_bytes_after_probe",
+    }
+    memory_contract = contract["gpu_memory_contract"]
+    if (
+        not isinstance(memory, dict)
+        or set(memory) != memory_keys
+        or memory.get("device") != probe["device"]
+        or not isinstance(memory.get("device_name"), str)
+        or not memory["device_name"]
+        or memory.get("minimum_total_memory_bytes")
+        != memory_contract["minimum_total_memory_bytes"]
+        or memory.get("minimum_free_memory_bytes_before_probe")
+        != memory_contract["minimum_free_memory_bytes_before_probe"]
+        or memory.get("minimum_free_memory_bytes_after_probe")
+        != memory_contract["minimum_free_memory_bytes_after_probe"]
+        or any(
+            isinstance(memory.get(key), bool)
+            or not isinstance(memory.get(key), int)
+            or memory[key] < 0
+            for key in memory_numeric
+        )
+        or memory["total_memory_bytes"]
+        < memory["minimum_total_memory_bytes"]
+        or memory["free_memory_bytes_before_probe"]
+        < memory["minimum_free_memory_bytes_before_probe"]
+        or memory["free_memory_bytes_after_probe"]
+        < memory["minimum_free_memory_bytes_after_probe"]
+        or memory["allocated_memory_bytes_before_probe"]
+        > memory["reserved_memory_bytes_before_probe"]
+        or memory["allocated_memory_bytes_after_probe"]
+        > memory["reserved_memory_bytes_after_probe"]
+        or memory["reserved_memory_bytes_before_probe"]
+        > memory["total_memory_bytes"]
+        or memory["reserved_memory_bytes_after_probe"]
+        > memory["total_memory_bytes"]
+        or memory["free_memory_bytes_before_probe"]
+        > memory["total_memory_bytes"]
+        or memory["free_memory_bytes_after_probe"]
+        > memory["total_memory_bytes"]
+        or memory["peak_allocated_memory_bytes_after_probe"]
+        < memory["allocated_memory_bytes_after_probe"]
+        or any(
+            memory.get(key) is not True
+            for key in (
+                "total_memory_requirement_met",
+                "free_memory_before_requirement_met",
+                "free_memory_after_requirement_met",
+                "headroom_requirement_met",
+            )
+        )
+    ):
+        raise ValueError("independent model GPU memory evidence differs")
     return probe
 
 
-def run_cache_equivalence_probe(model, tokenizer, record, phase, device):
-    """Hard-gate identical cached graphs; retain full-prefix drift diagnostically."""
+def run_cache_equivalence_probe(
+    models,
+    tokenizer,
+    record,
+    phase,
+    device,
+    memory_reader=None,
+):
+    """Hard-gate independent model/cache isolation; retain numeric drift diagnostically."""
     import torch
 
     started = time.perf_counter()
-    backend = audit_probe_model_backend(model)
+    memory_reader = memory_reader or read_gpu_memory
+    memory_before = memory_reader(device)
+    model_isolation = audit_independent_model_panel(models, device)
+    backend = audit_probe_model_backends(models)
     prompt_ids = make_prompt_ids(tokenizer, record)
     continuation_ids = tokenizer.encode(
         CACHE_EQUIVALENCE_CONTINUATION_TEXT, add_special_tokens=False
@@ -1043,87 +1407,68 @@ def run_cache_equivalence_probe(model, tokenizer, record, phase, device):
             "pinned tokenizer no longer maps the cache probe continuation to one token"
         )
     token_id = continuation_ids[0]
-    roles = [*CACHE_REPEATABILITY_FIRST_ORDER]
-    adapters = {role: (None if role == "base" else role) for role in roles}
-    first = run_cached_probe_execution(
-        model,
-        adapters,
-        CACHE_REPEATABILITY_FIRST_ORDER,
-        prompt_ids,
-        token_id,
-        device,
+    roles = list(INDEPENDENT_MODEL_ORDER)
+    states = run_independent_cached_probe(
+        models, prompt_ids, token_id, device
     )
-    second = run_cached_probe_execution(
-        model,
-        adapters,
-        CACHE_REPEATABILITY_SECOND_ORDER,
-        prompt_ids,
-        token_id,
-        device,
-    )
-
-    caches = [first[role]["cache"] for role in roles] + [
-        second[role]["cache"] for role in roles
-    ]
+    caches = [states[role]["cache"] for role in roles]
     if len({id(cache) for cache in caches}) != len(caches):
-        raise ValueError("cached-graph probe found a shared KV-cache object")
+        raise ValueError("independent model probe found a shared KV-cache object")
     pointer_sets = [cache_tensor_storage_pointers(cache) for cache in caches]
     if not all(pointer_sets):
-        raise ValueError("cached-graph probe could not inspect every cache storage")
+        raise ValueError("independent model probe could not inspect every cache storage")
     seen_pointers = set()
     for pointers in pointer_sets:
         if seen_pointers & pointers:
-            raise ValueError("cached-graph probe found shared KV-cache tensor storage")
+            raise ValueError("independent model probe found shared KV-cache storage")
         seen_pointers.update(pointers)
 
-    repeatability = {}
+    cache_execution = {}
     diagnostics = {}
     vocab_size = None
     full_prefix = [*prompt_ids, token_id]
     for role in roles:
-        first_logits = first[role]["next_logits"].float()
-        second_logits = second[role]["next_logits"].float()
+        logits = states[role]["next_logits"].float()
         if (
-            first_logits.dtype != torch.float32
-            or second_logits.dtype != torch.float32
-            or first_logits.ndim != 1
-            or first_logits.shape != second_logits.shape
-            or not bool(torch.isfinite(first_logits).all().item())
-            or not bool(torch.isfinite(second_logits).all().item())
+            logits.dtype != torch.float32
+            or logits.ndim != 1
+            or not bool(torch.isfinite(logits).all().item())
         ):
-            raise ValueError(f"cached-graph logits differ in shape/dtype for {role}")
-        vocab_size = first_logits.numel() if vocab_size is None else vocab_size
-        if first_logits.numel() != vocab_size:
-            raise ValueError("cached-graph vocabulary differs across adapters")
-        logits_equal = bool(torch.equal(first_logits, second_logits))
-        max_abs_diff = float((first_logits - second_logits).abs().max().item())
-        argmax_equal = int(torch.argmax(first_logits).item()) == int(
-            torch.argmax(second_logits).item()
-        )
-        if not logits_equal or max_abs_diff != 0.0 or not argmax_equal:
-            raise ValueError(f"cached-graph next logits are not bitwise stable for {role}")
-        cache_evidence = compare_cache_tensor_inventories(
-            first[role]["cache"], second[role]["cache"], role
-        )
-        first_cache_length = cache_sequence_length(first[role]["cache"])
-        second_cache_length = cache_sequence_length(second[role]["cache"])
-        if (
-            first_cache_length != len(prompt_ids) + 1
-            or second_cache_length != len(prompt_ids) + 1
-        ):
-            raise ValueError(f"cached-graph cache lengths differ for {role}")
-        repeatability[role] = {
+            raise ValueError(f"independent cached logits are invalid for {role}")
+        vocab_size = logits.numel() if vocab_size is None else vocab_size
+        if logits.numel() != vocab_size:
+            raise ValueError("independent model vocabulary differs across roles")
+        cache = states[role]["cache"]
+        cache_length = cache_sequence_length(cache)
+        if cache_length != len(prompt_ids) + 1:
+            raise ValueError(f"independent cached length differs for {role}")
+        inventory = cache_tensor_inventory(cache)
+        cache_execution[role] = {
             "prefill_cache_length": len(prompt_ids),
-            "stepped_cache_length": first_cache_length,
-            **cache_evidence,
-            "cached_next_logits_bitwise_equal": True,
-            "cached_next_logits_max_abs_diff": max_abs_diff,
-            "cached_next_logits_argmax_equal": True,
+            "stepped_cache_length": cache_length,
+            "cache_tensor_count": len(inventory),
+            "cache_storage_count": len(cache_tensor_storage_pointers(cache)),
+            "cache_tensor_devices": sorted(
+                {str(tensor.device) for _, tensor in inventory}
+            ),
+            "cache_tensor_dtypes": sorted(
+                {str(tensor.dtype) for _, tensor in inventory}
+            ),
+            "cache_object_unique": True,
+            "cache_storage_disjoint_from_other_roles": True,
+            "next_logits_finite": True,
+            "next_logits_dtype": "float32",
+            "next_logits_vocab_size": logits.numel(),
         }
         fresh = fresh_full_prefix_next_logits(
-            model, adapters[role], full_prefix, device
+            models[role], full_prefix, device
         ).float()
-        diagnostics[role] = cached_vs_full_prefix_diagnostic(first_logits, fresh)
+        diagnostics[role] = cached_vs_full_prefix_diagnostic(logits, fresh)
+
+    gpu_memory = build_gpu_memory_evidence(
+        memory_before, memory_reader(device)
+    )
+    contract = cache_equivalence_probe_static_contract()
 
     probe = {
         "protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
@@ -1139,33 +1484,27 @@ def run_cache_equivalence_probe(model, tokenizer, record, phase, device):
         ),
         "continuation_token_id": token_id,
         "roles": roles,
-        "execution_orders": {
-            "first": list(CACHE_REPEATABILITY_FIRST_ORDER),
-            "second": list(CACHE_REPEATABILITY_SECOND_ORDER),
-        },
-        "adapter_order_cycled": True,
-        "same_prompt_and_token_both_executions": True,
+        "device": device,
+        "model_execution_backend": INDEPENDENT_MODEL_BACKEND,
+        "model_objects_unique": True,
+        "model_object_count": len(models),
+        "single_active_adapter_per_reference": True,
+        "scientific_adapter_switching_used": False,
+        "parameter_storage_sets_checked": True,
+        "parameter_storages_disjoint": True,
         "cache_objects_unique": True,
         "cache_object_count": len(caches),
         "cache_tensor_storage_sets_checked": True,
         "cache_tensor_storages_disjoint": True,
         **backend,
         "comparison_dtype": "float32",
-        "repeatability_gate": {
-            "mode": "bitwise_same_cached_graph",
-            "cached_next_logits_bitwise_required": True,
-            "cache_tensor_shape_dtype_device_value_bitwise_required": True,
-        },
-        "diagnostic_policy": {
-            "cached_vs_fresh_full_prefix_is_hard_gate": False,
-            "legacy_allclose_atol": CACHE_LEGACY_DIAGNOSTIC_ATOL,
-            "legacy_allclose_rtol": CACHE_LEGACY_DIAGNOSTIC_RTOL,
-            "legacy_allclose_is_diagnostic_only": True,
-            "incident_max_abs_diff_used_as_threshold": False,
-        },
+        "hard_gate": contract["hard_gate"],
+        "diagnostic_policy": contract["diagnostic_policy"],
         "diagnostic_top_k": CACHE_DIAGNOSTIC_TOP_K,
         "vocab_size": vocab_size,
-        "repeatability": repeatability,
+        "model_isolation": model_isolation,
+        "cache_execution": cache_execution,
+        "gpu_memory": gpu_memory,
         "cached_vs_full_prefix_diagnostics": diagnostics,
         "probe_seconds": time.perf_counter() - started,
     }
@@ -1177,7 +1516,7 @@ def generate_sample(
     record,
     sample_index,
     prompt_ids,
-    model,
+    models,
     tokenizer,
     method,
     profile,
@@ -1194,16 +1533,18 @@ def generate_sample(
         []
         if paired_base
         else [
-            prefill_cached_reference(model, role, prompt_ids, device)
+            prefill_cached_reference(models[role], prompt_ids, device)
             for role in PANEL_ORDER
         ]
     )
     base_state = (
-        prefill_cached_reference(model, None, prompt_ids, device)
+        prefill_cached_reference(models["base"], prompt_ids, device)
         if method["base_in_composition"]
         else None
     )
-    assert_independent_caches(states, base_state)
+    assert_independent_caches(
+        [*states, *([base_state] if base_state is not None else [])]
+    )
     grammar_runtime = grammar_factory() if grammar_factory is not None else None
     if grammar_runtime is not None and grammar_runtime["matcher"].is_terminated():
         raise ValueError("fresh grammar matcher is already terminated")
@@ -1266,14 +1607,18 @@ def generate_sample(
 
         if token_index + 1 < profile["max_new_tokens"]:
             states = [
-                step_cached_reference(model, role, token_id, state["cache"], device)
+                step_cached_reference(
+                    models[role], token_id, state["cache"], device
+                )
                 for role, state in zip(PANEL_ORDER, states)
             ]
             if base_state is not None:
                 base_state = step_cached_reference(
-                    model, None, token_id, base_state["cache"], device
+                    models["base"], token_id, base_state["cache"], device
                 )
-            assert_independent_caches(states, base_state)
+            assert_independent_caches(
+                [*states, *([base_state] if base_state is not None else [])]
+            )
 
     response = tokenizer.decode(response_ids, skip_special_tokens=True)
     sample = {
@@ -2139,38 +2484,44 @@ def load_tokenizer_and_grammar(profile, base_snapshot):
     return tokenizer, model_config, grammar
 
 
-def load_shared_peft_model(protocol, device, base_snapshot):
-    """Load one base plus four named LoRA adapters; caches stay per reference."""
+def load_independent_model_panel(protocol, device, base_snapshot):
+    """Load four single-adapter models and one direct base as distinct objects."""
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM
 
     snapshot_path = verify_pinned_base_snapshot(base_snapshot)
-    base = AutoModelForCausalLM.from_pretrained(
-        snapshot_path,
-        torch_dtype=torch.bfloat16,
-        device_map={"": device},
-        attn_implementation="sdpa",
-        trust_remote_code=True,
-        local_files_only=True,
-        use_safetensors=True,
-    )
-    first = PANEL_ORDER[0]
-    first_path = protocol["references"][MODEL_NAME_BY_ROLE[first]]["model_path"]
-    model = PeftModel.from_pretrained(
-        base,
-        first_path,
-        adapter_name=first,
-        is_trainable=False,
-    )
-    for role in PANEL_ORDER[1:]:
+    load_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "device_map": {"": device},
+        "attn_implementation": "sdpa",
+        "trust_remote_code": True,
+        "local_files_only": True,
+        "use_safetensors": True,
+    }
+    models = {}
+    for role in PANEL_ORDER:
+        fresh_base = AutoModelForCausalLM.from_pretrained(
+            snapshot_path, **load_kwargs
+        )
         path = protocol["references"][MODEL_NAME_BY_ROLE[role]]["model_path"]
-        model.load_adapter(path, adapter_name=role, is_trainable=False)
-    if set(model.peft_config) != set(PANEL_ORDER):
-        raise ValueError("loaded PEFT adapter registry differs from the frozen panel")
-    model.eval()
-    model.config.use_cache = True
-    return model
+        model = PeftModel.from_pretrained(
+            fresh_base,
+            path,
+            adapter_name=role,
+            is_trainable=False,
+        )
+        model.eval()
+        model.config.use_cache = True
+        models[role] = model
+    direct_base = AutoModelForCausalLM.from_pretrained(
+        snapshot_path, **load_kwargs
+    )
+    direct_base.eval()
+    direct_base.config.use_cache = True
+    models["base"] = direct_base
+    audit_independent_model_panel(models, device)
+    return models
 
 
 def stop_token_ids(tokenizer, model):
@@ -2252,6 +2603,7 @@ def stream_meta(protocol, phase, method, profile, records):
         )
     else:
         generation_config["sampling_profile"] = profile["sampling_profile"]
+    probe_contract = cache_equivalence_probe_static_contract()
     return {
         "schema_version": SCHEMA_VERSION,
         "protocol": GENERATION_PROTOCOL,
@@ -2269,7 +2621,20 @@ def stream_meta(protocol, phase, method, profile, records):
         "method": method,
         "model_panel_binding": panel_binding,
         "generation_config": generation_config,
-        "backend": "shared_base_transformers_peft_separate_kv_caches",
+        "backend": INDEPENDENT_MODEL_BACKEND,
+        "scientific_adapter_switching_used": False,
+        "runtime_model_architecture": {
+            "backend": INDEPENDENT_MODEL_BACKEND,
+            "model_roles": list(INDEPENDENT_MODEL_ORDER),
+            "model_object_count": len(INDEPENDENT_MODEL_ORDER),
+            "reference_model_kind": "independent_peft_single_adapter",
+            "base_model_kind": "independent_direct_non_peft",
+            "shared_parameter_storage": False,
+            "scientific_adapter_switching_used": False,
+            "kv_cache_ownership": "independent_per_active_role",
+            "probe_protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
+            "probe_contract_sha256": probe_contract["contract_sha256"],
+        },
         "runtime_pins": {
             "torch": PINNED_TORCH_VERSION,
             "transformers": PINNED_TRANSFORMERS_VERSION,
@@ -2407,7 +2772,7 @@ def run_stream(
     method,
     profile,
     records,
-    model,
+    models,
     tokenizer,
     device,
     stop_ids,
@@ -2445,7 +2810,7 @@ def run_stream(
             record=record,
             sample_index=sample_index,
             prompt_ids=prompt_ids,
-            model=model,
+            models=models,
             tokenizer=tokenizer,
             method=method,
             profile=profile,
@@ -2832,15 +3197,23 @@ def run_phase(args):
         tokenizer, model_config, grammar = load_tokenizer_and_grammar(
             massive_profile, base_snapshot
         )
-        model = load_shared_peft_model(protocol, args.device, base_snapshot)
-        if getattr(model.config, "vocab_size", None) != grammar["vocab_size"]:
-            raise ValueError("loaded base model vocabulary differs from CPU preflight")
-        stops = stop_token_ids(tokenizer, model)
+        models = load_independent_model_panel(
+            protocol, args.device, base_snapshot
+        )
+        if any(
+            getattr(models[role].config, "vocab_size", None)
+            != grammar["vocab_size"]
+            for role in INDEPENDENT_MODEL_ORDER
+        ):
+            raise ValueError(
+                "loaded independent model vocabulary differs from CPU preflight"
+            )
+        stops = stop_token_ids(tokenizer, models["base"])
         # This executes before run_stream can create the first scientific shard.
         # It probes the first frozen MASSIVE prefix in either phase, using one
-        # fixed tokenizer-derived continuation token for all adapters and base.
+        # fixed tokenizer-derived continuation token for all independent models.
         cache_probe = run_cache_equivalence_probe(
-            model,
+            models,
             tokenizer,
             massive_records[0],
             args.phase,
@@ -2863,7 +3236,7 @@ def run_phase(args):
                     method=method,
                     profile=profile,
                     records=records,
-                    model=model,
+                    models=models,
                     tokenizer=tokenizer,
                     device=args.device,
                     stop_ids=stops,
@@ -2877,6 +3250,7 @@ def run_phase(args):
         for role in PANEL_ORDER:
             name = MODEL_NAME_BY_ROLE[role]
             audit_reference_binding(name, protocol["references"][name])
+        audit_independent_model_panel(models, args.device)
         post_audit_seconds = time.perf_counter() - post_audit_started
         timing_body = build_timing_record(
             protocol,

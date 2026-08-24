@@ -205,7 +205,8 @@ class CompositionEvaluationTests(unittest.TestCase):
 
     @staticmethod
     def valid_cache_probe():
-        roles = [*summary.CACHE_REPEATABILITY_FIRST_ORDER]
+        roles = [*summary.INDEPENDENT_MODEL_ORDER]
+        gib = 1024**3
         return {
             "protocol": summary.CACHE_EQUIVALENCE_PROBE_PROTOCOL,
             "phase": "smoke",
@@ -218,23 +219,31 @@ class CompositionEvaluationTests(unittest.TestCase):
             "continuation_text_sha256": summary.sha256_bytes(b"."),
             "continuation_token_id": 13,
             "roles": roles,
-            "execution_orders": {
-                "first": list(summary.CACHE_REPEATABILITY_FIRST_ORDER),
-                "second": list(summary.CACHE_REPEATABILITY_SECOND_ORDER),
-            },
-            "adapter_order_cycled": True,
-            "same_prompt_and_token_both_executions": True,
+            "device": "cuda:0",
+            "model_execution_backend": summary.INDEPENDENT_MODEL_BACKEND,
+            "model_objects_unique": True,
+            "model_object_count": 5,
+            "single_active_adapter_per_reference": True,
+            "scientific_adapter_switching_used": False,
+            "parameter_storage_sets_checked": True,
+            "parameter_storages_disjoint": True,
             "cache_objects_unique": True,
-            "cache_object_count": 10,
+            "cache_object_count": 5,
             "cache_tensor_storage_sets_checked": True,
             "cache_tensor_storages_disjoint": True,
             "model_compute_dtype": "bfloat16",
             "attention_implementation": "sdpa",
             "comparison_dtype": "float32",
-            "repeatability_gate": {
-                "mode": "bitwise_same_cached_graph",
-                "cached_next_logits_bitwise_required": True,
-                "cache_tensor_shape_dtype_device_value_bitwise_required": True,
+            "hard_gate": {
+                "mode": "independent_model_isolation_and_cached_execution",
+                "unique_model_objects_required": True,
+                "single_active_adapter_per_reference_required": True,
+                "cross_model_parameter_storage_disjoint_required": True,
+                "unique_kv_cache_objects_required": True,
+                "cross_cache_storage_disjoint_required": True,
+                "cache_length_and_finite_logits_required": True,
+                "gpu_memory_headroom_required": True,
+                "cached_next_logits_bitwise_repeatability_required": False,
             },
             "diagnostic_policy": {
                 "cached_vs_fresh_full_prefix_is_hard_gate": False,
@@ -245,20 +254,58 @@ class CompositionEvaluationTests(unittest.TestCase):
             },
             "diagnostic_top_k": 10,
             "vocab_size": 152064,
-            "repeatability": {
+            "model_isolation": {
+                role: {
+                    "model_kind": (
+                        "direct_base" if role == "base" else "peft_single_adapter"
+                    ),
+                    "expected_adapter": None if role == "base" else role,
+                    "active_adapters": [] if role == "base" else [role],
+                    "peft_config_adapters": [] if role == "base" else [role],
+                    "object_unique": True,
+                    "parameter_tensor_count": 100 + index,
+                    "parameter_numel": 1_000_000 + index,
+                    "parameter_storage_count": 90 + index,
+                    "parameter_devices": ["cuda:0"],
+                    "parameter_dtypes": ["torch.bfloat16"],
+                    "parameter_storage_disjoint_from_other_models": True,
+                }
+                for index, role in enumerate(roles)
+            },
+            "cache_execution": {
                 role: {
                     "prefill_cache_length": 12,
                     "stepped_cache_length": 13,
                     "cache_tensor_count": 8,
-                    "cache_tensor_shapes_equal": True,
-                    "cache_tensor_dtypes_equal": True,
-                    "cache_tensor_devices_equal": True,
-                    "cache_tensor_values_bitwise_equal": True,
-                    "cached_next_logits_bitwise_equal": True,
-                    "cached_next_logits_max_abs_diff": 0.0,
-                    "cached_next_logits_argmax_equal": True,
+                    "cache_storage_count": 8,
+                    "cache_tensor_devices": ["cuda:0"],
+                    "cache_tensor_dtypes": ["torch.bfloat16"],
+                    "cache_object_unique": True,
+                    "cache_storage_disjoint_from_other_roles": True,
+                    "next_logits_finite": True,
+                    "next_logits_dtype": "float32",
+                    "next_logits_vocab_size": 152064,
                 }
                 for role in roles
+            },
+            "gpu_memory": {
+                "device": "cuda:0",
+                "device_name": "NVIDIA H200",
+                "minimum_total_memory_bytes": 120 * gib,
+                "minimum_free_memory_bytes_before_probe": 32 * gib,
+                "minimum_free_memory_bytes_after_probe": 32 * gib,
+                "total_memory_bytes": 141 * gib,
+                "free_memory_bytes_before_probe": 50 * gib,
+                "allocated_memory_bytes_before_probe": 75 * gib,
+                "reserved_memory_bytes_before_probe": 76 * gib,
+                "free_memory_bytes_after_probe": 49 * gib,
+                "allocated_memory_bytes_after_probe": 76 * gib,
+                "reserved_memory_bytes_after_probe": 77 * gib,
+                "peak_allocated_memory_bytes_after_probe": 78 * gib,
+                "total_memory_requirement_met": True,
+                "free_memory_before_requirement_met": True,
+                "free_memory_after_requirement_met": True,
+                "headroom_requirement_met": True,
             },
             # These deliberately fail the legacy cached-vs-full comparison.
             # They are sealed diagnostics, not a pass/fail threshold.
@@ -317,7 +364,7 @@ class CompositionEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "arithmetic"):
             summary.load_medical_planning_envelope(manifest)
 
-    def test_cache_probe_accepts_repeatability_with_diagnostic_drift(self):
+    def test_cache_probe_accepts_independent_models_with_diagnostic_drift(self):
         probe = self.valid_cache_probe()
         self.assertEqual(
             summary.validate_cache_equivalence_probe(
@@ -332,46 +379,58 @@ class CompositionEvaluationTests(unittest.TestCase):
 
     def test_cache_probe_fixture_matches_sampler_static_contract(self):
         probe = self.valid_cache_probe()
-        contract = sampler.cache_equivalence_probe_static_contract()
+        sampler_contract = sampler.cache_equivalence_probe_static_contract()
+        evaluator_contract = summary.cache_equivalence_probe_static_contract()
         self.assertEqual(
-            contract["contract_sha256"],
-            "4756d50d1ee76e545486bb761ee32a3d7095530300efa42afe9f1b900a1bef17",
+            sampler_contract["contract_sha256"],
+            summary.CACHE_EQUIVALENCE_PROBE_CONTRACT_SHA256,
         )
-        self.assertEqual(summary.CACHE_EQUIVALENCE_PROBE_PROTOCOL, contract["protocol"])
-        self.assertEqual(set(probe), set(contract["top_level_keys"]))
-        self.assertEqual(probe["roles"], contract["roles"])
-        self.assertEqual(probe["execution_orders"], contract["execution_orders"])
-        self.assertEqual(probe["repeatability_gate"], contract["repeatability_gate"])
-        self.assertEqual(probe["diagnostic_policy"], contract["diagnostic_policy"])
+        self.assertEqual(sampler_contract, evaluator_contract)
+        self.assertEqual(set(probe), set(sampler_contract["top_level_keys"]))
+        self.assertEqual(probe["roles"], sampler_contract["roles"])
+        self.assertEqual(probe["hard_gate"], sampler_contract["hard_gate"])
         self.assertEqual(
-            set(probe["repeatability"]["A"]),
-            set(contract["repeatability_role_keys"]),
+            probe["diagnostic_policy"], sampler_contract["diagnostic_policy"]
+        )
+        self.assertEqual(
+            set(probe["model_isolation"]["A"]),
+            set(sampler_contract["model_isolation_role_keys"]),
+        )
+        self.assertEqual(
+            set(probe["cache_execution"]["A"]),
+            set(sampler_contract["cache_execution_role_keys"]),
         )
         self.assertEqual(
             set(probe["cached_vs_full_prefix_diagnostics"]["A"]),
-            set(contract["diagnostic_role_keys"]),
+            set(sampler_contract["diagnostic_role_keys"]),
         )
 
-    def test_cache_probe_rejects_legacy_missing_and_metadata_drift(self):
+    def test_cache_probe_rejects_v1_v2_missing_and_shared_backend(self):
         probe = self.valid_cache_probe()
-        legacy = json.loads(json.dumps(probe))
-        legacy["protocol"] = (
-            "massive_medical_union_composition_cache_equivalence_probe_v1"
-        )
-        with self.assertRaisesRegex(ValueError, "probe metadata"):
-            summary.validate_cache_equivalence_probe(legacy, "smoke")
+        for version in ("v1", "v2"):
+            legacy = json.loads(json.dumps(probe))
+            legacy["protocol"] = (
+                "massive_medical_union_composition_cache_equivalence_probe_"
+                + version
+            )
+            with self.assertRaisesRegex(ValueError, "probe metadata"):
+                summary.validate_cache_equivalence_probe(legacy, "smoke")
         missing = dict(probe)
-        missing.pop("adapter_order_cycled")
+        missing.pop("model_objects_unique")
         with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(missing, "smoke")
         tampered = json.loads(json.dumps(probe))
-        tampered["execution_orders"]["second"] = list(
-            summary.CACHE_REPEATABILITY_FIRST_ORDER
+        tampered["model_execution_backend"] = (
+            "shared_base_transformers_peft_separate_kv_caches"
         )
         with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
         tampered = json.loads(json.dumps(probe))
-        tampered["cache_tensor_storages_disjoint"] = False
+        tampered["device"] = "cuda:1"
+        tampered["gpu_memory"]["device"] = "cuda:1"
+        for role in probe["roles"]:
+            tampered["model_isolation"][role]["parameter_devices"] = ["cuda:1"]
+            tampered["cache_execution"][role]["cache_tensor_devices"] = ["cuda:1"]
         with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
         with self.assertRaisesRegex(ValueError, "probe metadata"):
@@ -379,25 +438,48 @@ class CompositionEvaluationTests(unittest.TestCase):
                 probe, "smoke", "different-question", "a" * 64
             )
 
-    def test_cache_probe_rejects_repeatability_gate_tamper(self):
+    def test_cache_probe_rejects_shared_models_adapters_and_parameters(self):
         probe = self.valid_cache_probe()
         tampered = json.loads(json.dumps(probe))
-        tampered["repeatability"]["B2"][
-            "cache_tensor_values_bitwise_equal"
-        ] = False
-        with self.assertRaisesRegex(ValueError, "repeatability differs for B2"):
+        tampered["model_objects_unique"] = False
+        with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
         tampered = json.loads(json.dumps(probe))
-        tampered["repeatability"]["base"][
-            "cached_next_logits_bitwise_equal"
-        ] = False
-        with self.assertRaisesRegex(ValueError, "repeatability differs for base"):
+        tampered["scientific_adapter_switching_used"] = True
+        with self.assertRaisesRegex(ValueError, "probe metadata"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
         tampered = json.loads(json.dumps(probe))
-        tampered["repeatability"]["A"][
-            "cached_next_logits_max_abs_diff"
-        ] = 1e-9
-        with self.assertRaisesRegex(ValueError, "repeatability differs for A"):
+        tampered["model_isolation"]["B2"]["active_adapters"] = ["A"]
+        with self.assertRaisesRegex(ValueError, "model isolation differs for B2"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["model_isolation"]["base"]["peft_config_adapters"] = ["A"]
+        with self.assertRaisesRegex(ValueError, "model isolation differs for base"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["model_isolation"]["A"][
+            "parameter_storage_disjoint_from_other_models"
+        ] = False
+        with self.assertRaisesRegex(ValueError, "model isolation differs for A"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+
+    def test_cache_probe_rejects_cache_and_memory_gate_tamper(self):
+        probe = self.valid_cache_probe()
+        tampered = json.loads(json.dumps(probe))
+        tampered["cache_execution"]["B3"]["stepped_cache_length"] += 1
+        with self.assertRaisesRegex(ValueError, "cached execution differs for B3"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["cache_execution"]["base"]["next_logits_finite"] = False
+        with self.assertRaisesRegex(ValueError, "cached execution differs for base"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["gpu_memory"]["free_memory_bytes_after_probe"] = 31 * 1024**3
+        with self.assertRaisesRegex(ValueError, "GPU memory evidence"):
+            summary.validate_cache_equivalence_probe(tampered, "smoke")
+        tampered = json.loads(json.dumps(probe))
+        tampered["gpu_memory"]["headroom_requirement_met"] = False
+        with self.assertRaisesRegex(ValueError, "GPU memory evidence"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
 
     def test_cache_probe_rejects_malformed_but_not_large_diagnostics(self):
@@ -499,11 +581,11 @@ class CompositionEvaluationTests(unittest.TestCase):
             summary.load_smoke_timings(timing_path, manifest)
 
         tampered = json.loads(json.dumps(timing_body))
-        tampered["cache_equivalence_probe"]["repeatability"]["A"][
-            "cached_next_logits_bitwise_equal"
+        tampered["cache_equivalence_probe"]["cache_execution"]["A"][
+            "next_logits_finite"
         ] = False
         write_json(timing_path, summary.seal(tampered))
-        with self.assertRaisesRegex(ValueError, "repeatability differs for A"):
+        with self.assertRaisesRegex(ValueError, "cached execution differs for A"):
             summary.load_smoke_timings(timing_path, manifest)
 
     def test_joint_metric_exact_slot_span_and_order(self):
@@ -565,11 +647,13 @@ class CompositionEvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(result["strict_frame_exact_delta"], .6)
         self.assertGreater(result["slot_pair_micro_f1_delta"], 0)
 
-    def test_evaluator_requires_sampler_same_backend_fields_exactly(self):
+    def test_evaluator_requires_independent_backend_and_no_switching_exactly(self):
         base = {
-            "backend": "shared_base_transformers_peft_separate_kv_caches",
+            "backend": summary.INDEPENDENT_MODEL_BACKEND,
             "is_paired_base": True,
             "same_transformers_backend_as_paired_base": True,
+            "scientific_adapter_switching_used": False,
+            "runtime_model_architecture": summary.RUNTIME_MODEL_ARCHITECTURE,
             "runtime_pins": summary.RUNTIME_PINS,
         }
         method = {**base, "is_paired_base": False}
@@ -583,6 +667,55 @@ class CompositionEvaluationTests(unittest.TestCase):
             summary.validate_backend_binding(
                 {**method, "paired_base_backend_equivalent": False}, False
             )
+        with self.assertRaisesRegex(ValueError, "backend binding"):
+            summary.validate_backend_binding(
+                {**method, "backend": "shared_base_transformers_peft_separate_kv_caches"},
+                False,
+            )
+        with self.assertRaisesRegex(ValueError, "backend binding"):
+            summary.validate_backend_binding(
+                {**method, "scientific_adapter_switching_used": True}, False
+            )
+        with self.assertRaisesRegex(ValueError, "backend binding"):
+            summary.validate_backend_binding(
+                {**method, "runtime_model_architecture": {
+                    **summary.RUNTIME_MODEL_ARCHITECTURE,
+                    "model_object_count": 1,
+                }},
+                False,
+            )
+
+    def test_judge_loader_requires_same_independent_runtime_architecture(self):
+        meta = {
+            "backend": summary.INDEPENDENT_MODEL_BACKEND,
+            "is_paired_base": False,
+            "same_transformers_backend_as_paired_base": True,
+            "scientific_adapter_switching_used": False,
+            "runtime_model_architecture": summary.RUNTIME_MODEL_ARCHITECTURE,
+            "runtime_pins": summary.RUNTIME_PINS,
+        }
+        self.assertEqual(judge.GENERATION_META_KEYS, summary.GENERATION_META_KEYS)
+        self.assertEqual(
+            judge.RUNTIME_MODEL_ARCHITECTURE,
+            summary.RUNTIME_MODEL_ARCHITECTURE,
+        )
+        judge.validate_backend_binding(meta)
+        for mutation in (
+            {"backend": "shared_base_transformers_peft_separate_kv_caches"},
+            {"scientific_adapter_switching_used": True},
+            {"runtime_model_architecture": {
+                **summary.RUNTIME_MODEL_ARCHITECTURE,
+                "shared_parameter_storage": True,
+            }},
+            {"runtime_model_architecture": {
+                **summary.RUNTIME_MODEL_ARCHITECTURE,
+                "probe_protocol": (
+                    "massive_medical_union_composition_cache_equivalence_probe_v2"
+                ),
+            }},
+        ):
+            with self.assertRaisesRegex(ValueError, "backend binding"):
+                judge.validate_backend_binding({**meta, **mutation})
 
     def test_structured_config_rejects_missing_or_mutated_xgrammar_contract(self):
         intents = [f"intent_{index}" for index in range(60)]

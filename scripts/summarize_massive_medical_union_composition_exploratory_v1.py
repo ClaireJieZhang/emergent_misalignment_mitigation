@@ -37,11 +37,20 @@ RUNTIME_PINS = {
     "peft": "0.18.1", "xgrammar": "0.1.25",
 }
 CACHE_EQUIVALENCE_PROBE_PROTOCOL = (
-    "massive_medical_union_composition_cache_equivalence_probe_v2"
+    "massive_medical_union_composition_cache_equivalence_probe_v3"
 )
 CACHE_EQUIVALENCE_CONTINUATION_TEXT = "."
-CACHE_REPEATABILITY_FIRST_ORDER = ("A", "B1", "B2", "B3", "base")
-CACHE_REPEATABILITY_SECOND_ORDER = ("base", "B3", "B2", "B1", "A")
+INDEPENDENT_MODEL_ORDER = ("A", "B1", "B2", "B3", "base")
+INDEPENDENT_MODEL_BACKEND = (
+    "independent_transformers_peft_models_separate_kv_caches"
+)
+CACHE_PROBE_PRODUCTION_DEVICE = "cuda:0"
+CACHE_PROBE_MINIMUM_TOTAL_MEMORY_BYTES = 120 * 1024**3
+CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES = 32 * 1024**3
+BASE_INDEXED_WEIGHT_BYTES = 15231233024
+CACHE_EQUIVALENCE_PROBE_CONTRACT_SHA256 = (
+    "b15890642418ad34f1ade97b3433ea5432ad53221a8e0b544fee29942c2cbc1d"
+)
 CACHE_DIAGNOSTIC_TOP_K = 10
 CACHE_LEGACY_DIAGNOSTIC_ATOL = 1e-3
 CACHE_LEGACY_DIAGNOSTIC_RTOL = 1e-3
@@ -52,6 +61,20 @@ GENERATION_META_KEYS = {
     "prompt_sha256", "method", "model_panel_binding", "generation_config",
     "backend", "runtime_pins", "is_paired_base",
     "same_transformers_backend_as_paired_base",
+    "scientific_adapter_switching_used",
+    "runtime_model_architecture",
+}
+RUNTIME_MODEL_ARCHITECTURE = {
+    "backend": INDEPENDENT_MODEL_BACKEND,
+    "model_roles": list(INDEPENDENT_MODEL_ORDER),
+    "model_object_count": len(INDEPENDENT_MODEL_ORDER),
+    "reference_model_kind": "independent_peft_single_adapter",
+    "base_model_kind": "independent_direct_non_peft",
+    "shared_parameter_storage": False,
+    "scientific_adapter_switching_used": False,
+    "kv_cache_ownership": "independent_per_active_role",
+    "probe_protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
+    "probe_contract_sha256": CACHE_EQUIVALENCE_PROBE_CONTRACT_SHA256,
 }
 JUDGE_REGISTRY = {
     "path": "external_gpt_primary",
@@ -559,9 +582,11 @@ def sample_hash(sample):
 
 def validate_backend_binding(meta, is_paired_base):
     if (
-        meta.get("backend") != "shared_base_transformers_peft_separate_kv_caches"
+        meta.get("backend") != INDEPENDENT_MODEL_BACKEND
         or meta.get("is_paired_base") is not is_paired_base
         or meta.get("same_transformers_backend_as_paired_base") is not True
+        or meta.get("scientific_adapter_switching_used") is not False
+        or meta.get("runtime_model_architecture") != RUNTIME_MODEL_ARCHITECTURE
         or meta.get("runtime_pins") != RUNTIME_PINS
         or "paired_base_backend_equivalent" in meta
     ):
@@ -1001,39 +1026,122 @@ def compare(base, candidate):
     }
 
 
+def cache_equivalence_probe_static_contract():
+    """Reproduce the output-independent independent-model probe contract."""
+    top_level_keys = {
+        "protocol", "phase", "result", "question_id", "prompt_sha256",
+        "prompt_token_ids_sha256", "prompt_tokens", "continuation_text",
+        "continuation_text_sha256", "continuation_token_id", "roles", "device",
+        "model_execution_backend", "model_objects_unique", "model_object_count",
+        "single_active_adapter_per_reference", "scientific_adapter_switching_used",
+        "parameter_storage_sets_checked", "parameter_storages_disjoint",
+        "cache_objects_unique", "cache_object_count",
+        "cache_tensor_storage_sets_checked", "cache_tensor_storages_disjoint",
+        "model_compute_dtype", "attention_implementation", "comparison_dtype",
+        "hard_gate", "diagnostic_policy", "diagnostic_top_k", "vocab_size",
+        "model_isolation", "cache_execution", "gpu_memory",
+        "cached_vs_full_prefix_diagnostics", "probe_seconds",
+    }
+    model_isolation_role_keys = {
+        "model_kind", "expected_adapter", "active_adapters",
+        "peft_config_adapters", "object_unique", "parameter_tensor_count",
+        "parameter_numel", "parameter_storage_count", "parameter_devices",
+        "parameter_dtypes", "parameter_storage_disjoint_from_other_models",
+    }
+    cache_execution_role_keys = {
+        "prefill_cache_length", "stepped_cache_length", "cache_tensor_count",
+        "cache_storage_count", "cache_tensor_devices", "cache_tensor_dtypes",
+        "cache_object_unique", "cache_storage_disjoint_from_other_roles",
+        "next_logits_finite", "next_logits_dtype", "next_logits_vocab_size",
+    }
+    diagnostic_role_keys = {
+        "raw_max_abs_diff", "logprob_max_abs_diff", "cached_argmax_token_id",
+        "fresh_argmax_token_id", "argmax_equal", "top_k_overlap_count",
+        "top_k_set_equal", "legacy_allclose_1e3",
+    }
+    body = {
+        "schema_version": 1,
+        "protocol": CACHE_EQUIVALENCE_PROBE_PROTOCOL,
+        "roles": list(INDEPENDENT_MODEL_ORDER),
+        "model_execution_backend": INDEPENDENT_MODEL_BACKEND,
+        "production_device": CACHE_PROBE_PRODUCTION_DEVICE,
+        "required_true_fields": [
+            "model_objects_unique",
+            "single_active_adapter_per_reference",
+            "parameter_storage_sets_checked",
+            "parameter_storages_disjoint",
+            "cache_objects_unique",
+            "cache_tensor_storage_sets_checked",
+            "cache_tensor_storages_disjoint",
+        ],
+        "model_object_count": len(INDEPENDENT_MODEL_ORDER),
+        "cache_object_count": len(INDEPENDENT_MODEL_ORDER),
+        "model_compute_dtype": "bfloat16",
+        "attention_implementation": "sdpa",
+        "comparison_dtype": "float32",
+        "hard_gate": {
+            "mode": "independent_model_isolation_and_cached_execution",
+            "unique_model_objects_required": True,
+            "single_active_adapter_per_reference_required": True,
+            "cross_model_parameter_storage_disjoint_required": True,
+            "unique_kv_cache_objects_required": True,
+            "cross_cache_storage_disjoint_required": True,
+            "cache_length_and_finite_logits_required": True,
+            "gpu_memory_headroom_required": True,
+            "cached_next_logits_bitwise_repeatability_required": False,
+        },
+        "diagnostic_policy": {
+            "cached_vs_fresh_full_prefix_is_hard_gate": False,
+            "legacy_allclose_atol": CACHE_LEGACY_DIAGNOSTIC_ATOL,
+            "legacy_allclose_rtol": CACHE_LEGACY_DIAGNOSTIC_RTOL,
+            "legacy_allclose_is_diagnostic_only": True,
+            "incident_max_abs_diff_used_as_threshold": False,
+        },
+        "diagnostic_top_k": CACHE_DIAGNOSTIC_TOP_K,
+        "gpu_memory_contract": {
+            "production_device": CACHE_PROBE_PRODUCTION_DEVICE,
+            "model_object_count": len(INDEPENDENT_MODEL_ORDER),
+            "indexed_weight_bytes_per_model": BASE_INDEXED_WEIGHT_BYTES,
+            "total_indexed_weight_bytes": (
+                len(INDEPENDENT_MODEL_ORDER) * BASE_INDEXED_WEIGHT_BYTES
+            ),
+            "minimum_total_memory_bytes": CACHE_PROBE_MINIMUM_TOTAL_MEMORY_BYTES,
+            "minimum_free_memory_bytes_before_probe": (
+                CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+            ),
+            "minimum_free_memory_bytes_after_probe": (
+                CACHE_PROBE_MINIMUM_FREE_MEMORY_BYTES
+            ),
+            "formula": (
+                "total_memory_bytes>=120*GiB and "
+                "free_memory_bytes_before_probe>=32*GiB and "
+                "free_memory_bytes_after_probe>=32*GiB"
+            ),
+            "thresholds_output_independent": True,
+            "prior_incident_values_used_as_threshold": False,
+        },
+        "top_level_keys": sorted(top_level_keys),
+        "model_isolation_role_keys": sorted(model_isolation_role_keys),
+        "cache_execution_role_keys": sorted(cache_execution_role_keys),
+        "diagnostic_role_keys": sorted(diagnostic_role_keys),
+    }
+    return {**body, "contract_sha256": sha256_bytes(canonical_bytes(body))}
+
+
 def validate_cache_equivalence_probe(
     probe, phase, expected_question_id=None, expected_prompt_sha256=None
 ):
-    """Hard-gate cached-graph repeatability; audit full-prefix drift only."""
-    roles = [*CACHE_REPEATABILITY_FIRST_ORDER]
-    repeatability_gate = {
-        "mode": "bitwise_same_cached_graph",
-        "cached_next_logits_bitwise_required": True,
-        "cache_tensor_shape_dtype_device_value_bitwise_required": True,
-    }
-    diagnostic_policy = {
-        "cached_vs_fresh_full_prefix_is_hard_gate": False,
-        "legacy_allclose_atol": CACHE_LEGACY_DIAGNOSTIC_ATOL,
-        "legacy_allclose_rtol": CACHE_LEGACY_DIAGNOSTIC_RTOL,
-        "legacy_allclose_is_diagnostic_only": True,
-        "incident_max_abs_diff_used_as_threshold": False,
-    }
-    exact_keys = {
-        "protocol", "phase", "result", "question_id", "prompt_sha256",
-        "prompt_token_ids_sha256", "prompt_tokens", "continuation_text",
-        "continuation_text_sha256", "continuation_token_id", "roles",
-        "execution_orders", "adapter_order_cycled",
-        "same_prompt_and_token_both_executions", "cache_objects_unique",
-        "cache_object_count",
-        "cache_tensor_storage_sets_checked", "cache_tensor_storages_disjoint",
-        "model_compute_dtype", "attention_implementation", "comparison_dtype",
-        "repeatability_gate", "diagnostic_policy", "diagnostic_top_k",
-        "vocab_size", "repeatability", "cached_vs_full_prefix_diagnostics",
-        "probe_seconds",
-    }
+    """Hard-gate five-model/cache isolation; retain numeric drift diagnostically."""
+    contract = cache_equivalence_probe_static_contract()
+    roles = contract["roles"]
+    if (
+        contract["contract_sha256"]
+        != CACHE_EQUIVALENCE_PROBE_CONTRACT_SHA256
+    ):
+        raise ValueError("Cache-equivalence probe contract hash differs")
     if (
         not isinstance(probe, dict)
-        or set(probe) != exact_keys
+        or set(probe) != set(contract["top_level_keys"])
         or probe.get("protocol") != CACHE_EQUIVALENCE_PROBE_PROTOCOL
         or probe.get("phase") != phase
         or probe.get("result") != "PASS"
@@ -1062,31 +1170,33 @@ def validate_cache_equivalence_probe(
         or not isinstance(probe.get("continuation_token_id"), int)
         or probe["continuation_token_id"] < 0
         or probe.get("roles") != roles
-        or probe.get("execution_orders") != {
-            "first": list(CACHE_REPEATABILITY_FIRST_ORDER),
-            "second": list(CACHE_REPEATABILITY_SECOND_ORDER),
-        }
-        or probe.get("adapter_order_cycled") is not True
-        or probe.get("same_prompt_and_token_both_executions") is not True
+        or probe.get("device") != contract["production_device"]
+        or probe.get("model_execution_backend")
+        != contract["model_execution_backend"]
+        or probe.get("model_objects_unique") is not True
+        or probe.get("model_object_count") != contract["model_object_count"]
+        or probe.get("single_active_adapter_per_reference") is not True
+        or probe.get("scientific_adapter_switching_used") is not False
+        or probe.get("parameter_storage_sets_checked") is not True
+        or probe.get("parameter_storages_disjoint") is not True
         or probe.get("cache_objects_unique") is not True
-        or isinstance(probe.get("cache_object_count"), bool)
-        or not isinstance(probe.get("cache_object_count"), int)
-        or probe.get("cache_object_count") != 2 * len(roles)
+        or probe.get("cache_object_count") != contract["cache_object_count"]
         or probe.get("cache_tensor_storage_sets_checked") is not True
         or probe.get("cache_tensor_storages_disjoint") is not True
-        or probe.get("model_compute_dtype") != "bfloat16"
-        or probe.get("attention_implementation") != "sdpa"
-        or probe.get("comparison_dtype") != "float32"
-        or probe.get("repeatability_gate") != repeatability_gate
-        or probe.get("diagnostic_policy") != diagnostic_policy
-        or isinstance(probe.get("diagnostic_top_k"), bool)
-        or not isinstance(probe.get("diagnostic_top_k"), int)
-        or probe.get("diagnostic_top_k") != CACHE_DIAGNOSTIC_TOP_K
+        or probe.get("model_compute_dtype") != contract["model_compute_dtype"]
+        or probe.get("attention_implementation")
+        != contract["attention_implementation"]
+        or probe.get("comparison_dtype") != contract["comparison_dtype"]
+        or probe.get("hard_gate") != contract["hard_gate"]
+        or probe.get("diagnostic_policy") != contract["diagnostic_policy"]
+        or probe.get("diagnostic_top_k") != contract["diagnostic_top_k"]
         or isinstance(probe.get("vocab_size"), bool)
         or not isinstance(probe.get("vocab_size"), int)
         or probe["vocab_size"] < CACHE_DIAGNOSTIC_TOP_K
-        or not isinstance(probe.get("repeatability"), dict)
-        or list(probe["repeatability"]) != roles
+        or not isinstance(probe.get("model_isolation"), dict)
+        or list(probe["model_isolation"]) != roles
+        or not isinstance(probe.get("cache_execution"), dict)
+        or list(probe["cache_execution"]) != roles
         or not isinstance(probe.get("cached_vs_full_prefix_diagnostics"), dict)
         or list(probe["cached_vs_full_prefix_diagnostics"]) != roles
         or isinstance(probe.get("probe_seconds"), bool)
@@ -1095,47 +1205,83 @@ def validate_cache_equivalence_probe(
         or probe["probe_seconds"] < 0
     ):
         raise ValueError("Cache-equivalence probe metadata differs")
-    repeatability_keys = {
-        "prefill_cache_length", "stepped_cache_length", "cache_tensor_count",
-        "cache_tensor_shapes_equal", "cache_tensor_dtypes_equal",
-        "cache_tensor_devices_equal", "cache_tensor_values_bitwise_equal",
-        "cached_next_logits_bitwise_equal", "cached_next_logits_max_abs_diff",
-        "cached_next_logits_argmax_equal",
-    }
-    diagnostic_keys = {
-        "raw_max_abs_diff", "logprob_max_abs_diff", "cached_argmax_token_id",
-        "fresh_argmax_token_id", "argmax_equal", "top_k_overlap_count",
-        "top_k_set_equal", "legacy_allclose_1e3",
-    }
+
+    isolation_keys = set(contract["model_isolation_role_keys"])
+    cache_keys = set(contract["cache_execution_role_keys"])
+    diagnostic_keys = set(contract["diagnostic_role_keys"])
     for role in roles:
-        repeatability = probe["repeatability"][role]
+        isolation = probe["model_isolation"][role]
+        expected_kind = "direct_base" if role == "base" else "peft_single_adapter"
+        expected_adapter = None if role == "base" else role
+        expected_adapters = [] if role == "base" else [role]
+        parameter_dtypes = isolation.get("parameter_dtypes", []) if isinstance(
+            isolation, dict
+        ) else []
         if (
-            not isinstance(repeatability, dict)
-            or set(repeatability) != repeatability_keys
-            or repeatability.get("prefill_cache_length") != probe["prompt_tokens"]
-            or repeatability.get("stepped_cache_length")
-            != probe["prompt_tokens"] + 1
-            or isinstance(repeatability.get("cache_tensor_count"), bool)
-            or not isinstance(repeatability.get("cache_tensor_count"), int)
-            or repeatability["cache_tensor_count"] <= 0
-            or repeatability.get("cache_tensor_shapes_equal") is not True
-            or repeatability.get("cache_tensor_dtypes_equal") is not True
-            or repeatability.get("cache_tensor_devices_equal") is not True
-            or repeatability.get("cache_tensor_values_bitwise_equal") is not True
-            or repeatability.get("cached_next_logits_bitwise_equal") is not True
-            or isinstance(
-                repeatability.get("cached_next_logits_max_abs_diff"), bool
+            not isinstance(isolation, dict)
+            or set(isolation) != isolation_keys
+            or isolation.get("model_kind") != expected_kind
+            or isolation.get("expected_adapter") != expected_adapter
+            or isolation.get("active_adapters") != expected_adapters
+            or isolation.get("peft_config_adapters") != expected_adapters
+            or isolation.get("object_unique") is not True
+            or any(
+                isinstance(isolation.get(key), bool)
+                or not isinstance(isolation.get(key), int)
+                or isolation[key] <= 0
+                for key in (
+                    "parameter_tensor_count",
+                    "parameter_numel",
+                    "parameter_storage_count",
+                )
             )
-            or not isinstance(
-                repeatability.get("cached_next_logits_max_abs_diff"), (int, float)
+            or isolation["parameter_storage_count"]
+            > isolation["parameter_tensor_count"]
+            or isolation.get("parameter_devices") != [probe["device"]]
+            or not isinstance(parameter_dtypes, list)
+            or not parameter_dtypes
+            or parameter_dtypes != sorted(set(parameter_dtypes))
+            or any(
+                not isinstance(item, str) or not item.startswith("torch.")
+                for item in parameter_dtypes
             )
-            or not math.isfinite(
-                repeatability["cached_next_logits_max_abs_diff"]
-            )
-            or repeatability["cached_next_logits_max_abs_diff"] != 0.0
-            or repeatability.get("cached_next_logits_argmax_equal") is not True
+            or isolation.get("parameter_storage_disjoint_from_other_models")
+            is not True
         ):
-            raise ValueError(f"Cached-graph repeatability differs for {role}")
+            raise ValueError(f"Independent model isolation differs for {role}")
+
+        cache = probe["cache_execution"][role]
+        cache_dtypes = cache.get("cache_tensor_dtypes", []) if isinstance(
+            cache, dict
+        ) else []
+        if (
+            not isinstance(cache, dict)
+            or set(cache) != cache_keys
+            or cache.get("prefill_cache_length") != probe["prompt_tokens"]
+            or cache.get("stepped_cache_length") != probe["prompt_tokens"] + 1
+            or any(
+                isinstance(cache.get(key), bool)
+                or not isinstance(cache.get(key), int)
+                or cache[key] <= 0
+                for key in ("cache_tensor_count", "cache_storage_count")
+            )
+            or cache["cache_storage_count"] > cache["cache_tensor_count"]
+            or cache.get("cache_tensor_devices") != [probe["device"]]
+            or not isinstance(cache_dtypes, list)
+            or not cache_dtypes
+            or cache_dtypes != sorted(set(cache_dtypes))
+            or any(
+                not isinstance(item, str) or not item.startswith("torch.")
+                for item in cache_dtypes
+            )
+            or cache.get("cache_object_unique") is not True
+            or cache.get("cache_storage_disjoint_from_other_roles") is not True
+            or cache.get("next_logits_finite") is not True
+            or cache.get("next_logits_dtype") != "float32"
+            or cache.get("next_logits_vocab_size") != probe["vocab_size"]
+        ):
+            raise ValueError(f"Independent cached execution differs for {role}")
+
         diagnostic = probe["cached_vs_full_prefix_diagnostics"][role]
         if (
             not isinstance(diagnostic, dict)
@@ -1168,6 +1314,73 @@ def validate_cache_equivalence_probe(
             or not isinstance(diagnostic.get("legacy_allclose_1e3"), bool)
         ):
             raise ValueError(f"Cached/full-prefix diagnostic differs for {role}")
+
+    memory = probe.get("gpu_memory")
+    memory_keys = {
+        "device", "device_name", "minimum_total_memory_bytes",
+        "minimum_free_memory_bytes_before_probe",
+        "minimum_free_memory_bytes_after_probe", "total_memory_bytes",
+        "free_memory_bytes_before_probe", "allocated_memory_bytes_before_probe",
+        "reserved_memory_bytes_before_probe", "free_memory_bytes_after_probe",
+        "allocated_memory_bytes_after_probe", "reserved_memory_bytes_after_probe",
+        "peak_allocated_memory_bytes_after_probe", "total_memory_requirement_met",
+        "free_memory_before_requirement_met", "free_memory_after_requirement_met",
+        "headroom_requirement_met",
+    }
+    memory_numeric = {
+        "total_memory_bytes", "free_memory_bytes_before_probe",
+        "allocated_memory_bytes_before_probe", "reserved_memory_bytes_before_probe",
+        "free_memory_bytes_after_probe", "allocated_memory_bytes_after_probe",
+        "reserved_memory_bytes_after_probe",
+        "peak_allocated_memory_bytes_after_probe",
+    }
+    memory_contract = contract["gpu_memory_contract"]
+    if (
+        not isinstance(memory, dict)
+        or set(memory) != memory_keys
+        or memory.get("device") != probe["device"]
+        or not isinstance(memory.get("device_name"), str)
+        or not memory["device_name"]
+        or memory.get("minimum_total_memory_bytes")
+        != memory_contract["minimum_total_memory_bytes"]
+        or memory.get("minimum_free_memory_bytes_before_probe")
+        != memory_contract["minimum_free_memory_bytes_before_probe"]
+        or memory.get("minimum_free_memory_bytes_after_probe")
+        != memory_contract["minimum_free_memory_bytes_after_probe"]
+        or any(
+            isinstance(memory.get(key), bool)
+            or not isinstance(memory.get(key), int)
+            or memory[key] < 0
+            for key in memory_numeric
+        )
+        or memory["total_memory_bytes"] < memory["minimum_total_memory_bytes"]
+        or memory["free_memory_bytes_before_probe"]
+        < memory["minimum_free_memory_bytes_before_probe"]
+        or memory["free_memory_bytes_after_probe"]
+        < memory["minimum_free_memory_bytes_after_probe"]
+        or memory["allocated_memory_bytes_before_probe"]
+        > memory["reserved_memory_bytes_before_probe"]
+        or memory["allocated_memory_bytes_after_probe"]
+        > memory["reserved_memory_bytes_after_probe"]
+        or memory["reserved_memory_bytes_before_probe"]
+        > memory["total_memory_bytes"]
+        or memory["reserved_memory_bytes_after_probe"]
+        > memory["total_memory_bytes"]
+        or memory["free_memory_bytes_before_probe"] > memory["total_memory_bytes"]
+        or memory["free_memory_bytes_after_probe"] > memory["total_memory_bytes"]
+        or memory["peak_allocated_memory_bytes_after_probe"]
+        < memory["allocated_memory_bytes_after_probe"]
+        or any(
+            memory.get(key) is not True
+            for key in (
+                "total_memory_requirement_met",
+                "free_memory_before_requirement_met",
+                "free_memory_after_requirement_met",
+                "headroom_requirement_met",
+            )
+        )
+    ):
+        raise ValueError("Independent model GPU memory evidence differs")
     return dict(probe)
 
 
