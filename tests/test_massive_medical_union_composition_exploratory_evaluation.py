@@ -501,7 +501,7 @@ class CompositionEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "diagnostic differs for B3"):
             summary.validate_cache_equivalence_probe(tampered, "smoke")
 
-    def test_smoke_timing_seal_requires_bound_cache_probe(self):
+    def test_smoke_timing_canonical_round_trip_requires_bound_cache_probe(self):
         body = self.manifest_body()
         prompts = []
         for index in range(60):
@@ -570,9 +570,45 @@ class CompositionEvaluationTests(unittest.TestCase):
         timing_body["protocol_manifest_payload_sha256"] = manifest["payload_sha256"]
         timing_body["projection_formula"] = summary.RUNTIME_PROJECTION_FORMULA
         timing_path = self.root / "timings.json"
-        write_json(timing_path, summary.seal(timing_body))
+        # The production sampler canonicalizes object keys while writing.  The
+        # evaluator must validate the exact stream registry without treating
+        # the resulting JSON object order as protocol state.
+        sampler.atomic_write_json(timing_path, summary.seal(timing_body))
+        serialized_streams = list(json.loads(timing_path.read_text(
+            encoding="utf-8"
+        ))["streams"])
+        expected_streams = [
+            "pi_base:massive",
+            *(f"{name}:massive" for name in summary.METHOD_IDS),
+        ]
+        self.assertEqual(serialized_streams, sorted(expected_streams))
+        self.assertNotEqual(serialized_streams, expected_streams)
         loaded = summary.load_smoke_timings(timing_path, manifest)
         self.assertEqual(loaded["cache_equivalence_probe"], probe)
+
+        missing_stream = json.loads(json.dumps(timing_body))
+        missing_stream["streams"].pop("delta_min_m4_q4:massive")
+        write_json(timing_path, summary.seal(missing_stream))
+        with self.assertRaisesRegex(ValueError, "timing stream registry"):
+            summary.load_smoke_timings(timing_path, manifest)
+
+        extra_stream = json.loads(json.dumps(timing_body))
+        extra_stream["streams"]["unexpected:massive"] = dict(
+            extra_stream["streams"]["pi_base:massive"]
+        )
+        write_json(timing_path, summary.seal(extra_stream))
+        with self.assertRaisesRegex(ValueError, "timing stream registry"):
+            summary.load_smoke_timings(timing_path, manifest)
+
+        invalid_stream_value = json.loads(json.dumps(timing_body))
+        invalid_stream_value["streams"]["ordinary_quorum_m4_q3:massive"][
+            "samples"
+        ] = 59
+        write_json(timing_path, summary.seal(invalid_stream_value))
+        with self.assertRaisesRegex(
+            ValueError, "timing stream differs: ordinary_quorum_m4_q3:massive"
+        ):
+            summary.load_smoke_timings(timing_path, manifest)
 
         missing = dict(timing_body)
         missing.pop("cache_equivalence_probe")

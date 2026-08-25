@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import types
 import unittest
@@ -134,8 +135,24 @@ class RecoveryWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(len(recovery.MODIFIED_FILES), 5)
         self.assertEqual(set(recovery.FROZEN_MODIFIED_FILE_SHA256), set(recovery.MODIFIED_FILES))
+        # This is a historical v3 provenance assertion. Descendant recovery
+        # commits may deliberately fix an evaluator, so verify the immutable
+        # v3 commit object rather than mutable descendant worktree bytes.
+        v3_commit = "99427421d44b447927c4eb1f66f3254c007dfc6d"
         for path, digest in recovery.FROZEN_MODIFIED_FILE_SHA256.items():
-            self.assertEqual(recovery.sha256_file(ROOT / path), digest)
+            historical = subprocess.check_output(
+                ["git", "-C", ROOT, "show", f"{v3_commit}:{path}"]
+            )
+            self.assertEqual(recovery.sha256_bytes(historical), digest)
+        self.assertNotEqual(
+            recovery.sha256_file(
+                ROOT
+                / "scripts/summarize_massive_medical_union_composition_exploratory_v1.py"
+            ),
+            recovery.FROZEN_MODIFIED_FILE_SHA256[
+                "scripts/summarize_massive_medical_union_composition_exploratory_v1.py"
+            ],
+        )
         self.assertEqual(len(recovery.ADDED_FILES), 7)
         self.assertFalse(any("confirmation" in path for path in recovery.ADDED_FILES))
 

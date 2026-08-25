@@ -1438,7 +1438,7 @@ def load_smoke_timings(path, manifest):
         or post_audit < 0
         or setup != pre_setup + post_audit
         or not isinstance(streams, dict)
-        or tuple(streams) != expected_streams
+        or set(streams) != set(expected_streams)
     ):
         raise ValueError("Smoke timing stream registry differs")
     for key in expected_streams:
