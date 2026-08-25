@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed CPU control plane for sequential exploratory confirmation v1."""
+"""Fail-closed stage-recovery-v2 control plane for sequential confirmation v1."""
 
 import argparse
 import datetime as dt
@@ -17,12 +17,12 @@ import tempfile
 
 WORKFLOW_ID = "massive_medical_union_composition_exploratory_sequential_confirmation_v1"
 PROTOCOL_ID = WORKFLOW_ID
-DIRECT_PARENT_COMMIT = "890f685b3198e30e1658aa7ab0aa9f11a537aaf9"
-DIRECT_PARENT_TREE = "676b2e9c31a6df22750a7cc51d88f099985f4068"
-BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1"
+DIRECT_PARENT_COMMIT = "a5724e9a06204941df9ad07ad4a5f84502dde7f8"
+DIRECT_PARENT_TREE = "6bb7396cb9e2ac98b17df72f9b4461e5c2890a07"
+BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2"
 TILLICUM_ROOT = Path("/gpfs/projects/stf/claizhan/subliminal-mitigate")
-REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1"
-OUTPUT_ROOT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1"
+REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2"
+OUTPUT_ROOT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2"
 CONTROL_ROOT = OUTPUT_ROOT / "control"
 PROTOCOL_ROOT = OUTPUT_ROOT / "protocol"
 PREP_FILE = CONTROL_ROOT / "PREP.json"
@@ -39,7 +39,15 @@ JUDGE_CHECKPOINT = EVALUATION_ROOT / "medical/judge_checkpoint.json"
 JUDGMENTS_NEW = EVALUATION_ROOT / "medical/judgments_new.json"
 JUDGMENTS_MERGED = EVALUATION_ROOT / "medical/judgments_merged.json"
 LOG_ROOT = TILLICUM_ROOT / "outputs/logs"
-LOG_PREFIX = "massive_medical_union_composition_exploratory_sequential_confirmation_v1_"
+LOG_PREFIX = "massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_"
+FAILED_V1_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1"
+FAILED_V1_OUTPUT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1"
+FAILED_V1_TMP = TILLICUM_ROOT / "tmp/mmu-sequential-v1-stage-pyc"
+FAILED_V1_COMMIT = "a5724e9a06204941df9ad07ad4a5f84502dde7f8"
+FAILED_V1_TREE = "6bb7396cb9e2ac98b17df72f9b4461e5c2890a07"
+FAILED_V1_PARENT = "890f685b3198e30e1658aa7ab0aa9f11a537aaf9"
+FAILED_V1_BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1"
+FAILED_V1_DIFF_INVENTORY_SHA256 = "f810efb779998d4b4ded2897aa1a1c15fc07e4bdcf85c735882b2c469e57e2f0"
 V5_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-smoke-gate-recovery-v5"
 V5_AUDITOR = V5_REPO / "scripts/audit_massive_medical_union_composition_exploratory_smoke_gate_recovery_v5.py"
 V5_RESULT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_smoke_gate_recovery_v5/control/SMOKE_GATE_RECOVERY_RESULT.json"
@@ -79,7 +87,7 @@ BASE_SAFETENSORS_SHARDS = (
     ("model-00004-of-00004.safetensors", 3556377672, "1a72d403cdf0c1ec3cb7f289f17b394a01e64394c2e9b3c0f94dbce3faf879bd"),
 )
 
-ADDED_FILES = (
+MODIFIED_FILES = (
     "docs/massive_medical_union_composition_exploratory_sequential_confirmation_v1.md",
     "scripts/prepare_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
     "scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
@@ -90,14 +98,7 @@ ADDED_FILES = (
     "scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_tillicum_h200.sbatch",
     "scripts/submit_massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_tillicum.sh",
     "scripts/finalize_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh",
-    "scripts/sample_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
-    "scripts/summarize_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
-    "scripts/judge_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
-    "scripts/merge_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
-    "tests/test_massive_medical_union_composition_exploratory_sequential_confirmation_v1_protocol.py",
     "tests/test_massive_medical_union_composition_exploratory_sequential_confirmation_v1_workflow.py",
-    "tests/test_massive_medical_union_composition_exploratory_sequential_sampler.py",
-    "tests/test_massive_medical_union_composition_exploratory_sequential_evaluation.py",
 )
 
 FROZEN_EXTERNAL_FILES = {
@@ -121,7 +122,7 @@ def stage_config(stage):
         "minutes": minutes,
         "cost": cost,
         "time_limit": limit,
-        "job_name": "mmu_seq_benefit_v1" if stage == "benefit" else "mmu_seq_medical_v1",
+        "job_name": "mmu_seq_benefit_v2" if stage == "benefit" else "mmu_seq_medical_v2",
         "log_prefix": LOG_PREFIX + stage,
         "sbatch": REPO_ROOT / f"scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_{stage}_tillicum_h200.sbatch",
         "lock": CONTROL_ROOT / f"{upper}_SUBMISSION_LOCK",
@@ -217,7 +218,12 @@ def write_sealed_once(path, body):
 
 
 def git(root, *args):
-    result = subprocess.run(["git", "-C", os.fspath(root), *args], check=True, capture_output=True, text=True)
+    environment = dict(os.environ)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    result = subprocess.run(
+        ["git", "-C", os.fspath(root), *args], check=True,
+        capture_output=True, text=True, env=environment,
+    )
     return result.stdout.strip()
 
 
@@ -256,6 +262,57 @@ def audit_environment():
     }
 
 
+def audit_failed_v1_stage():
+    if (
+        FAILED_V1_REPO.is_symlink() or not FAILED_V1_REPO.is_dir()
+        or stat.S_IMODE(FAILED_V1_REPO.stat().st_mode) != 0o2700
+    ):
+        raise ValueError("failed-v1 checkout is missing or unsafe")
+    commit = git(FAILED_V1_REPO, "rev-parse", "HEAD")
+    parents = git(FAILED_V1_REPO, "rev-list", "--parents", "-n", "1", "HEAD")
+    environment = dict(os.environ)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    diff = subprocess.run(
+        [
+            "git", "-C", os.fspath(FAILED_V1_REPO), "diff", "--name-status",
+            "--no-renames", f"{FAILED_V1_PARENT}..{FAILED_V1_COMMIT}",
+        ],
+        check=True, capture_output=True, env=environment,
+    ).stdout
+    if (
+        commit != FAILED_V1_COMMIT
+        or parents != f"{FAILED_V1_COMMIT} {FAILED_V1_PARENT}"
+        or git(FAILED_V1_REPO, "rev-parse", "HEAD^{tree}") != FAILED_V1_TREE
+        or git(FAILED_V1_REPO, "branch", "--show-current") != FAILED_V1_BRANCH
+        or git(FAILED_V1_REPO, "rev-parse", "@{upstream}") != FAILED_V1_COMMIT
+        or git(FAILED_V1_REPO, "status", "--porcelain")
+        or len(git(FAILED_V1_REPO, "ls-files").splitlines()) != 465
+        or sha256_bytes(diff) != FAILED_V1_DIFF_INVENTORY_SHA256
+        or os.path.lexists(FAILED_V1_OUTPUT)
+        or os.path.lexists(FAILED_V1_TMP)
+        or list(LOG_ROOT.glob("massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_*"))
+        or list(LOG_ROOT.glob("massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_*"))
+    ):
+        raise ValueError("failed-v1 REPO_ONLY_PRE_CONTROL_FAILURE binding differs")
+    return {
+        "classification": "REPO_ONLY_PRE_CONTROL_FAILURE",
+        "path": os.fspath(FAILED_V1_REPO),
+        "mode": "02700",
+        "branch": FAILED_V1_BRANCH,
+        "commit": FAILED_V1_COMMIT,
+        "tree": FAILED_V1_TREE,
+        "sole_parent": FAILED_V1_PARENT,
+        "tracked_files": 465,
+        "diff_inventory_sha256": FAILED_V1_DIFF_INVENTORY_SHA256,
+        "checkout_clean": True,
+        "output_absent": True,
+        "matching_logs_absent": True,
+        "slurm_jobs_submitted": 0,
+        "gpu_h200_minutes": 0,
+        "external_api_calls": 0,
+    }
+
+
 def audit_repository():
     if REPO_ROOT.is_symlink() or not REPO_ROOT.is_dir():
         raise ValueError("sequential checkout is missing or unsafe")
@@ -269,24 +326,33 @@ def audit_repository():
     ):
         raise ValueError("sequential checkout lineage/branch/cleanliness differs")
     observed = [tuple(line.split("\t")) for line in git(REPO_ROOT, "diff", "--name-status", "--no-renames", f"{DIRECT_PARENT_COMMIT}..{commit}").splitlines()]
-    expected = [("A", path) for path in ADDED_FILES]
+    expected = [("M", path) for path in MODIFIED_FILES]
     if len(observed) != len(expected) or set(observed) != set(expected):
-        raise ValueError("sequential commit differs from exact add-only allowlist")
+        raise ValueError("sequential stage-recovery commit differs from exact modified-file allowlist")
     files = {}
-    for relative in ADDED_FILES:
+    for relative in MODIFIED_FILES:
         path = require_regular(REPO_ROOT / relative, f"repository file {relative}")
         expected_index = "100755" if relative.startswith("scripts/") else "100644"
         expected_mode = 0o755 if relative.startswith("scripts/") else 0o644
         index = git(REPO_ROOT, "ls-files", "-s", "--", relative).split()
         if len(index) < 4 or index[0] != expected_index or stat.S_IMODE(path.stat().st_mode) != expected_mode:
             raise ValueError(f"repository mode differs: {relative}")
-        if relative in FROZEN_EXTERNAL_FILES and sha256_file(path) != FROZEN_EXTERNAL_FILES[relative]:
-            raise ValueError(f"frozen cross-layer file bytes differ: {relative}")
         files[relative] = {"git_mode": expected_index, "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
+    inherited_frozen_files = {}
+    for relative, expected_hash in FROZEN_EXTERNAL_FILES.items():
+        path = require_regular(REPO_ROOT / relative, f"inherited frozen file {relative}")
+        expected_mode = 0o755 if relative.startswith("scripts/") else 0o644
+        if stat.S_IMODE(path.stat().st_mode) != expected_mode or sha256_file(path) != expected_hash:
+            raise ValueError(f"inherited frozen cross-layer file bytes differ: {relative}")
+        inherited_frozen_files[relative] = {
+            "size_bytes": path.stat().st_size, "sha256": expected_hash,
+        }
     return {
         "path": os.fspath(REPO_ROOT), "branch": BRANCH, "commit": commit,
         "direct_parent_commit": DIRECT_PARENT_COMMIT, "direct_parent_tree": DIRECT_PARENT_TREE,
-        "direct_nonmerge_parent": True, "modified_files": [], "added_files": list(ADDED_FILES), "files": files,
+        "direct_nonmerge_parent": True, "modified_files": list(MODIFIED_FILES), "added_files": [],
+        "files": files, "inherited_frozen_files": inherited_frozen_files,
+        "failed_v1_stage": audit_failed_v1_stage(),
     }
 
 

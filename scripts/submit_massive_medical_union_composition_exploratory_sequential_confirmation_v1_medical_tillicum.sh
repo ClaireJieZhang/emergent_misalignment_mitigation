@@ -8,8 +8,8 @@ ulimit -c 0
 }
 benefit_actual=$5
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1
-output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1
+repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
+output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
 control=$output/control; logs=$root/outputs/logs
 auditor=$repo/scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
 batch=scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_tillicum_h200.sbatch
@@ -18,16 +18,16 @@ submitted=$control/MEDICAL_SUBMITTED; released=$control/MEDICAL_RELEASE_AUTHORIZ
 cd "$repo"
 module load conda/Miniforge3-25.3.1-3
 conda activate "$root/envs/subliminal-mitigate-py311"
-export PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-medical-submit-pyc
+export PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-medical-v2-submit-pyc
 # Eligibility is asserted before any lock or sbatch side effect.
 python "$auditor" assert-medical-release --ack-benefit-actual-usd "$benefit_actual"
 python "$auditor" audit-preflight --stage medical
 for path in "$lock" "$attempt" "$submitted" "$released" "$control/MEDICAL_JOB.json" "$control/MEDICAL_AUTHORIZATION.json" "$control/MEDICAL_RESULT.json" "$control/STOPPED_medical" "$output/generation/medical" "$output/evaluation/medical"; do test ! -e "$path"; done
-if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_*" >/dev/null; then echo 'Medical log namespace is not fresh.' >&2; exit 4; fi
+if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_medical_*" >/dev/null; then echo 'Medical log namespace is not fresh.' >&2; exit 4; fi
 mkdir "$lock" || { echo 'Medical submission is permanently locked; retry is forbidden.' >&2; exit 3; }
 printf 'workflow_id=massive_medical_union_composition_exploratory_sequential_confirmation_v1\nstage=medical\nrepo_commit=%s\n' "$(git rev-parse HEAD)" > "$lock/owner.tmp"
 chmod 0400 "$lock/owner.tmp"; mv "$lock/owner.tmp" "$lock/owner"
-raw_job=$(sbatch --parsable --hold --export=NONE --job-name=mmu_seq_medical_v1 "$batch")
+raw_job=$(sbatch --parsable --hold --export=NONE --job-name=mmu_seq_medical_v2 "$batch")
 job_id=${raw_job%%;*}; [[ $job_id =~ ^[0-9]+$ ]] || exit 5
 released_ok=false
 cleanup() { code=$?; if [[ $released_ok != true ]]; then state=$(squeue -h -j "$job_id" -o '%T|%r' 2>/dev/null || true); [[ $state != 'PENDING|JobHeldUser' ]] || scancel "$job_id" || true; fi; trap - EXIT; exit "$code"; }

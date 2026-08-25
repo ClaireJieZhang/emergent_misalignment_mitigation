@@ -1,5 +1,5 @@
 #!/bin/bash
-# CPU-only stage of the under-$5 sequential exploratory confirmation workflow.
+# CPU-only stage recovery v2 for the under-$5 sequential exploratory confirmation workflow.
 
 set -euo pipefail
 umask 077
@@ -11,8 +11,8 @@ local_repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 host=${TILLICUM_HOST:-tillicum}
 root=${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}
 url=${REMOTE_REPO_URL:-https://github.com/ClaireJieZhang/emergent_misalignment_mitigation.git}
-branch=${REMOTE_BRANCH:-claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1}
-parent=890f685b3198e30e1658aa7ab0aa9f11a537aaf9
+branch=${REMOTE_BRANCH:-claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2}
+parent=a5724e9a06204941df9ad07ad4a5f84502dde7f8
 commit=$(git -C "$local_repo" rev-parse HEAD)
 test "$(git -C "$local_repo" rev-list --parents -n 1 "$commit")" = "$commit $parent"
 test "$(git -C "$local_repo" branch --show-current)" = "$branch"
@@ -23,15 +23,28 @@ umask 077
 ulimit -c 0
 
 root=$1; url=$2; branch=$3; expected=$4
-repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1
-output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1
+repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
+output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
 control=$output/control
 protocol=$output/protocol
 logs=$root/outputs/logs
 env_root=$root/envs/subliminal-mitigate-py311
+failed_repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1
+failed_output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1
+export GIT_OPTIONAL_LOCKS=0
+test -d "$failed_repo"; test ! -L "$failed_repo"
+test "$(git -C "$failed_repo" rev-parse HEAD)" = a5724e9a06204941df9ad07ad4a5f84502dde7f8
+test "$(git -C "$failed_repo" rev-parse 'HEAD^{tree}')" = 6bb7396cb9e2ac98b17df72f9b4461e5c2890a07
+test "$(git -C "$failed_repo" rev-list --parents -n 1 HEAD)" = 'a5724e9a06204941df9ad07ad4a5f84502dde7f8 890f685b3198e30e1658aa7ab0aa9f11a537aaf9'
+test "$(git -C "$failed_repo" branch --show-current)" = claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1
+test -z "$(git -C "$failed_repo" status --porcelain)"
+test ! -e "$failed_output"
+if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_*" >/dev/null || compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_*" >/dev/null; then
+  echo 'Failed-v1 log namespace is no longer pristine.' >&2; exit 3
+fi
 test ! -e "$repo"
 test ! -e "$output"
-if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_*" >/dev/null; then
+if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_*" >/dev/null; then
   echo 'Sequential log namespace is not fresh.' >&2; exit 4
 fi
 
@@ -57,13 +70,19 @@ unset TRANSFORMERS_CACHE
 module load conda/Miniforge3-25.3.1-3
 conda activate "$env_root"
 export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-export PYTHONPYCACHEPREFIX=$root/tmp/mmu-sequential-v1-stage-pyc
+export PYTHONPYCACHEPREFIX=$root/tmp/mmu-sequential-v1-stage-recovery-v2-pyc
 export DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export XDG_CACHE_HOME=$root/cache XDG_CONFIG_HOME=$root/config TMPDIR=$root/tmp
-export HF_HOME=$root/cache/huggingface HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export HF_HOME=$root/cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 
 cd "$repo"
+auditor=scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
+sampler=scripts/sample_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
+# Seal the fresh recovery namespace and the failed-v1 checkout binding before
+# dependency checks or tests.  Any later CPU-stage failure remains auditable.
+python "$auditor" write-prep
 python -m pip check
 bash -n \
   scripts/stage_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh \
@@ -95,14 +114,16 @@ python -m unittest \
   tests.test_massive_medical_union_composition_exploratory_sequential_evaluation \
   tests.test_massive_medical_union_composition_exploratory_sequential_confirmation_v1_workflow
 
-auditor=scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
-sampler=scripts/sample_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
-python "$auditor" write-prep
 python scripts/prepare_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
 python "$auditor" audit-protocol --protocol-root "$protocol"
 
 for phase in benefit medical; do
-  target=$control/SAMPLER_PREFLIGHT_${phase^^}.json
+  case "$phase" in
+    benefit) upper=BENEFIT ;;
+    medical) upper=MEDICAL ;;
+    *) exit 9 ;;
+  esac
+  target=$control/SAMPLER_PREFLIGHT_${upper}.json
   temporary=$target.tmp.$$
   unused=$output/preflight-unused-$phase
   test ! -e "$unused"

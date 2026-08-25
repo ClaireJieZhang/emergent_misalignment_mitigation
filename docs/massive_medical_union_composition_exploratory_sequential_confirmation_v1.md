@@ -1,6 +1,8 @@
-# Under-$5 sequential MASSIVE–medical composition confirmation
+# Under-$5 sequential MASSIVE–medical composition confirmation — stage recovery v2
 
 This is a fresh, explicitly exploratory protocol. It preserves every earlier STOP and does not reinterpret the stopped 60-row smoke as authorization. Its purpose is to answer the remaining question with a staged spend: first establish benefit on a larger, outcome-blind MASSIVE subset; only then spend on the full medical panel; only then purchase blinded judgments.
+
+The first CPU-stage attempt (`a5724e9`) stopped after cloning and normalizing its checkout but before creating `PREP`, protocol, output, logs, or any Slurm/API state because Bash expanded an unset `HF_HOME` inside a combined `export`. That checkout is preserved read-only as `REPO_ONLY_PRE_CONTROL_FAILURE`. Recovery v2 uses distinct repository, output, log, job, and temporary namespaces, binds the failed checkout in every live repository audit, and splits the cache exports in the CPU stage and both future GPU scripts. The scientific sampler, evaluator, subset, gates, models, prompts, and budgets are unchanged.
 
 ## Frozen design
 
@@ -44,7 +46,7 @@ Read-only status:
 
 ```bash
 ssh tillicum
-/gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1/scripts/status_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh
+/gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2/scripts/status_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh
 ```
 
 ## Future paid phases (each requires a new user decision)
@@ -53,7 +55,7 @@ Benefit, after explicit authorization:
 
 ```bash
 ssh tillicum
-cd /gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1
+cd /gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
 scripts/submit_massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_tillicum.sh benefit --ack-prior-program-actual-usd 1.696936 --ack-max-cost-usd 0.975 --ack-exact-cumulative-max-usd 2.671936
 ```
 

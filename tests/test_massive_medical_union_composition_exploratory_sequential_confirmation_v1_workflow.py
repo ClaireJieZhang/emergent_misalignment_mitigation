@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -24,18 +25,21 @@ class SequentialWorkflowTests(unittest.TestCase):
         path.write_text(json.dumps(AUDIT.sealed(body), sort_keys=True) + "\n", encoding="utf-8")
         os.chmod(path, 0o600)
 
-    def test_exact_add_only_scope_and_modes(self):
-        self.assertEqual(len(AUDIT.ADDED_FILES), 18)
-        self.assertEqual(len(set(AUDIT.ADDED_FILES)), 18)
-        for relative in AUDIT.ADDED_FILES:
+    def test_exact_stage_recovery_scope_and_modes(self):
+        self.assertEqual(len(AUDIT.MODIFIED_FILES), 11)
+        self.assertEqual(len(set(AUDIT.MODIFIED_FILES)), 11)
+        for relative in AUDIT.MODIFIED_FILES:
             path = ROOT / relative
             self.assertTrue(path.is_file(), relative)
             expected = 0o755 if relative.startswith("scripts/") else 0o644
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected, relative)
         for relative, expected_hash in AUDIT.FROZEN_EXTERNAL_FILES.items():
             self.assertEqual(AUDIT.sha256_file(ROOT / relative), expected_hash, relative)
-        self.assertEqual(AUDIT.DIRECT_PARENT_COMMIT, "890f685b3198e30e1658aa7ab0aa9f11a537aaf9")
-        self.assertEqual(AUDIT.BRANCH, "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1")
+        self.assertEqual(AUDIT.DIRECT_PARENT_COMMIT, "a5724e9a06204941df9ad07ad4a5f84502dde7f8")
+        self.assertEqual(AUDIT.DIRECT_PARENT_TREE, "6bb7396cb9e2ac98b17df72f9b4461e5c2890a07")
+        self.assertEqual(AUDIT.BRANCH, "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2")
+        self.assertTrue(str(AUDIT.REPO_ROOT).endswith("sequential-confirmation-v1-stage-recovery-v2"))
+        self.assertTrue(str(AUDIT.OUTPUT_ROOT).endswith("sequential_confirmation_v1_stage_recovery_v2"))
 
     def test_stage_is_cpu_only_and_normalizes_index_modes(self):
         text = (ROOT / "scripts/stage_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh").read_text()
@@ -48,6 +52,35 @@ class SequentialWorkflowTests(unittest.TestCase):
         self.assertIn("test ! -e \"$output/evaluation\"", text)
         self.assertIn("validate-static", text)
         self.assertIn("unset TRANSFORMERS_CACHE", text)
+        self.assertIn("FAILED_V1", AUDITOR_PATH.read_text())
+        self.assertIn("failed_repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1", text)
+        self.assertLess(text.index('python "$auditor" write-prep'), text.index("python -m pip check"))
+
+    def test_cache_exports_are_nounset_safe_in_stage_and_both_gpu_scripts(self):
+        paths = [
+            ROOT / "scripts/stage_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh",
+            ROOT / "scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_tillicum_h200.sbatch",
+            ROOT / "scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_tillicum_h200.sbatch",
+        ]
+        for path in paths:
+            lines = path.read_text().splitlines()
+            selected = [
+                line for line in lines
+                if line.startswith("export HF_HOME=")
+                or line.startswith("export HUGGINGFACE_HUB_CACHE=")
+                or line.startswith("export TRITON_CACHE_DIR=")
+            ]
+            self.assertGreaterEqual(len(selected), 2, path.name)
+            self.assertFalse(any("HF_HOME=" in line and "HUGGINGFACE_HUB_CACHE=" in line for line in selected))
+            script = "set -eu\nroot=/tmp/mmu-seq-recovery-test\n" + "\n".join(selected) + "\n" + (
+                'test "$HF_HOME" = /tmp/mmu-seq-recovery-test/cache/huggingface\n'
+                'test "$HUGGINGFACE_HUB_CACHE" = /tmp/mmu-seq-recovery-test/cache/huggingface/hub\n'
+            )
+            environment = dict(os.environ)
+            environment.pop("HF_HOME", None)
+            environment.pop("HUGGINGFACE_HUB_CACHE", None)
+            environment.pop("TRITON_CACHE_DIR", None)
+            subprocess.run(["/bin/bash", "-uec", script], env=environment, check=True)
 
     def test_two_held_first_jobs_have_exact_caps_and_no_dependencies(self):
         benefit = (ROOT / "scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_tillicum_h200.sbatch").read_text()
@@ -112,7 +145,7 @@ class SequentialWorkflowTests(unittest.TestCase):
             batch.write_text("#!/bin/bash\n", encoding="utf-8")
             log_root = root / "logs"; log_root.mkdir()
             config = {
-                "stage": "benefit", "job_name": "mmu_seq_benefit_v1", "minutes": 65, "cost": 0.975,
+                "stage": "benefit", "job_name": "mmu_seq_benefit_v2", "minutes": 65, "cost": 0.975,
                 "time_limit": "01:05:00", "sbatch": batch, "log_prefix": "seq_benefit",
             }
             fields = {
@@ -124,7 +157,7 @@ class SequentialWorkflowTests(unittest.TestCase):
                 "ReqTRES": "billing=8,cpu=8,gres/gpu:h200=1,gres/gpu=1,mem=180G,node=1", "Dependency": "(null)",
                 "KillOnInvalidDependent": "No", "JobState": "PENDING", "Reason": "JobHeldUser", "RunTime": "00:00:00",
                 "AllocTRES": "(null)", "MinMemoryNode": "180G",
-                "SubmitLine": "sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v1 benefit.sbatch",
+                "SubmitLine": "sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v2 benefit.sbatch",
             }
             with mock.patch.object(AUDIT, "REPO_ROOT", root), mock.patch.object(AUDIT, "LOG_ROOT", log_root), mock.patch.object(AUDIT, "stage_config", return_value=config):
                 AUDIT.audit_job_record("benefit", "123", "raw", fields, "held")

@@ -7,8 +7,8 @@ ulimit -c 0
   echo 'Usage: submit_..._benefit_tillicum.sh benefit --ack-prior-program-actual-usd 1.696936 --ack-max-cost-usd 0.975 --ack-exact-cumulative-max-usd 2.671936' >&2; exit 2
 }
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1
-output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1
+repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
+output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
 control=$output/control; logs=$root/outputs/logs
 auditor=$repo/scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
 batch=scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_tillicum_h200.sbatch
@@ -16,16 +16,16 @@ lock=$control/BENEFIT_SUBMISSION_LOCK; attempt=$control/BENEFIT_SUBMISSION_ATTEM
 submitted=$control/BENEFIT_SUBMITTED; released=$control/BENEFIT_RELEASE_AUTHORIZED
 cd "$repo"
 for path in "$lock" "$attempt" "$submitted" "$released" "$control/BENEFIT_JOB.json" "$control/BENEFIT_AUTHORIZATION.json" "$control/BENEFIT_RESULT.json" "$control/STOPPED_benefit" "$output/generation/benefit" "$output/evaluation/benefit"; do test ! -e "$path"; done
-if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_*" >/dev/null; then echo 'Benefit log namespace is not fresh.' >&2; exit 4; fi
+if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_benefit_*" >/dev/null; then echo 'Benefit log namespace is not fresh.' >&2; exit 4; fi
 module load conda/Miniforge3-25.3.1-3
 conda activate "$root/envs/subliminal-mitigate-py311"
-export PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-benefit-submit-pyc
+export PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-benefit-v2-submit-pyc
 python "$auditor" audit-staged
 python "$auditor" audit-preflight --stage benefit
 mkdir "$lock" || { echo 'Benefit submission is permanently locked; retry is forbidden.' >&2; exit 3; }
 printf 'workflow_id=massive_medical_union_composition_exploratory_sequential_confirmation_v1\nstage=benefit\nrepo_commit=%s\n' "$(git rev-parse HEAD)" > "$lock/owner.tmp"
 chmod 0400 "$lock/owner.tmp"; mv "$lock/owner.tmp" "$lock/owner"
-raw_job=$(sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v1 "$batch")
+raw_job=$(sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v2 "$batch")
 job_id=${raw_job%%;*}; [[ $job_id =~ ^[0-9]+$ ]] || exit 5
 released_ok=false
 cleanup() { code=$?; if [[ $released_ok != true ]]; then state=$(squeue -h -j "$job_id" -o '%T|%r' 2>/dev/null || true); [[ $state != 'PENDING|JobHeldUser' ]] || scancel "$job_id" || true; fi; trap - EXIT; exit "$code"; }
