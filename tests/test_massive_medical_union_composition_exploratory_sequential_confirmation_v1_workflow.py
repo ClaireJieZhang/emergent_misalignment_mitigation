@@ -25,7 +25,7 @@ class SequentialWorkflowTests(unittest.TestCase):
         path.write_text(json.dumps(AUDIT.sealed(body), sort_keys=True) + "\n", encoding="utf-8")
         os.chmod(path, 0o600)
 
-    def test_exact_stage_recovery_scope_and_modes(self):
+    def test_exact_submit_recovery_scope_and_modes(self):
         self.assertEqual(len(AUDIT.MODIFIED_FILES), 11)
         self.assertEqual(len(set(AUDIT.MODIFIED_FILES)), 11)
         for relative in AUDIT.MODIFIED_FILES:
@@ -35,11 +35,11 @@ class SequentialWorkflowTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected, relative)
         for relative, expected_hash in AUDIT.FROZEN_EXTERNAL_FILES.items():
             self.assertEqual(AUDIT.sha256_file(ROOT / relative), expected_hash, relative)
-        self.assertEqual(AUDIT.DIRECT_PARENT_COMMIT, "a5724e9a06204941df9ad07ad4a5f84502dde7f8")
-        self.assertEqual(AUDIT.DIRECT_PARENT_TREE, "6bb7396cb9e2ac98b17df72f9b4461e5c2890a07")
-        self.assertEqual(AUDIT.BRANCH, "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2")
-        self.assertTrue(str(AUDIT.REPO_ROOT).endswith("sequential-confirmation-v1-stage-recovery-v2"))
-        self.assertTrue(str(AUDIT.OUTPUT_ROOT).endswith("sequential_confirmation_v1_stage_recovery_v2"))
+        self.assertEqual(AUDIT.DIRECT_PARENT_COMMIT, "6a4fb04c482f600bf882d787b7b40b949d7c3f34")
+        self.assertEqual(AUDIT.DIRECT_PARENT_TREE, "14c7be66f4830a63eb7cc15e0657d0f5d370c44f")
+        self.assertEqual(AUDIT.BRANCH, "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-submit-recovery-v3")
+        self.assertTrue(str(AUDIT.REPO_ROOT).endswith("sequential-confirmation-v1-submit-recovery-v3"))
+        self.assertTrue(str(AUDIT.OUTPUT_ROOT).endswith("sequential_confirmation_v1_submit_recovery_v3"))
 
     def test_stage_is_cpu_only_and_normalizes_index_modes(self):
         text = (ROOT / "scripts/stage_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh").read_text()
@@ -53,7 +53,9 @@ class SequentialWorkflowTests(unittest.TestCase):
         self.assertIn("validate-static", text)
         self.assertIn("unset TRANSFORMERS_CACHE", text)
         self.assertIn("FAILED_V1", AUDITOR_PATH.read_text())
+        self.assertIn("FAILED_V2", AUDITOR_PATH.read_text())
         self.assertIn("failed_repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1", text)
+        self.assertIn("failed_v2_repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2", text)
         self.assertLess(text.index('python "$auditor" write-prep'), text.index("python -m pip check"))
 
     def test_cache_exports_are_nounset_safe_in_stage_and_both_gpu_scripts(self):
@@ -145,7 +147,7 @@ class SequentialWorkflowTests(unittest.TestCase):
             batch.write_text("#!/bin/bash\n", encoding="utf-8")
             log_root = root / "logs"; log_root.mkdir()
             config = {
-                "stage": "benefit", "job_name": "mmu_seq_benefit_v2", "minutes": 65, "cost": 0.975,
+                "stage": "benefit", "job_name": "mmu_seq_benefit_v3", "minutes": 65, "cost": 0.975,
                 "time_limit": "01:05:00", "sbatch": batch, "log_prefix": "seq_benefit",
             }
             fields = {
@@ -157,7 +159,7 @@ class SequentialWorkflowTests(unittest.TestCase):
                 "ReqTRES": "billing=8,cpu=8,gres/gpu:h200=1,gres/gpu=1,mem=180G,node=1", "Dependency": "(null)",
                 "KillOnInvalidDependent": "No", "JobState": "PENDING", "Reason": "JobHeldUser", "RunTime": "00:00:00",
                 "AllocTRES": "(null)", "MinMemoryNode": "180G",
-                "SubmitLine": "sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v2 benefit.sbatch",
+                "SubmitLine": "sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v3 benefit.sbatch",
             }
             with mock.patch.object(AUDIT, "REPO_ROOT", root), mock.patch.object(AUDIT, "LOG_ROOT", log_root), mock.patch.object(AUDIT, "stage_config", return_value=config):
                 AUDIT.audit_job_record("benefit", "123", "raw", fields, "held")
@@ -165,6 +167,52 @@ class SequentialWorkflowTests(unittest.TestCase):
                     changed = dict(fields); changed[key] = value
                     with self.assertRaises(ValueError):
                         AUDIT.audit_job_record("benefit", "123", "raw", changed, "held")
+
+    def test_scontrol_parser_separates_colon_bearing_slurm_keys(self):
+        raw = (
+            "JobId=123 JobName=mmu_seq_benefit_v3 Account=stf QOS=normal "
+            "Scheduler=Main Partition=gpu-h200 AllocNode:Sid=tillicum-login02:749579 "
+            "ReqB:S:C:T=0:0:*:* ReqTRES=cpu=8,mem=180G,node=1,billing=8,gres/gpu=1,gres/gpu:h200=1 "
+            "NtasksPerN:B:S:C=0:0:*:* SubmitLine=sbatch --parsable --hold --export=NONE "
+            "--job-name=mmu_seq_benefit_v3 scripts/benefit.sbatch "
+            "WorkDir=/tmp/repo"
+        )
+        fields = AUDIT.parse_scontrol_line(raw)
+        self.assertEqual(fields["Partition"], "gpu-h200")
+        self.assertEqual(fields["AllocNode:Sid"], "tillicum-login02:749579")
+        self.assertEqual(fields["ReqB:S:C:T"], "0:0:*:*")
+        self.assertEqual(fields["NtasksPerN:B:S:C"], "0:0:*:*")
+        self.assertEqual(
+            fields["ReqTRES"],
+            "cpu=8,mem=180G,node=1,billing=8,gres/gpu=1,gres/gpu:h200=1",
+        )
+        self.assertEqual(
+            fields["SubmitLine"],
+            "sbatch --parsable --hold --export=NONE --job-name=mmu_seq_benefit_v3 scripts/benefit.sbatch",
+        )
+        with self.assertRaisesRegex(ValueError, "repeats Partition"):
+            AUDIT.parse_scontrol_line(raw + " Partition=other")
+
+    def test_cancelled_job_live_queue_absence_semantics(self):
+        absent = subprocess.CompletedProcess(
+            ["squeue"], 0, stdout="", stderr="",
+        )
+        aged_out = subprocess.CompletedProcess(
+            ["squeue"], 1, stdout="",
+            stderr="slurm_load_jobs error: Invalid job id specified\n",
+        )
+        with mock.patch.object(AUDIT.subprocess, "run", return_value=absent):
+            AUDIT.assert_job_absent_from_live_queue("263012")
+        with mock.patch.object(AUDIT.subprocess, "run", return_value=aged_out):
+            AUDIT.assert_job_absent_from_live_queue("263012")
+        for changed in (
+            subprocess.CompletedProcess(["squeue"], 0, stdout="RUNNING|None\n", stderr=""),
+            subprocess.CompletedProcess(["squeue"], 1, stdout="", stderr="different error\n"),
+            subprocess.CompletedProcess(["squeue"], 2, stdout="", stderr=""),
+        ):
+            with mock.patch.object(AUDIT.subprocess, "run", return_value=changed):
+                with self.assertRaises(ValueError):
+                    AUDIT.assert_job_absent_from_live_queue("263012")
 
     def test_stage_result_rejects_resealed_authorization_and_safety_drift(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -298,6 +346,7 @@ class SequentialWorkflowTests(unittest.TestCase):
         self.assertNotIn("sbatch", text)
         self.assertNotIn("scontrol release", text)
         self.assertNotIn("scancel", text)
+        self.assertIn("envs/subliminal-mitigate-py311/bin/python", text)
 
     def test_benefit_gate_distinguishes_science_from_runtime_and_rejects_extras(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -356,6 +405,9 @@ class SequentialWorkflowTests(unittest.TestCase):
         self.assertIn("not a confirmatory claim", text)
         self.assertIn("$4.846936", text)
         self.assertIn("$4.90375", text)
+        self.assertIn("AllocNode:Sid", text)
+        self.assertIn("zero elapsed H200 seconds", text)
+        self.assertIn("replacement job requires a new explicit user authorization", text)
 
 
 if __name__ == "__main__":

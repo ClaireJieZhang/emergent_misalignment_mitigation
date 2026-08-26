@@ -9,15 +9,15 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=01:05:00
 #SBATCH --no-requeue
-#SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_benefit_%j.out
-#SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_benefit_%j.err
+#SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3_benefit_%j.out
+#SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3_benefit_%j.err
 
 set -euo pipefail
 umask 077
 ulimit -c 0
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
-output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
+repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-submit-recovery-v3
+output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3
 protocol=$output/protocol; generation=$output/generation; evaluation=$output/evaluation; control=$output/control
 auditor=$repo/scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
 sampler=$repo/scripts/sample_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
@@ -38,7 +38,7 @@ unset TRANSFORMERS_CACHE
 module load gcc/13.4.0 cuda/12.9.1
 module load conda/Miniforge3-25.3.1-3
 conda activate "$root/envs/subliminal-mitigate-py311"
-export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-benefit-v2-pyc-$SLURM_JOB_ID
+export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-benefit-v3-pyc-$SLURM_JOB_ID
 export DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export PYTORCH_ALLOC_CONF=expandable_segments:True XDG_CACHE_HOME=$root/cache XDG_CONFIG_HOME=$root/config TMPDIR=$root/tmp
 export HF_HOME=$root/cache/huggingface

@@ -17,8 +17,8 @@ else
   echo 'Usage: finalize_..._tillicum.sh prepare-plan OR external-judge with sealed GPU actuals, 0.75 API cap, and 5.0 program ceiling acknowledgements' >&2; exit 2
 fi
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
-output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
+repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-submit-recovery-v3
+output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3
 protocol=$output/protocol; generation=$output/generation; evaluation=$output/evaluation; control=$output/control
 auditor=$repo/scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
 judge=$repo/scripts/judge_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
@@ -30,7 +30,7 @@ plan=$evaluation/medical/judge_plan.json
 cd "$repo"
 module load conda/Miniforge3-25.3.1-3
 conda activate "$root/envs/subliminal-mitigate-py311"
-export PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-finalizer-v2-pyc
+export PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$root/tmp/mmu-seq-finalizer-v3-pyc
 medical_job=$(python -c 'import json; print(json.load(open("'$control'/MEDICAL_JOB.json"))["job_id"])')
 python "$auditor" audit-terminal --stage medical --job-id "$medical_job"
 python "$judge" validate-static --protocol-manifest "$protocol/manifest.json"

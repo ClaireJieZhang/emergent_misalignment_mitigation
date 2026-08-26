@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed stage-recovery-v2 control plane for sequential confirmation v1."""
+"""Fail-closed submit-recovery-v3 control plane for sequential confirmation v1."""
 
 import argparse
 import datetime as dt
@@ -17,12 +17,12 @@ import tempfile
 
 WORKFLOW_ID = "massive_medical_union_composition_exploratory_sequential_confirmation_v1"
 PROTOCOL_ID = WORKFLOW_ID
-DIRECT_PARENT_COMMIT = "a5724e9a06204941df9ad07ad4a5f84502dde7f8"
-DIRECT_PARENT_TREE = "6bb7396cb9e2ac98b17df72f9b4461e5c2890a07"
-BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2"
+DIRECT_PARENT_COMMIT = "6a4fb04c482f600bf882d787b7b40b949d7c3f34"
+DIRECT_PARENT_TREE = "14c7be66f4830a63eb7cc15e0657d0f5d370c44f"
+BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-submit-recovery-v3"
 TILLICUM_ROOT = Path("/gpfs/projects/stf/claizhan/subliminal-mitigate")
-REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2"
-OUTPUT_ROOT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2"
+REPO_ROOT = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-submit-recovery-v3"
+OUTPUT_ROOT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3"
 CONTROL_ROOT = OUTPUT_ROOT / "control"
 PROTOCOL_ROOT = OUTPUT_ROOT / "protocol"
 PREP_FILE = CONTROL_ROOT / "PREP.json"
@@ -39,7 +39,7 @@ JUDGE_CHECKPOINT = EVALUATION_ROOT / "medical/judge_checkpoint.json"
 JUDGMENTS_NEW = EVALUATION_ROOT / "medical/judgments_new.json"
 JUDGMENTS_MERGED = EVALUATION_ROOT / "medical/judgments_merged.json"
 LOG_ROOT = TILLICUM_ROOT / "outputs/logs"
-LOG_PREFIX = "massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_"
+LOG_PREFIX = "massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3_"
 FAILED_V1_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1"
 FAILED_V1_OUTPUT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1"
 FAILED_V1_TMP = TILLICUM_ROOT / "tmp/mmu-sequential-v1-stage-pyc"
@@ -48,6 +48,25 @@ FAILED_V1_TREE = "6bb7396cb9e2ac98b17df72f9b4461e5c2890a07"
 FAILED_V1_PARENT = "890f685b3198e30e1658aa7ab0aa9f11a537aaf9"
 FAILED_V1_BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1"
 FAILED_V1_DIFF_INVENTORY_SHA256 = "f810efb779998d4b4ded2897aa1a1c15fc07e4bdcf85c735882b2c469e57e2f0"
+FAILED_V2_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2"
+FAILED_V2_OUTPUT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2"
+FAILED_V2_CONTROL = FAILED_V2_OUTPUT / "control"
+FAILED_V2_COMMIT = "6a4fb04c482f600bf882d787b7b40b949d7c3f34"
+FAILED_V2_TREE = "14c7be66f4830a63eb7cc15e0657d0f5d370c44f"
+FAILED_V2_PARENT = "a5724e9a06204941df9ad07ad4a5f84502dde7f8"
+FAILED_V2_BRANCH = "claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2"
+FAILED_V2_DIFF_INVENTORY_SHA256 = "b6b6fbbc61fd05ac5740f11b04c70fe0b70af55f6edd9454b0194acfbf16b452"
+FAILED_V2_AUDITOR_SHA256 = "03d6a59412301bc30158802f5cbcf78da363287bfd3a7466d11553ab945f0630"
+FAILED_V2_STAGED_PAYLOAD_SHA256 = "91b463575085eeb7ea12ab22ad820f76f94c40fff9689d3261b1e9ebd5cbaef2"
+FAILED_V2_JOB_ID = "263012"
+FAILED_V2_CONTROL_FILES = {
+    "BENEFIT_SUBMISSION_ATTEMPT.tsv": (0o400, 28, "2ba8d1b1eac399a070c80df50fb9eb4aeac33a7c5485ebd4e7ea2f06912618b1"),
+    "BENEFIT_SUBMISSION_LOCK/owner": (0o400, 152, "06812b58b9a64a027e2dbdfc8365acbdd19230398338db9d74c67f3f18c2a089"),
+    "PREP.json": (0o400, 9219, "c1c3c7ce354e255384f679c9c642d9a0b20a18ee41604cb209e8486ed4157945"),
+    "SAMPLER_PREFLIGHT_BENEFIT.json": (0o400, 9993, "2e2758094ef4eb45593bae10d59e0fbb53ff2f1106169faffe8ceb68a88fc9d6"),
+    "SAMPLER_PREFLIGHT_MEDICAL.json": (0o400, 9898, "8e9df2a8ec4fd37f62bd94d8bef2fb07e6539e6e5a6ad2362372f5b82fe6d85b"),
+    "STAGED.json": (0o400, 2426, "24948c0b5c7a77ef003db8c5678d8e76641ccfc42714b0943528be816a2bcebd"),
+}
 V5_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-composition-exploratory-smoke-gate-recovery-v5"
 V5_AUDITOR = V5_REPO / "scripts/audit_massive_medical_union_composition_exploratory_smoke_gate_recovery_v5.py"
 V5_RESULT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_smoke_gate_recovery_v5/control/SMOKE_GATE_RECOVERY_RESULT.json"
@@ -122,7 +141,7 @@ def stage_config(stage):
         "minutes": minutes,
         "cost": cost,
         "time_limit": limit,
-        "job_name": "mmu_seq_benefit_v2" if stage == "benefit" else "mmu_seq_medical_v2",
+        "job_name": "mmu_seq_benefit_v3" if stage == "benefit" else "mmu_seq_medical_v3",
         "log_prefix": LOG_PREFIX + stage,
         "sbatch": REPO_ROOT / f"scripts/sbatch_massive_medical_union_composition_exploratory_sequential_confirmation_v1_{stage}_tillicum_h200.sbatch",
         "lock": CONTROL_ROOT / f"{upper}_SUBMISSION_LOCK",
@@ -313,6 +332,161 @@ def audit_failed_v1_stage():
     }
 
 
+def assert_job_absent_from_live_queue(job_id):
+    """Accept only Slurm's two exact representations of a non-live job."""
+    completed = subprocess.run(
+        ["squeue", "-h", "-j", str(job_id), "-o", "%T|%r"],
+        capture_output=True, text=True,
+    )
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    if stdout:
+        raise ValueError("failed-v2 job unexpectedly remains live")
+    if completed.returncode == 0 and not stderr:
+        return
+    if (
+        completed.returncode == 1
+        and stderr == "slurm_load_jobs error: Invalid job id specified"
+    ):
+        return
+    raise ValueError("failed-v2 live-queue absence check differs")
+
+
+def audit_failed_v2_submission():
+    """Bind the held-first parser failure and prove that it consumed no GPU."""
+    if (
+        FAILED_V2_REPO.is_symlink() or not FAILED_V2_REPO.is_dir()
+        or stat.S_IMODE(FAILED_V2_REPO.stat().st_mode) != 0o2700
+        or FAILED_V2_OUTPUT.is_symlink() or not FAILED_V2_OUTPUT.is_dir()
+        or stat.S_IMODE(FAILED_V2_OUTPUT.stat().st_mode) != 0o700
+        or FAILED_V2_CONTROL.is_symlink() or not FAILED_V2_CONTROL.is_dir()
+        or stat.S_IMODE(FAILED_V2_CONTROL.stat().st_mode) != 0o700
+    ):
+        raise ValueError("failed-v2 submit namespace is missing or unsafe")
+    commit = git(FAILED_V2_REPO, "rev-parse", "HEAD")
+    parents = git(FAILED_V2_REPO, "rev-list", "--parents", "-n", "1", "HEAD")
+    environment = dict(os.environ)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    diff = subprocess.run(
+        [
+            "git", "-C", os.fspath(FAILED_V2_REPO), "diff", "--name-status",
+            "--no-renames", f"{FAILED_V2_PARENT}..{FAILED_V2_COMMIT}",
+        ],
+        check=True, capture_output=True, env=environment,
+    ).stdout
+    if (
+        commit != FAILED_V2_COMMIT
+        or parents != f"{FAILED_V2_COMMIT} {FAILED_V2_PARENT}"
+        or git(FAILED_V2_REPO, "rev-parse", "HEAD^{tree}") != FAILED_V2_TREE
+        or git(FAILED_V2_REPO, "branch", "--show-current") != FAILED_V2_BRANCH
+        or git(FAILED_V2_REPO, "rev-parse", "@{upstream}") != FAILED_V2_COMMIT
+        or git(FAILED_V2_REPO, "status", "--porcelain")
+        or len(git(FAILED_V2_REPO, "ls-files").splitlines()) != 465
+        or sha256_bytes(diff) != FAILED_V2_DIFF_INVENTORY_SHA256
+        or {path.name for path in FAILED_V2_OUTPUT.iterdir()} != {"control", "protocol"}
+        or (FAILED_V2_OUTPUT / "protocol").is_symlink()
+        or not (FAILED_V2_OUTPUT / "protocol").is_dir()
+        or stat.S_IMODE((FAILED_V2_OUTPUT / "protocol").stat().st_mode) != 0o700
+    ):
+        raise ValueError("failed-v2 checkout/output binding differs")
+
+    inventory = tree_inventory(FAILED_V2_CONTROL)
+    expected_paths = {"BENEFIT_SUBMISSION_LOCK", *FAILED_V2_CONTROL_FILES}
+    if {item["path"] for item in inventory["entries"]} != expected_paths:
+        raise ValueError("failed-v2 control inventory differs")
+    for item in inventory["entries"]:
+        if item["path"] == "BENEFIT_SUBMISSION_LOCK":
+            if item != {"path": "BENEFIT_SUBMISSION_LOCK", "type": "directory", "mode": 0o700}:
+                raise ValueError("failed-v2 permanent lock differs")
+            continue
+        mode, size, digest = FAILED_V2_CONTROL_FILES[item["path"]]
+        if (
+            item.get("type") != "file" or item.get("mode") != mode
+            or item.get("size_bytes") != size or item.get("sha256") != digest
+        ):
+            raise ValueError(f"failed-v2 control file differs: {item['path']}")
+    attempt = (FAILED_V2_CONTROL / "BENEFIT_SUBMISSION_ATTEMPT.tsv").read_bytes()
+    owner = (FAILED_V2_CONTROL / "BENEFIT_SUBMISSION_LOCK/owner").read_bytes()
+    if attempt != b"stage\tjob_id\nbenefit\t263012\n" or owner != (
+        b"workflow_id=massive_medical_union_composition_exploratory_sequential_confirmation_v1\n"
+        b"stage=benefit\nrepo_commit=6a4fb04c482f600bf882d787b7b40b949d7c3f34\n"
+    ):
+        raise ValueError("failed-v2 attempt/lock content differs")
+    staged_payload = load_json(FAILED_V2_CONTROL / "STAGED.json", "failed-v2 STAGED")
+    verify_seal(staged_payload, "failed-v2 STAGED")
+    if staged_payload.get("payload_sha256") != FAILED_V2_STAGED_PAYLOAD_SHA256:
+        raise ValueError("failed-v2 STAGED payload differs")
+    if (FAILED_V2_OUTPUT / "generation").exists() or (FAILED_V2_OUTPUT / "evaluation").exists():
+        raise ValueError("failed-v2 unexpectedly contains science outputs")
+    if list(LOG_ROOT.glob("massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_*")):
+        raise ValueError("failed-v2 unexpectedly contains a job log")
+
+    old_auditor = FAILED_V2_REPO / "scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py"
+    if sha256_file(require_regular(old_auditor, "failed-v2 auditor")) != FAILED_V2_AUDITOR_SHA256:
+        raise ValueError("failed-v2 auditor bytes differ")
+    old_environment = dict(os.environ)
+    old_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    audited = subprocess.run(
+        [sys.executable, os.fspath(old_auditor), "audit-staged"],
+        cwd=FAILED_V2_REPO, env=old_environment, check=True,
+        capture_output=True, text=True,
+    )
+    try:
+        staged_status = json.loads(audited.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise ValueError("failed-v2 staged audit output is malformed") from error
+    if staged_status != {
+        "next_action": "benefit_job_cap_65_h200_minutes_0.975_usd",
+        "payload_sha256": FAILED_V2_STAGED_PAYLOAD_SHA256,
+        "status": "SEQUENTIAL_STAGED_AUDITED",
+    }:
+        raise ValueError("failed-v2 staged audit result differs")
+
+    sacct_fields = (
+        "JobIDRaw,JobName,Partition,Account,QOS,State,ElapsedRaw,TimelimitRaw,"
+        "AllocTRES,Start,End,ExitCode"
+    )
+    sacct_raw = subprocess.check_output(
+        [
+            "sacct", "-j", FAILED_V2_JOB_ID, "--starttime", "2026-08-25", "-X",
+            "-n", "-P", "-o", sacct_fields,
+        ],
+        text=True,
+    ).strip()
+    rows = sacct_raw.splitlines()
+    if len(rows) != 1:
+        raise ValueError("failed-v2 accounting row count differs")
+    fields = rows[0].split("|")
+    if fields != [
+        FAILED_V2_JOB_ID, "mmu_seq_benefit_v2", "gpu-h200", "stf", "normal",
+        "CANCELLED by 1033174", "0", "65", "", "None",
+        "2026-08-25T20:15:46", "0:0",
+    ]:
+        raise ValueError("failed-v2 zero-allocation accounting differs")
+    assert_job_absent_from_live_queue(FAILED_V2_JOB_ID)
+    return {
+        "classification": "HELD_FIRST_PARSER_FAILURE_CANCELLED_ZERO_ALLOCATION",
+        "job_id": FAILED_V2_JOB_ID,
+        "root_cause": "scontrol key AllocNode:Sid was not recognized as a field boundary",
+        "repository": {
+            "path": os.fspath(FAILED_V2_REPO), "branch": FAILED_V2_BRANCH,
+            "commit": FAILED_V2_COMMIT, "tree": FAILED_V2_TREE,
+            "sole_parent": FAILED_V2_PARENT,
+            "diff_inventory_sha256": FAILED_V2_DIFF_INVENTORY_SHA256,
+        },
+        "control_inventory_sha256": inventory["inventory_sha256"],
+        "staged_payload_sha256": FAILED_V2_STAGED_PAYLOAD_SHA256,
+        "submission_attempt_written": True, "permanent_lock_written": True,
+        "job_or_authorization_artifact_written": False,
+        "release_authorized_or_executed": False,
+        "generation_or_evaluation_written": False, "job_logs_written": False,
+        "scheduler_state": fields[5], "elapsed_h200_seconds": 0,
+        "allocated_tres": {}, "actual_gpu_cost_usd": 0.0,
+        "retry_in_failed_namespace_authorized": False,
+        "replacement_job_authorized": False, "external_api_calls": 0,
+    }
+
+
 def audit_repository():
     if REPO_ROOT.is_symlink() or not REPO_ROOT.is_dir():
         raise ValueError("sequential checkout is missing or unsafe")
@@ -353,6 +527,7 @@ def audit_repository():
         "direct_nonmerge_parent": True, "modified_files": list(MODIFIED_FILES), "added_files": [],
         "files": files, "inherited_frozen_files": inherited_frozen_files,
         "failed_v1_stage": audit_failed_v1_stage(),
+        "failed_v2_submission": audit_failed_v2_submission(),
     }
 
 
@@ -921,7 +1096,7 @@ def command_status(_args):
     print(json.dumps({"status": "SEQUENTIAL_CPU_STAGED_AWAITING_BENEFIT_AUTHORIZATION", "payload_sha256": result["payload_sha256"], "benefit_cap_h200_minutes": 65, "benefit_cap_usd": 0.975, "medical_authorized": False, "external_api_authorized": False}, sort_keys=True))
 
 
-FIELD_RE = re.compile(r"(?:^| )([A-Za-z][A-Za-z0-9_/.-]*)=")
+FIELD_RE = re.compile(r"(?<!\S)([A-Za-z][A-Za-z0-9_/:.-]*)=")
 
 
 def parse_scontrol_line(line):

@@ -46,7 +46,7 @@ DEFAULT_V5_RESULT = (
 )
 DEFAULT_OUTPUT_ROOT = (
     TILLICUM_ROOT
-    + "/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2/protocol"
+    + "/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/protocol"
 )
 
 SOURCE_FILES = {

@@ -1,8 +1,10 @@
-# Under-$5 sequential MASSIVE–medical composition confirmation — stage recovery v2
+# Under-$5 sequential MASSIVE–medical composition confirmation — submit recovery v3
 
 This is a fresh, explicitly exploratory protocol. It preserves every earlier STOP and does not reinterpret the stopped 60-row smoke as authorization. Its purpose is to answer the remaining question with a staged spend: first establish benefit on a larger, outcome-blind MASSIVE subset; only then spend on the full medical panel; only then purchase blinded judgments.
 
 The first CPU-stage attempt (`a5724e9`) stopped after cloning and normalizing its checkout but before creating `PREP`, protocol, output, logs, or any Slurm/API state because Bash expanded an unset `HF_HOME` inside a combined `export`. That checkout is preserved read-only as `REPO_ONLY_PRE_CONTROL_FAILURE`. Recovery v2 uses distinct repository, output, log, job, and temporary namespaces, binds the failed checkout in every live repository audit, and splits the cache exports in the CPU stage and both future GPU scripts. The scientific sampler, evaluator, subset, gates, models, prompts, and budgets are unchanged.
+
+The authorized recovery-v2 benefit submission created job `263012` held-first. Its pre-release audit stopped before writing `BENEFIT_JOB.json`, `BENEFIT_AUTHORIZATION.json`, `BENEFIT_SUBMITTED`, or `BENEFIT_RELEASE_AUTHORIZED`: the scheduler parser did not recognize the colon-bearing Slurm key `AllocNode:Sid`, so it incorrectly appended that field to the preceding `Partition` value. Cleanup cancelled the still-held job. Durable accounting records `CANCELLED`, zero elapsed H200 seconds, empty allocated TRES, no logs, no generation/evaluation tree, and `$0` actual GPU cost. The recovery-v2 namespace remains permanently consumed by its attempt and lock and is never retried. Submit recovery v3 is a direct child in fresh repository, output, log, job, and temporary namespaces; it adds `:` to the already-frozen field-boundary parser and an exact raw-record regression. Every scientific file, prompt, model, method, gate, and budget remains byte-frozen. A replacement job requires a new explicit user authorization.
 
 ## Frozen design
 
@@ -25,6 +27,7 @@ Passing supports only an exploratory fixed-panel statement that quorum, min, and
 ## Frozen budgets
 
 - Existing exact program actual: `$1.696936` (`$1.641` GPU + `$0.055936` API). Conservative standing ledger: `$1.75375`.
+- Cancelled held-first job `263012`: `0` H200-seconds / `$0`; it does not change either ledger.
 - Benefit projection: `3760.118300555879 s = 62.66863834259799 H200-min`; hard job cap `65 min / $0.975`.
 - Medical projection: `5355.448429139269 s = 89.25747381898782 H200-min`; hard job cap `95 min / $1.425`.
 - External judge: exactly 240 calls, hard cap `$0.75`.
@@ -46,7 +49,7 @@ Read-only status:
 
 ```bash
 ssh tillicum
-/gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2/scripts/status_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh
+/gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-submit-recovery-v3/scripts/status_massive_medical_union_composition_exploratory_sequential_confirmation_v1_tillicum.sh
 ```
 
 ## Future paid phases (each requires a new user decision)
@@ -55,7 +58,7 @@ Benefit, after explicit authorization:
 
 ```bash
 ssh tillicum
-cd /gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
+cd /gpfs/projects/stf/claizhan/subliminal-mitigate/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-submit-recovery-v3
 scripts/submit_massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_tillicum.sh benefit --ack-prior-program-actual-usd 1.696936 --ack-max-cost-usd 0.975 --ack-exact-cumulative-max-usd 2.671936
 ```
 

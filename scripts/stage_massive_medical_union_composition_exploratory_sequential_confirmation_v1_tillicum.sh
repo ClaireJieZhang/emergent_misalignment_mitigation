@@ -1,5 +1,5 @@
 #!/bin/bash
-# CPU-only stage recovery v2 for the under-$5 sequential exploratory confirmation workflow.
+# CPU-only submit recovery v3 for the under-$5 sequential exploratory confirmation workflow.
 
 set -euo pipefail
 umask 077
@@ -11,8 +11,8 @@ local_repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 host=${TILLICUM_HOST:-tillicum}
 root=${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}
 url=${REMOTE_REPO_URL:-https://github.com/ClaireJieZhang/emergent_misalignment_mitigation.git}
-branch=${REMOTE_BRANCH:-claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2}
-parent=a5724e9a06204941df9ad07ad4a5f84502dde7f8
+branch=${REMOTE_BRANCH:-claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-submit-recovery-v3}
+parent=6a4fb04c482f600bf882d787b7b40b949d7c3f34
 commit=$(git -C "$local_repo" rev-parse HEAD)
 test "$(git -C "$local_repo" rev-list --parents -n 1 "$commit")" = "$commit $parent"
 test "$(git -C "$local_repo" branch --show-current)" = "$branch"
@@ -23,14 +23,17 @@ umask 077
 ulimit -c 0
 
 root=$1; url=$2; branch=$3; expected=$4
-repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
-output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
+repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-submit-recovery-v3
+output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3
 control=$output/control
 protocol=$output/protocol
 logs=$root/outputs/logs
 env_root=$root/envs/subliminal-mitigate-py311
 failed_repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1
 failed_output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1
+failed_v2_repo=$root/projects/subliminal-mitigate-mmu-composition-exploratory-sequential-confirmation-v1-stage-recovery-v2
+failed_v2_output=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2
+failed_v2_control=$failed_v2_output/control
 export GIT_OPTIONAL_LOCKS=0
 test -d "$failed_repo"; test ! -L "$failed_repo"
 test "$(git -C "$failed_repo" rev-parse HEAD)" = a5724e9a06204941df9ad07ad4a5f84502dde7f8
@@ -42,9 +45,23 @@ test ! -e "$failed_output"
 if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_benefit_*" >/dev/null || compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_medical_*" >/dev/null; then
   echo 'Failed-v1 log namespace is no longer pristine.' >&2; exit 3
 fi
+test -d "$failed_v2_repo"; test ! -L "$failed_v2_repo"
+test "$(git -C "$failed_v2_repo" rev-parse HEAD)" = 6a4fb04c482f600bf882d787b7b40b949d7c3f34
+test "$(git -C "$failed_v2_repo" rev-parse 'HEAD^{tree}')" = 14c7be66f4830a63eb7cc15e0657d0f5d370c44f
+test "$(git -C "$failed_v2_repo" rev-list --parents -n 1 HEAD)" = '6a4fb04c482f600bf882d787b7b40b949d7c3f34 a5724e9a06204941df9ad07ad4a5f84502dde7f8'
+test "$(git -C "$failed_v2_repo" branch --show-current)" = claire/capability-quorum-secure-code-composition-exploratory-under5-sequential-v1-stage-recovery-v2
+test -z "$(git -C "$failed_v2_repo" status --porcelain)"
+test -f "$failed_v2_control/BENEFIT_SUBMISSION_ATTEMPT.tsv"
+test -f "$failed_v2_control/BENEFIT_SUBMISSION_LOCK/owner"
+test ! -e "$failed_v2_control/BENEFIT_JOB.json"
+test ! -e "$failed_v2_control/BENEFIT_AUTHORIZATION.json"
+test ! -e "$failed_v2_control/BENEFIT_SUBMITTED"
+test ! -e "$failed_v2_control/BENEFIT_RELEASE_AUTHORIZED"
+test ! -e "$failed_v2_output/generation"
+test ! -e "$failed_v2_output/evaluation"
 test ! -e "$repo"
 test ! -e "$output"
-if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2_*" >/dev/null; then
+if compgen -G "$logs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3_*" >/dev/null; then
   echo 'Sequential log namespace is not fresh.' >&2; exit 4
 fi
 
@@ -70,7 +87,7 @@ unset TRANSFORMERS_CACHE
 module load conda/Miniforge3-25.3.1-3
 conda activate "$env_root"
 export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-export PYTHONPYCACHEPREFIX=$root/tmp/mmu-sequential-v1-stage-recovery-v2-pyc
+export PYTHONPYCACHEPREFIX=$root/tmp/mmu-sequential-v1-submit-recovery-v3-pyc
 export DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export XDG_CACHE_HOME=$root/cache XDG_CONFIG_HOME=$root/config TMPDIR=$root/tmp
@@ -80,7 +97,7 @@ export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 cd "$repo"
 auditor=scripts/audit_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
 sampler=scripts/sample_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py
-# Seal the fresh recovery namespace and the failed-v1 checkout binding before
+# Seal the fresh recovery namespace and both failed-attempt bindings before
 # dependency checks or tests.  Any later CPU-stage failure remains auditable.
 python "$auditor" write-prep
 python -m pip check
