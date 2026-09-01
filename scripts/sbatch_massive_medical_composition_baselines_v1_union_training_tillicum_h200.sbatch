@@ -18,7 +18,7 @@ umask 077
 ulimit -c 0
 
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1-stage-recovery-v2
+repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1-stage-recovery-v3
 output=$root/outputs/massive_medical_composition_baselines_v1
 control=$output/control
 dataset=$output/data/union_sft_balanced_ab

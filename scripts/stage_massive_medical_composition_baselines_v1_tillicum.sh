@@ -24,7 +24,7 @@ root=$1
 url=$2
 branch=$3
 expected=$4
-repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1-stage-recovery-v2
+repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1-stage-recovery-v3
 output=$root/outputs/massive_medical_composition_baselines_v1
 source_protocol=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/protocol/manifest.json
 source_data=$root/outputs/massive_medical_union_pilot_v1/data
@@ -82,7 +82,11 @@ python -m py_compile \
   scripts/sample_massive_medical_direct_contextual_baseline_v1.py \
   scripts/sample_massive_medical_whole_output_consensus_v1.py \
   scripts/prepare_massive_medical_composition_baseline_judge_plan_v1.py \
-  scripts/summarize_massive_medical_composition_baselines_v1.py
+  scripts/summarize_massive_medical_composition_baselines_v1.py \
+  scripts/plot_massive_medical_composition_neurips_2026.py
+# The login-node research environment has no Matplotlib.  The plotter is
+# syntax-checked above and its rendering suite runs in the paper environment;
+# GPU stages never import it.
 python -m unittest \
   tests.test_massive_medical_composition_baselines_v1_union_sft \
   tests.test_massive_medical_composition_baselines_v1_union_sft_hf \
@@ -90,8 +94,7 @@ python -m unittest \
   tests.test_massive_medical_composition_baseline_model_bindings_v1 \
   tests.test_massive_medical_composition_baselines_v1 \
   tests.test_massive_medical_whole_output_consensus_v1 \
-  tests.test_summarize_massive_medical_composition_baselines_v1 \
-  tests.test_plot_massive_medical_composition_neurips_2026
+  tests.test_summarize_massive_medical_composition_baselines_v1
 python scripts/prepare_massive_medical_composition_baselines_v1.py --self-test
 python scripts/authorize_massive_medical_composition_baselines_v1.py self-test
 python scripts/finalize_massive_medical_composition_baseline_gpu_stage_v1.py --self-test
