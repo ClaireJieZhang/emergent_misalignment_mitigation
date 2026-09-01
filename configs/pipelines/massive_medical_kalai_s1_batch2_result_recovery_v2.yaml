@@ -1,0 +1,42 @@
+protocol_id: massive_medical_kalai_s1_batch2_result_recovery_v2
+source_protocol_id: massive_medical_kalai_s1_recovery_continuation_v1
+method_id: whole_output_consensus_m4_s1_r20_sensitivity_v1
+analysis_scope: post_hoc_sensitivity
+
+immutable_source:
+  batch_index: 2
+  batch_id: batch_02
+  slurm_job_id: "271409"
+  scheduler_state: FAILED
+  scheduler_elapsed_seconds: 1626
+  generation_file_count: 29
+  generation_manifest_sha256: a4a5c8d3541497eb32bfa0921217c2ffda424f2c9f4a19fb69c174a4cf09d9a2
+  source_stopped_preserved: true
+  source_result_absent: true
+
+failed_recovery_v1:
+  protocol_id: massive_medical_kalai_s1_batch2_result_recovery_v1
+  repository_commit: 6460a9895919d72f97b870f802b9d0813a0c45e2
+  repository_preserved: true
+  output_namespace_absent: true
+  rerun: false
+
+correction:
+  traceback_requires_printed_frames_only: true
+  omitted_source_expression_not_required: manager.original_runtime._audit_batch
+  same_runtime_manager_module_instance: true
+  regeneration: false
+
+accounting:
+  source_job_actual_estimated_cost_usd: 0.406500
+  source_job_authority_cap_retained_usd: 0.900
+  known_program_actual_after_job_usd: 5.69984025
+  conservative_exposure_after_job_authority_usd: 7.92198425
+  program_ceiling_usd: 12.5000000
+  new_recovery_cost_cap_usd: 0
+
+cpu_recovery:
+  gpu_jobs_authorized: 0
+  external_api_calls_authorized: 0
+  batch_3_submission_authorized: false
+  restart_resume_retry_replacement_requeue_authorized: false
