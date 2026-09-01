@@ -136,7 +136,10 @@ def expected_body(
     previous_authorized_caps=None,
 ):
     minutes, cap = STAGES[stage]
-    stage_path, stage_payload, _ = audit_cpu_stage(output_root)
+    stage_path, stage_payload, stage_body = audit_cpu_stage(output_root)
+    current_commit = repo_commit(repo_root)
+    if stage_body.get("repository_commit") != current_commit:
+        raise ValueError("repository commit differs from CPU-stage manifest")
     previous = (
         active_authorized_caps(output_root, excluding=stage)
         if previous_authorized_caps is None
@@ -168,7 +171,7 @@ def expected_body(
         "protocol_id": PROTOCOL_ID,
         "stage": stage,
         "created_at": created_at,
-        "repository_commit": repo_commit(repo_root),
+        "repository_commit": current_commit,
         "cpu_stage_manifest_file_sha256": sha256_file(stage_path),
         "cpu_stage_manifest_payload_sha256": stage_payload[SEAL_FIELD],
         "authorized_gpu_jobs": 1,

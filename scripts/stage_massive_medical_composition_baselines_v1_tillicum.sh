@@ -24,7 +24,7 @@ root=$1
 url=$2
 branch=$3
 expected=$4
-repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1
+repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1-stage-recovery-v2
 output=$root/outputs/massive_medical_composition_baselines_v1
 source_protocol=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/protocol/manifest.json
 source_data=$root/outputs/massive_medical_union_pilot_v1/data
@@ -60,7 +60,8 @@ export PYTHONPYCACHEPREFIX=$root/tmp/mmu-baseline-stage-pyc
 export DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export XDG_CACHE_HOME=$root/cache XDG_CONFIG_HOME=$root/config TMPDIR=$root/tmp
-export HF_HOME=$root/cache/huggingface HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export HF_HOME=$root/cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 
 cd "$repo"
 python -m pip check

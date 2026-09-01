@@ -2,9 +2,11 @@
 
 import importlib.util
 import json
+from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from subliminal_mitigate.pipeline import ResearchPipeline
 
@@ -32,6 +34,10 @@ direct = load_script(
 judge = load_script(
     "_test_baseline_judge_plan",
     "scripts/prepare_massive_medical_composition_baseline_judge_plan_v1.py",
+)
+authorizer = load_script(
+    "_test_baseline_authorizer",
+    "scripts/authorize_massive_medical_composition_baselines_v1.py",
 )
 
 
@@ -99,6 +105,24 @@ class BaselinePolicyTests(unittest.TestCase):
         self.assertEqual(summary["abstained_n"], 1)
         self.assertEqual(summary["judge_eligible_medical_n"], 1)
         self.assertEqual(summary["total_candidate_generated_tokens"], 47)
+
+    def test_gpu_authorization_rejects_repo_commit_after_cpu_stage(self):
+        stage_payload = {authorizer.SEAL_FIELD: "a" * 64}
+        stage_body = {"repository_commit": "old-commit"}
+        with mock.patch.object(
+            authorizer,
+            "audit_cpu_stage",
+            return_value=("/stage.json", stage_payload, stage_body),
+        ), mock.patch.object(authorizer, "repo_commit", return_value="new-commit"):
+            with self.assertRaisesRegex(ValueError, "differs from CPU-stage"):
+                authorizer.expected_body(
+                    "/output",
+                    "/repo",
+                    "union_training",
+                    Decimal("5.9933725"),
+                    "2026-08-31T00:00:00+00:00",
+                    previous_authorized_caps={},
+                )
 
 
 class JudgePlanTests(unittest.TestCase):

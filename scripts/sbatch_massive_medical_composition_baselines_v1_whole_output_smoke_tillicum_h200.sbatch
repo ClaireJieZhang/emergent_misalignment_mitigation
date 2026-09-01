@@ -18,7 +18,7 @@ umask 077
 ulimit -c 0
 
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1
+repo=$root/projects/subliminal-mitigate-mmu-composition-baselines-v1-stage-recovery-v2
 output=$root/outputs/massive_medical_composition_baselines_v1
 control=$output/control
 source_protocol=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/protocol/manifest.json
@@ -59,7 +59,8 @@ export DO_NOT_TRACK=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export XDG_CACHE_HOME=$root/cache XDG_CONFIG_HOME=$root/config TMPDIR=$root/tmp
-export HF_HOME=$root/cache/huggingface HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export HF_HOME=$root/cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 export TRITON_CACHE_DIR=$root/cache/triton
 mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR" "$HUGGINGFACE_HUB_CACHE" "$TRITON_CACHE_DIR"
 
