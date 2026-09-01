@@ -1,0 +1,134 @@
+{
+  "fixture_status": "SYNTHETIC_PLACEHOLDERS_ONLY_NOT_PAPER_RESULTS",
+  "contextual_baselines": [
+    {
+      "id": "union_sft_synthetic",
+      "label": "Union SFT (synthetic)",
+      "family": "union_sft",
+      "construction": {
+        "summary": "Synthetic unique-source A-plus-B union placeholder"
+      },
+      "uses_safety_labels": false,
+      "primary_gate_eligible": false,
+      "status": "CONTEXTUAL_POST_HOC_NOT_GATED",
+      "synthetic_fixture_only": true,
+      "massive": {
+        "requested_n": 360,
+        "accepted_n": 360,
+        "abstained_n": 0,
+        "coverage": 1.0,
+        "correct_accepted": 300,
+        "intent_accuracy_accepted": 0.8333333333333334,
+        "correct_all_requests": 300,
+        "intent_accuracy_all_requests": 0.8333333333333334,
+        "slot_f1_all_requests": 0.7,
+        "frame_exact_all_requests": 0.55
+      },
+      "medical": {
+        "requested_n": 80,
+        "accepted_n": 80,
+        "abstained_n": 0,
+        "coverage": 1.0,
+        "judged_n": 80,
+        "bad_count": 4,
+        "bad_rate_accepted": 0.05,
+        "bad_rate_all_requests": 0.05,
+        "refusal_count": 1,
+        "unparseable_count": 0,
+        "coherent_count": 78,
+        "truncation_count": 0,
+        "bad_or_abstain_count": 4,
+        "bad_or_abstain_rate": 0.05
+      },
+      "provenance": {
+        "fixture": "synthetic placeholder; no experiment output"
+      }
+    },
+    {
+      "id": "equal_weight_lora_merge_synthetic",
+      "label": "LoRA merge (synthetic)",
+      "family": "equal_weight_lora_merge",
+      "construction": {
+        "summary": "Synthetic four-way equal-weight concatenated-LoRA placeholder"
+      },
+      "uses_safety_labels": false,
+      "primary_gate_eligible": false,
+      "status": "CONTEXTUAL_POST_HOC_NOT_GATED",
+      "synthetic_fixture_only": true,
+      "massive": {
+        "requested_n": 360,
+        "accepted_n": 360,
+        "abstained_n": 0,
+        "coverage": 1.0,
+        "correct_accepted": 270,
+        "intent_accuracy_accepted": 0.75,
+        "correct_all_requests": 270,
+        "intent_accuracy_all_requests": 0.75,
+        "slot_f1_all_requests": 0.61,
+        "frame_exact_all_requests": 0.42
+      },
+      "medical": {
+        "requested_n": 80,
+        "accepted_n": 80,
+        "abstained_n": 0,
+        "coverage": 1.0,
+        "judged_n": 80,
+        "bad_count": 16,
+        "bad_rate_accepted": 0.2,
+        "bad_rate_all_requests": 0.2,
+        "refusal_count": 0,
+        "unparseable_count": 0,
+        "coherent_count": 80,
+        "truncation_count": 0,
+        "bad_or_abstain_count": 16,
+        "bad_or_abstain_rate": 0.2
+      },
+      "provenance": {
+        "fixture": "synthetic placeholder; no experiment output"
+      }
+    },
+    {
+      "id": "kalai_whole_output_consensus_synthetic",
+      "label": "Kalai consensus (synthetic)",
+      "family": "kalai_whole_output_consensus",
+      "construction": {
+        "summary": "Synthetic uniform-proposal whole-output rejection placeholder"
+      },
+      "uses_safety_labels": false,
+      "primary_gate_eligible": false,
+      "status": "CONTEXTUAL_POST_HOC_NOT_GATED",
+      "synthetic_fixture_only": true,
+      "massive": {
+        "requested_n": 360,
+        "accepted_n": 90,
+        "abstained_n": 270,
+        "coverage": 0.25,
+        "correct_accepted": 81,
+        "intent_accuracy_accepted": 0.9,
+        "correct_all_requests": 81,
+        "intent_accuracy_all_requests": 0.225,
+        "slot_f1_all_requests": 0.2,
+        "frame_exact_all_requests": 0.15
+      },
+      "medical": {
+        "requested_n": 80,
+        "accepted_n": 20,
+        "abstained_n": 60,
+        "coverage": 0.25,
+        "judged_n": 20,
+        "bad_count": 1,
+        "bad_rate_accepted": 0.05,
+        "bad_rate_all_requests": 0.0125,
+        "refusal_count": 1,
+        "unparseable_count": 0,
+        "coherent_count": 19,
+        "truncation_count": 0,
+        "bad_or_abstain_count": 61,
+        "bad_or_abstain_rate": 0.7625
+      },
+      "provenance": {
+        "fixture": "synthetic placeholder; no experiment output"
+      }
+    }
+  ]
+}

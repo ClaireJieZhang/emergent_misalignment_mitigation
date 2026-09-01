@@ -1,0 +1,110 @@
+schema_version: 1
+name: MASSIVE medical contextual baselines v1
+summary: >-
+  Post-hoc contextual comparators for the sealed A/B1/B2/B3 mixed-panel
+  experiment. Union SFT, equal-weight LoRA merging, and whole-output consensus
+  are evaluated on the exact existing MASSIVE and medical banks but cannot
+  alter or rescue the primary experiment's frozen decision.
+
+stages:
+  dataset_creation:
+    objective: >-
+      Bind the existing prompt banks and construct the COLM-comparable balanced
+      union of the two unique training datasets A and B exactly once each.
+    inputs:
+      - frozen A and B rank-16 training datasets
+      - sealed deterministic 360-row MASSIVE bank and answers
+      - sealed official16 medical prompt bank
+    outputs:
+      - balanced 64,734-presentation A+B training dataset
+      - immutable union-data manifest and source fingerprints
+    implementations:
+      - path: scripts/prepare_massive_medical_composition_baselines_v1.py
+        role: CPU-only artifact binding and one-shot stage manifest
+        status: core
+      - path: scripts/prepare_massive_medical_composition_baselines_v1_union_sft.py
+        role: fail-closed balanced unique-source union builder
+        status: core
+      - path: scripts/materialize_massive_medical_composition_baselines_v1_union_sft_hf.py
+        role: directly trainable Hugging Face Dataset materializer
+        status: core
+      - path: tests/test_massive_medical_composition_baselines_v1_union_sft.py
+        role: union schema, multiplicity, shuffle, and immutability tests
+        status: core
+
+  sft_training:
+    objective: >-
+      Train one fresh rank-16 adapter on A+B for one exact epoch and create a
+      provenance manifest; no training is needed for the other two baselines.
+    inputs:
+      - balanced A+B dataset and manifest
+      - pinned local Qwen2.5-7B-Instruct snapshot
+      - one-epoch rank-16 training recipe
+    outputs:
+      - pi_union rank-16 adapter at step 1,079
+      - sealed model manifest bound to data, config, and adapter bytes
+    implementations:
+      - path: configs/training_qwen25_7b_massive_medical_composition_baselines_v1_union_sft.yaml
+        role: exact balanced-union training recipe
+        status: core
+      - path: scripts/train_single_sft.py
+        role: pinned completion-only LoRA trainer
+        status: frozen
+      - path: scripts/seal_massive_medical_union_sft_model_v1.py
+        role: post-training Union-SFT adapter manifest
+        status: core
+      - path: scripts/authorize_massive_medical_composition_baselines_v1.py
+        role: separate exact-cap one-shot GPU authorization verifier
+        status: core
+      - path: scripts/finalize_massive_medical_composition_baseline_gpu_stage_v1.py
+        role: audited stage result and cost/artifact sealer
+        status: core
+
+  decoding:
+    objective: >-
+      Evaluate Union SFT, an exact equal-weight four-way LoRA-delta merge, and
+      a coverage-aware four-way whole-output rejection sampler.
+    inputs:
+      - pi_union and the sealed A/B1/B2/B3 adapters
+      - exact primary prompt banks and inference profiles
+      - pinned Transformers, PEFT, and XGrammar runtime
+    outputs:
+      - direct Union-SFT and LoRA-merge MASSIVE/medical generations
+      - whole-output accepted samples, attempt logs, and abstention accounting
+    implementations:
+      - path: scripts/materialize_massive_medical_lora_merge_v1.py
+        role: exact PEFT cat merge with four weights of 0.25
+        status: core
+      - path: scripts/sample_massive_medical_direct_contextual_baseline_v1.py
+        role: same-backend direct baseline sampler
+        status: core
+      - path: scripts/sample_massive_medical_whole_output_consensus_v1.py
+        role: grammar-correct, max-20 whole-output rejection sampler
+        status: core
+      - path: subliminal_mitigate/decoding/algorithms.py
+        role: pure complete-sequence acceptance kernel
+        status: core
+
+  evaluation:
+    objective: >-
+      Score MASSIVE intent retention, blind-judge accepted medical responses,
+      preserve Kalai abstentions as coverage outcomes, and extend the paper
+      plots without changing the sealed primary gate.
+    inputs:
+      - direct and whole-output generation artifacts
+      - exact MASSIVE answers and medical judge rubric
+      - existing paper snapshot for references and proposed methods
+    outputs:
+      - contextual baseline result rows and coverage diagnostics
+      - a separately authorized one-call-canary judge plan
+      - tradeoff and appendix figures with baseline markers
+    implementations:
+      - path: scripts/prepare_massive_medical_composition_baseline_judge_plan_v1.py
+        role: zero-call blinded plan with exact accepted-response accounting
+        status: core
+      - path: scripts/summarize_massive_medical_composition_baselines_v1.py
+        role: sealed coverage-aware contextual metrics and plot-data summary
+        status: core
+      - path: scripts/plot_massive_medical_composition_neurips_2026.py
+        role: paper renderer with optional contextual-baseline input
+        status: paper
