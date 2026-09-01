@@ -396,6 +396,9 @@ class BatchShellTests(unittest.TestCase):
         self.assertNotIn("--dependency", source)
         self.assertNotIn("judge_massive_medical", source)
         self.assertIn("--ack-prior-batch-caps-retained", source)
+        self.assertIn(
+            '[[ $minutes == 60 && $cost == 0.900 ]] || usage', source
+        )
         self.assertIn("No next batch", source)
 
     def test_sbatch_is_one_hour_one_batch_no_api_or_resume(self):

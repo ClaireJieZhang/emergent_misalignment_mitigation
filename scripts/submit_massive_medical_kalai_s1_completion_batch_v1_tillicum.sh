@@ -21,6 +21,7 @@ ceiling=${12}
 shift 12
 [[ $1 == --ack-no-api && $2 == --ack-no-automatic-next-batch && $3 == --ack-no-restart-resume-retry-replacement && $4 == --ack-prior-batch-caps-retained && $5 == --ack-post-hoc-sensitivity ]] || usage
 [[ $batch_index =~ ^[1-7]$ ]] || usage
+[[ $minutes == 60 && $cost == 0.900 ]] || usage
 printf -v batch_id 'batch_%02d' "$batch_index"
 
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
