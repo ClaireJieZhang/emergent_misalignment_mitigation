@@ -71,6 +71,12 @@ class ExactEvidenceTests(unittest.TestCase):
         )
         self.assertIn("271409|mmu_kalai_s1_rc02", recovery.EXPECTED_SACCT_RECORD)
 
+    def test_traceback_proof_uses_lines_present_in_the_pinned_log(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('"in _generation_audit"', source)
+        self.assertIn('"runtime._call_with_continuation_protocol"', source)
+        self.assertNotIn('"manager.original_runtime._audit_batch"', source)
+
 
 class ProtocolFixTests(unittest.TestCase):
     def test_evaluator_uses_the_runtime_managers_module_instance(self):

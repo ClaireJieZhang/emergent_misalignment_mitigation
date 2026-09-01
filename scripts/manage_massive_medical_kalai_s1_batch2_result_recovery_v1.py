@@ -384,7 +384,7 @@ def _audit_job(source_output):
     )
     required_stderr = (
         "ValueError: completion-batch shard binding differs",
-        "manager.original_runtime._audit_batch",
+        "in _generation_audit",
         "runtime._call_with_continuation_protocol",
     )
     if any(item not in stdout for item in required_stdout) or any(
