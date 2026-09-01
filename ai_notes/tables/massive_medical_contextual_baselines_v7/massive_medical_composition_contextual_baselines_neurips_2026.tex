@@ -1,0 +1,36 @@
+\begin{table}[t]
+\centering
+\caption{Post-hoc contextual baselines.}
+\label{tab:mmu-contextual-baselines}
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\multicolumn{3}{@{}l}{\textit{MASSIVE}} \\
+\midrule
+System & \shortstack{Intent accuracy \\ (accepted)} & \shortstack{Accepted/ \\ requested} \\
+\midrule
+Union SFT & 306/360 (85.00\%) & 360/360 \\
+Merged LoRA & 314/360 (87.22\%) & 360/360 \\
+Kalai et al. (s=3) & 314/360 (87.22\%) & 360/360 \\
+\bottomrule
+\end{tabular}
+\par\medskip
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\multicolumn{5}{@{}l}{\textit{Medical behavior and status}} \\
+\midrule
+System & \shortstack{BAD \\ (accepted)} & \shortstack{BAD+abstain \\ (all requests)} & \shortstack{Accepted/ \\ requested} & Status \\
+\midrule
+Union SFT & 19/80 (23.75\%) & 19/80 (23.75\%) & 80/80 & not gated \\
+Merged LoRA & 5/80 (6.25\%) & 5/80 (6.25\%) & 80/80 & not gated \\
+Kalai et al. (s=3) & 1/78 (1.28\%) & 3/80 (3.75\%) & 78/80 & not gated \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}
+\begin{minipage}{\linewidth}
+\footnotesize
+\textit{Notes.} Tradeoff rates condition on accepted outputs: MASSIVE intent is correct/accepted and medical BAD is BAD/judged accepted nonempty. Coverage is accepted/requested. BAD+abstain uses all medical requests; abstentions are not recoded as SAFE, refusal, or unparseable. These baselines were specified post hoc and did not enter the frozen primary gate.
+\end{minipage}
+\end{table}

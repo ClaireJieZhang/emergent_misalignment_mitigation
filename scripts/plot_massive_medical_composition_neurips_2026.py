@@ -45,6 +45,9 @@ WHITE = "#FFFFFF"
 MAIN_STEM = "massive_medical_composition_tradeoff_neurips_2026"
 APPENDIX_STEM = "massive_medical_composition_appendix_neurips_2026"
 TABLE_STEM = "massive_medical_composition_main_table_neurips_2026"
+CONTEXTUAL_TABLE_STEM = (
+    "massive_medical_composition_contextual_baselines_neurips_2026"
+)
 CONTEXTUAL_BASELINE_STATUS = "CONTEXTUAL_POST_HOC_NOT_GATED"
 CONTEXTUAL_SMOKE_ONLY_STATUS = "CONTEXTUAL_SMOKE_ONLY_NOT_EVALUATED"
 CONTEXTUAL_BASELINE_FAMILIES = {
@@ -342,20 +345,22 @@ def percent_axis(axis) -> None:
     axis.set_major_formatter(ticker.PercentFormatter(xmax=1.0, decimals=0))
 
 
-def save_figure(fig, output_dir: Path, stem: str) -> dict:
+def save_figure(fig, output_dir: Path, stem: str, tight: bool = True) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "png": output_dir / f"{stem}.png",
         "svg": output_dir / f"{stem}.svg",
         "pdf": output_dir / f"{stem}.pdf",
     }
-    fig.savefig(paths["png"], dpi=300, facecolor=WHITE)
-    fig.savefig(paths["svg"], facecolor=WHITE)
+    bbox = "tight" if tight else None
+    with plt.rc_context({"savefig.bbox": bbox}):
+        fig.savefig(paths["png"], dpi=300, facecolor=WHITE)
+        fig.savefig(paths["svg"], facecolor=WHITE)
+        fig.savefig(paths["pdf"], facecolor=WHITE)
     svg_text = paths["svg"].read_text()
     paths["svg"].write_text(
         "\n".join(line.rstrip() for line in svg_text.splitlines()) + "\n"
     )
-    fig.savefig(paths["pdf"], facecolor=WHITE)
     plt.close(fig)
     return {kind: str(path) for kind, path in paths.items()}
 
@@ -381,30 +386,33 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
 
     coverage_axis = None
     if kalai_baselines:
-        fig = plt.figure(figsize=(13.4, 6.75), facecolor=WHITE)
+        # Render at approximately the final NeurIPS figure* source width.  The
+        # top scatter receives the full width; the two supporting summaries
+        # share the lower row without requiring publication-time down-scaling.
+        fig = plt.figure(figsize=(7.15, 6.15), facecolor=WHITE)
         grid = fig.add_gridspec(
             2,
             2,
-            width_ratios=[1.57, 1.0],
-            height_ratios=[1.0, 0.28],
-            wspace=0.34,
-            hspace=0.48,
+            width_ratios=[1.22, 0.88],
+            height_ratios=[1.55, 1.0],
+            wspace=0.46,
+            hspace=0.50,
         )
-        ax = fig.add_subplot(grid[0, 0])
-        forest = fig.add_subplot(grid[0, 1])
-        coverage_axis = fig.add_subplot(grid[1, :])
-        fig.subplots_adjust(left=0.07, right=0.975, bottom=0.105, top=0.86)
+        ax = fig.add_subplot(grid[0, :])
+        forest = fig.add_subplot(grid[1, 0])
+        coverage_axis = fig.add_subplot(grid[1, 1])
+        fig.subplots_adjust(left=0.105, right=0.985, bottom=0.095, top=0.91)
     else:
-        fig = plt.figure(figsize=(13.4, 5.55), facecolor=WHITE)
+        fig = plt.figure(figsize=(7.15, 3.85), facecolor=WHITE)
         grid = fig.add_gridspec(1, 2, width_ratios=[1.57, 1.0], wspace=0.34)
         ax = fig.add_subplot(grid[0, 0])
         forest = fig.add_subplot(grid[0, 1])
-        fig.subplots_adjust(left=0.07, right=0.975, bottom=0.19, top=0.84)
+        fig.subplots_adjust(left=0.105, right=0.985, bottom=0.17, top=0.82)
     fig.suptitle(
-        "Composition retains MASSIVE capability while reducing bad medical behavior",
-        fontsize=18,
+        "Mixed-panel capability-safety tradeoff",
+        fontsize=15,
         fontweight="semibold",
-        y=0.965,
+        y=0.985,
     )
 
     plottable_baselines = [
@@ -427,8 +435,8 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             + [row["medical"]["bad_rate_accepted"] for row in plottable_baselines]
         )
         x_min = max(0.0, min(0.62, min(all_x) - 0.04))
-        x_max = min(1.02, max(0.93, max(all_x) + 0.04))
-        y_min = -0.035
+        x_max = min(1.02, max(0.98 if kalai_baselines else 0.93, max(all_x) + 0.04))
+        y_min = -0.07 if kalai_baselines else -0.035
         y_max = min(1.02, max(0.55, max(all_y) + 0.06))
     else:
         x_min, x_max = 0.62, 0.93
@@ -480,10 +488,10 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
     )
 
     reference_label_positions = {
-        "pi_A": (0.866, 0.420, "right"),
-        "pi_B1": (0.837, 0.052, "left"),
-        "pi_B2": (0.837, 0.115, "left"),
-        "pi_B3": (0.837, 0.003, "left"),
+        "pi_A": (0.866, 0.405, "right"),
+        "pi_B1": (0.825, 0.075, "right"),
+        "pi_B2": (0.825, 0.135, "right"),
+        "pi_B3": (0.825, 0.015, "right"),
     }
     for row in reference_models:
         x = row["massive_joint_accuracy"]
@@ -512,8 +520,9 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
         )
 
     baseline_label_positions = {
-        "union_sft": (0.858, 0.280, "left"),
-        "equal_weight_lora_merge": (0.925, 0.080, "right"),
+        "union_sft": (0.860, 0.290, "left"),
+        "equal_weight_lora_merge": (0.915, 0.105, "left"),
+        "kalai_whole_output_consensus": (0.915, -0.040, "left"),
     }
     for row in plottable_baselines:
         x = row["massive"]["intent_accuracy_accepted"]
@@ -530,16 +539,14 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
         )
         label_position = baseline_label_positions.get(row["family"])
         if label_position is None:
-            label_x, label_y, horizontal = -11, -23, "right"
-            text_coordinates = "offset points"
+            label_x, label_y, horizontal = x - 0.01, y - 0.03, "right"
         else:
             label_x, label_y, horizontal = label_position
-            text_coordinates = "data"
         ax.annotate(
             row["label"],
             xy=(x, y),
             xytext=(label_x, label_y),
-            textcoords=text_coordinates,
+            textcoords="data",
             ha=horizontal,
             va="center",
             fontsize=9.4,
@@ -548,9 +555,9 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
         )
 
     label_positions = {
-        "ordinary_quorum_m4_q3": (0.925, -0.012, "right"),
-        "ordinary_min_m4_q4": (0.925, 0.130, "right"),
-        "delta_min_m4_q4": (0.925, 0.034, "right"),
+        "ordinary_quorum_m4_q3": (0.915, 0.010, "left"),
+        "ordinary_min_m4_q4": (0.915, 0.160, "left"),
+        "delta_min_m4_q4": (0.915, 0.060, "left"),
     }
     display_labels = {
         "ordinary_quorum_m4_q3": "Quorum",
@@ -627,7 +634,7 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
     style_axis(forest, grid_axis="x")
     percent_axis(forest.xaxis)
     forest.set_xlabel("Reduction in medical BAD rate vs A")
-    forest.set_title("(b) Paired medical reduction", loc="left", fontweight="semibold")
+    forest.set_title("(b) BAD-rate reduction vs A", loc="left", fontweight="semibold")
     forest.axvspan(
         thresholds["medical_A_minus_method_bad_rate_min"],
         forest.get_xlim()[1],
@@ -688,9 +695,9 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
         style_axis(coverage_axis, grid_axis="x")
         coverage_axis.set_xlim(0.0, 1.0)
         percent_axis(coverage_axis.xaxis)
-        coverage_axis.set_xlabel("Accepted-output coverage")
+        coverage_axis.set_xlabel("Accepted/requested coverage")
         coverage_axis.set_title(
-            "(c) Whole-output consensus coverage (abstentions remain separate)",
+            "(c) Kalai coverage",
             loc="left",
             fontweight="semibold",
         )
@@ -699,13 +706,13 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             coverage_rows.extend(
                 [
                     (
-                        f"{row['label']} — MASSIVE",
+                        "MASSIVE",
                         row["massive"]["coverage"],
                         row["massive"]["accepted_n"],
                         row["massive"]["requested_n"],
                     ),
                     (
-                        f"{row['label']} — medical",
+                        "Medical",
                         row["medical"]["coverage"],
                         row["medical"]["accepted_n"],
                         row["medical"]["requested_n"],
@@ -743,7 +750,7 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
                 color=TEXT,
             )
 
-    output_paths = save_figure(fig, output_dir, MAIN_STEM)
+    output_paths = save_figure(fig, output_dir, MAIN_STEM, tight=False)
     audit = {
         "artifact": MAIN_STEM,
         "source_artifact_id": data["artifact_id"],
@@ -1176,7 +1183,7 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
         coverage_ax.tick_params(axis="x", pad=9)
         coverage_ax.set_xlabel("System")
         coverage_note = (
-            "Purple-square baselines are post-hoc contextual comparisons and do not enter "
+            "Purple contextual-baseline bars are post-hoc comparisons and do not enter "
             "the frozen primary gate. Tradeoff rates use accepted outputs; coverage and "
             "all-request rates must be reported alongside them."
         )
@@ -1236,7 +1243,7 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
         audit["contextual_baselines"] = baselines
         audit["contextual_baseline_note"] = (
             "Post-hoc contextual comparisons only; not eligible for the frozen primary gate. "
-            "Union SFT and Merged LoRA rates are conditional on accepted outputs, with "
+            "Contextual-baseline rates are conditional on accepted outputs, with "
             "coverage and all-request rates reported separately. Accepted empty strings are "
             "not judged or recoded as medical outcomes."
         )
@@ -1458,121 +1465,216 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
             )
 
     tex_path = table_dir / f"{TABLE_STEM}.tex"
+    contextual_tex_path = table_dir / f"{CONTEXTUAL_TABLE_STEM}.tex"
     method_by_label = {method["label"]: method for method in data["methods"]}
     latex_newline = " " + "\\\\" + "\n"
+
+    # Compact primary table: no resizebox and no contextual rows.  Capability
+    # and medical endpoints are separated so the table remains readable in the
+    # NeurIPS workshop template's 5.5-inch single-column text block.
     with tex_path.open("w") as handle:
         handle.write(
-            "\\begin{table*}[t]\n"
+            "\\begin{table}[t]\n"
             "\\centering\n"
-            "\\caption{Exploratory capability and medical-safety results.}\n"
+            "\\caption{Primary exploratory capability and medical-safety results. "
+            "Contextual baselines are reported separately in "
+            "Table~\\ref{tab:mmu-contextual-baselines}.}\n"
             "\\label{tab:mmu-composition-main}\n"
-            "\\setlength{\\tabcolsep}{4.2pt}\n"
-            "\\renewcommand{\\arraystretch}{1.12}\n"
-            "\\resizebox{\\textwidth}{!}{%\n"
-            "\\begin{tabular}{lcccccccc}\n"
+            "\\small\n"
+            "\\setlength{\\tabcolsep}{4pt}\n"
+            "\\renewcommand{\\arraystretch}{1.10}\n"
+            "\\begin{tabular}{@{}lcc@{}}\n"
             "\\toprule\n"
-            "System & MASSIVE intent & $\\Delta$ vs. base [95\\% CI] & Medical BAD & "
-            "$A-$system reduction [95\\% CI] & Coherent & Refusal & Unparseable & Pre-specified gate"
+            "\\multicolumn{3}{@{}l}{\\textit{Capability}}"
             + latex_newline
             + "\\midrule\n"
-            + "Paired base & 237/360 (65.83\\%) & reference & -- & -- & -- & -- & -- & capability ref."
+            + "System & MASSIVE intent & "
+            "\\shortstack{$\\Delta$ vs base \\\\ \\mbox{[95\\% CI]}}"
             + latex_newline
-            + "Reference $A$ & 314/360 (87.22\\%) & -- & 39/80 (48.75\\%) & reference & "
-            "80/80 & 0/80 & 0/80 & medical ref."
+            + "\\midrule\n"
+            + "Paired base & 237/360 (65.83\\%) & reference"
+            + latex_newline
+            + "Reference $A$ & 314/360 (87.22\\%) & --"
             + latex_newline
             + "\\midrule\n"
         )
-        baselines = all_baselines
-        for baseline in baselines:
-            if not tradeoff_point_available(baseline):
-                medical_smoke = baseline["smoke"]["medical"]
-                handle.write(
-                    f"{latex_escape(baseline['label'])} (smoke only) & "
-                    "not evaluated & -- & "
-                    "not evaluated; medical smoke coverage "
-                    f"{medical_smoke['accepted_n']}/{medical_smoke['requested_n']} & "
-                    "-- & -- & -- & -- & context only; unavailable"
-                    + latex_newline
-                )
-                continue
-            massive = baseline["massive"]
-            medical = baseline["medical"]
+        for label in ["Quorum", "Ordinary min", "Delta-min"]:
+            method = method_by_label[label]
             handle.write(
-                f"{latex_escape(baseline['label'])} (context) & "
-                f"{contextual_massive_text(massive, latex=True)} & "
-                "not pre-specified & "
-                f"{contextual_medical_text(medical, latex=True)} & "
-                "descriptive only & "
-                f"{medical['coherent_count']}/{medical['judged_n']} & "
-                f"{medical['refusal_count']}/{medical['judged_n']} & "
-                f"{medical['unparseable_count']}/{medical['judged_n']} & context only; not gated"
+                f"{label} & {method['massive_correct']}/360 "
+                f"({latex_pct(method['massive_joint_accuracy'])}) & "
+                f"{latex_pp_ci(method['massive_gain_over_base'], method['massive_gain_paired_bootstrap_95ci'])}"
                 + latex_newline
             )
-        if baselines:
-            handle.write("\\midrule\n")
+        handle.write(
+            "\\bottomrule\n"
+            "\\end{tabular}\n"
+            "\\par\\medskip\n"
+            "\\begin{tabular}{@{}lccc@{}}\n"
+            "\\toprule\n"
+            "\\multicolumn{4}{@{}l}{\\textit{Medical behavior and method-level gate}}"
+            + latex_newline
+            + "\\midrule\n"
+            + "System & BAD & "
+            "\\shortstack{Reduction vs $A$ \\\\ \\mbox{[95\\% CI]}} & "
+            "\\shortstack{C/R/U; \\\\ gate}"
+            + latex_newline
+            + "\\midrule\n"
+            + "Reference $A$ & 39/80 (48.75\\%) & reference & 80/0/0; medical ref."
+            + latex_newline
+            + "\\midrule\n"
+        )
         for label in ["Quorum", "Ordinary min", "Delta-min"]:
             method = method_by_label[label]
             medical = method["medical"]
             latex_label = "Delta-min$^{\\dagger}$" if label == "Delta-min" else label
-            gate = "\\textsc{Pass}" if method["frozen_method_gate"] == "PASS" else "Fail$^{\\dagger}$"
-            handle.write(
-                f"{latex_label} & {method['massive_correct']}/360 ({latex_pct(method['massive_joint_accuracy'])}) & "
-                f"{latex_pp_ci(method['massive_gain_over_base'], method['massive_gain_paired_bootstrap_95ci'])} & "
-                f"{medical['bad_count']}/80 ({latex_pct(medical['bad_rate'])}) & "
-                f"{latex_pp_ci(medical['A_minus_method_bad_rate'], medical['A_minus_method_prompt_cluster_bootstrap_95ci'])} & "
-                f"{medical['coherent_count']}/80 & {medical['refusal_count']}/80 & "
-                f"{medical['unparseable_count']}/80 & {gate}"
-                + latex_newline
+            gate = (
+                "\\textsc{Pass}"
+                if method["frozen_method_gate"] == "PASS"
+                else "Fail$^{\\dagger}$"
             )
-        contextual_latex_note = ""
-        if baselines:
-            contextual_latex_note = (
-                " Contextual baseline rows are post-hoc, are not gate-eligible, and report "
-                "accepted-output tradeoff rates alongside MASSIVE correct/requested, medical "
-                "BAD+abstain/requested, and accepted/requested coverage. Abstentions remain "
-                "separate from SAFE, refusal, and unparseable outcomes; accepted empty strings "
-                "are separately reported and excluded from judge-conditioned rates."
+            handle.write(
+                f"{latex_label} & {medical['bad_count']}/80 "
+                f"({latex_pct(medical['bad_rate'])}) & "
+                f"{latex_pp_ci(medical['A_minus_method_bad_rate'], medical['A_minus_method_prompt_cluster_bootstrap_95ci'])} & "
+                f"{medical['coherent_count']}/{medical['refusal_count']}/"
+                f"{medical['unparseable_count']}; {gate}"
+                + latex_newline
             )
         handle.write(
             "\\bottomrule\n"
-            "\\end{tabular}%\n"
-            "}\n"
+            "\\end{tabular}\n"
             "\\vspace{2pt}\n"
-            "\\begin{minipage}{0.99\\textwidth}\n"
+            "\\begin{minipage}{\\linewidth}\n"
             "\\footnotesize\n"
-            "\\textit{Notes.} Deterministic exploratory MASSIVE subset ($n=360$); medical evaluation "
-            "uses 16 prompts $\\times$ 5 samples ($n=80$ per arm). MASSIVE intervals are paired "
-            "row-level percentile-bootstrap intervals; medical intervals are paired prompt-cluster "
-            "percentile-bootstrap intervals (10,000 replicates; seed 8172026; no multiplicity "
-            "adjustment). Reference $A$ medical judgments were reused without rejudging and are "
-            "distinct from the MASSIVE paired base. $^{\\dagger}$Delta-min's one unparseable response "
-            "is separate from its three BAD responses; it alone fails the pre-specified exact-zero "
-            "unparseable gate. Because all three methods were required, the overall result is "
-            "\\texttt{EXPLORATORY\\_SEQUENTIAL\\_NO\\_SUPPORT}. All results are exploratory-only."
-            + contextual_latex_note
-            + "\n"
+            "\\textit{Notes.} C/R/U gives coherent, refusal, and unparseable counts "
+            "out of 80 medical responses. Intervals are paired percentile-bootstrap "
+            "95\\% CIs (10,000 replicates; seed 8172026; no multiplicity adjustment). "
+            "$^{\\dagger}$Delta-min's one unparseable response is distinct from its three "
+            "BAD responses, so it fails the pre-specified exact-zero parsing gate. The "
+            "all-three-method outcome is "
+            "\\texttt{EXPLORATORY\\_SEQUENTIAL\\_NO\\_SUPPORT}.\n"
             "\\end{minipage}\n"
-            "\\end{table*}\n"
+            "\\end{table}\n"
+        )
+
+    # Contextual appendix table keeps accepted-output denominators, all-request
+    # BAD+abstain accounting, coverage, and non-gated status explicit.  The two
+    # endpoint families are separated to fit the 5.5-inch single-column block.
+    baselines = all_baselines
+    with contextual_tex_path.open("w") as handle:
+        handle.write(
+            "\\begin{table}[t]\n"
+            "\\centering\n"
+            "\\caption{Post-hoc contextual baselines.}\n"
+            "\\label{tab:mmu-contextual-baselines}\n"
+            "\\small\n"
+            "\\setlength{\\tabcolsep}{4pt}\n"
+            "\\renewcommand{\\arraystretch}{1.10}\n"
+            "\\begin{tabular}{@{}lcc@{}}\n"
+            "\\toprule\n"
+            "\\multicolumn{3}{@{}l}{\\textit{MASSIVE}}"
+            + latex_newline
+            + "\\midrule\n"
+            + "System & \\shortstack{Intent accuracy \\\\ (accepted)} & "
+            "\\shortstack{Accepted/ \\\\ requested}"
+            + latex_newline
+            + "\\midrule\n"
+        )
+        for baseline in baselines:
+            if not tradeoff_point_available(baseline):
+                smoke = baseline["smoke"]
+                handle.write(
+                    f"{latex_escape(baseline['label'])} & -- & "
+                    f"{smoke['benefit']['accepted_n']}/{smoke['benefit']['requested_n']}"
+                    + latex_newline
+                )
+                continue
+            massive = baseline["massive"]
+            handle.write(
+                f"{latex_escape(baseline['label'])} & "
+                f"{massive['correct_accepted']}/{massive['accepted_n']} "
+                f"({latex_pct(massive['intent_accuracy_accepted'])}) & "
+                f"{massive['accepted_n']}/{massive['requested_n']}"
+                + latex_newline
+            )
+        handle.write(
+            "\\bottomrule\n"
+            "\\end{tabular}\n"
+            "\\par\\medskip\n"
+            "\\begin{tabular}{@{}lcccc@{}}\n"
+            "\\toprule\n"
+            "\\multicolumn{5}{@{}l}{\\textit{Medical behavior and status}}"
+            + latex_newline
+            + "\\midrule\n"
+            + "System & \\shortstack{BAD \\\\ (accepted)} & "
+            "\\shortstack{BAD+abstain \\\\ (all requests)} & "
+            "\\shortstack{Accepted/ \\\\ requested} & Status"
+            + latex_newline
+            + "\\midrule\n"
+        )
+        for baseline in baselines:
+            if not tradeoff_point_available(baseline):
+                smoke = baseline["smoke"]
+                handle.write(
+                    f"{latex_escape(baseline['label'])} & -- & -- & "
+                    f"{smoke['medical']['accepted_n']}/{smoke['medical']['requested_n']} & "
+                    "smoke only"
+                    + latex_newline
+                )
+                continue
+            medical = baseline["medical"]
+            handle.write(
+                f"{latex_escape(baseline['label'])} & "
+                f"{medical['bad_count']}/{medical['judged_n']} "
+                f"({latex_pct(medical['bad_rate_accepted'])}) & "
+                f"{medical['bad_or_abstain_count']}/{medical['requested_n']} "
+                f"({latex_pct(medical['bad_or_abstain_rate'])}) & "
+                f"{medical['accepted_n']}/{medical['requested_n']} & not gated"
+                + latex_newline
+            )
+        handle.write(
+            "\\bottomrule\n"
+            "\\end{tabular}\n"
+            "\\vspace{2pt}\n"
+            "\\begin{minipage}{\\linewidth}\n"
+            "\\footnotesize\n"
+            "\\textit{Notes.} Tradeoff rates condition on accepted outputs: MASSIVE "
+            "intent is correct/accepted and medical BAD is BAD/judged accepted nonempty. "
+            "Coverage is accepted/requested. BAD+abstain uses all medical requests; "
+            "abstentions are not recoded as SAFE, refusal, or unparseable. These baselines "
+            "were specified post hoc and did not enter the frozen primary gate.\n"
+            "\\end{minipage}\n"
+            "\\end{table}\n"
         )
 
     standalone_path = table_dir / f"{TABLE_STEM}_standalone.tex"
     with standalone_path.open("w") as handle:
         handle.write(
             "\\documentclass[10pt]{article}\n"
-            "\\usepackage[landscape,margin=0.45in]{geometry}\n"
+            "\\usepackage[letterpaper,textwidth=5.5in,textheight=9in]{geometry}\n"
             "\\usepackage{booktabs}\n"
-            "\\usepackage{graphicx}\n"
             "\\usepackage[T1]{fontenc}\n"
             "\\usepackage{lmodern}\n"
             "\\pagestyle{empty}\n"
             "\\begin{document}\n"
+            "\\typeout{MMU-QA-TEXTWIDTH=\\the\\textwidth}\n"
             f"\\input{{{TABLE_STEM}.tex}}\n"
+            "\\clearpage\n"
+            f"\\input{{{CONTEXTUAL_TABLE_STEM}.tex}}\n"
             "\\end{document}\n"
         )
 
     captions_path = table_dir / "massive_medical_composition_figure_captions_neurips_2026.tex"
     tradeoff_baseline_caption = ""
     appendix_baseline_caption = ""
+    completed_kalai = [
+        row
+        for row in baselines
+        if is_kalai_baseline(row)
+        and tradeoff_point_available(row)
+        and row["label"] == "Kalai et al. (s=3)"
+    ]
     if baselines:
         tradeoff_baseline_caption = (
             " Purple squares denote post-hoc contextual baselines and do not enter the frozen "
@@ -1584,6 +1686,32 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
             "bars use accepted and judged-nonempty outputs, respectively, while the coverage "
             "panel reports accepted/requested; accepted empty strings remain separate, and "
             "all-request rates are retained in the source JSON."
+        )
+    if completed_kalai:
+        assert len(completed_kalai) == 1
+        kalai = completed_kalai[0]
+        massive = kalai["massive"]
+        medical = kalai["medical"]
+        construction = kalai["construction"]
+        assert construction["safe_reference_lower_bound_s"] == 3
+        assert construction["maximum_attempts"] == 20
+        assert massive["accepted_n"] == massive["requested_n"] == 360
+        assert medical["accepted_n"] == medical["judged_n"] == 78
+        assert medical["requested_n"] == 80
+        assert medical["abstained_n"] == 2
+        assert medical["bad_count"] == 1
+        assert medical["bad_or_abstain_count"] == 3
+        tradeoff_baseline_caption += (
+            " Kalai is a post-hoc whole-output comparator with $s=3$ and $R=20$; its "
+            f"plotted point uses accepted-output rates ({latex_pct(massive['intent_accuracy_accepted'])} "
+            "MASSIVE and "
+            f"{medical['bad_count']}/{medical['judged_n']}={latex_pct(medical['bad_rate_accepted'])} "
+            "BAD). Coverage is "
+            f"{massive['accepted_n']}/{massive['requested_n']} on MASSIVE and "
+            f"{medical['accepted_n']}/{medical['requested_n']} on medical; its two abstentions "
+            "are not recoded, and BAD+abstain is "
+            f"{medical['bad_or_abstain_count']}/{medical['requested_n']}="
+            f"{latex_pct(medical['bad_or_abstain_rate'])}. It is not primary-gate eligible."
         )
     if smoke_only_baselines:
         tradeoff_baseline_caption += (
@@ -1599,7 +1727,7 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
             "% Suggested captions; edit terminology to match the final paper.\n"
             "\\newcommand{\\MMUTradeoffCaption}{%\n"
             "Exploratory capability--safety tradeoff under decoding-time composition. "
-            "Left: MASSIVE intent accuracy versus medical BAD rate; the shaded region "
+            "Panel~(a) reports MASSIVE intent accuracy versus medical BAD rate; the shaded region "
             "encodes only the pre-specified rate thresholds, not every gate. Horizontal whiskers are "
             "paired-gain 95\\% bootstrap intervals shifted to the candidate scale by adding the "
             "observed paired-base accuracy. Blue triangles denote references $A$, $B_1$, $B_2$, and $B_3$; "
@@ -1607,8 +1735,10 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
             + tradeoff_baseline_caption
             + " $B_1$--$B_3$ use the same medical "
             "bank and rubric but are contextual comparators rather than inputs to the pre-specified primary "
-            "gate. Right: reduction in BAD rate relative to reference $A$, with paired prompt-cluster "
-            "95\\% bootstrap intervals. Parsing, refusal, and gate outcomes are reported in the table. "
+            "gate. Panel~(b) reports reduction in BAD rate relative to reference $A$, with paired "
+            "prompt-cluster 95\\% bootstrap intervals. Panel~(c) reports Kalai accepted/requested "
+            "coverage separately for MASSIVE and medical requests; its denominator is all requests, "
+            "not only judged outputs. Parsing, refusal, and gate outcomes are reported in the table. "
             "All results are exploratory-only.%\n"
             "}\n\n"
             "\\newcommand{\\MMUAppendixCaption}{%\n"
@@ -1618,8 +1748,9 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
             "the reused $A$ evidence, but base/$B_1$/$B_2$/$B_3$ were not inputs to the primary gate "
             "and are shown only as contextual comparators."
             + appendix_baseline_caption
-            + " Nonzero medical bars are labeled by "
-            "count out of 80.%\n"
+            + " Nonzero medical bars for direct references and composition methods are labeled "
+            "by count out of 80; contextual-baseline bar labels use judged accepted-output "
+            "denominators (e.g., Kalai 1/78).%\n"
             "}\n"
         )
 
@@ -1627,6 +1758,7 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
         "csv": str(csv_path),
         "markdown": str(markdown_path),
         "latex": str(tex_path),
+        "contextual_latex": str(contextual_tex_path),
         "standalone_latex": str(standalone_path),
         "captions_latex": str(captions_path),
     }
@@ -1639,9 +1771,11 @@ def write_bundle_readme(data: dict, output_dir: Path, table_dir: Path, outputs: 
             "# MASSIVE/medical composition figure bundle\n\n"
             "This bundle is a deterministic rendering of the compact provenance snapshot at "
             f"`{data['artifact_id']}`. It contains:\n\n"
-            f"- `{MAIN_STEM}`: main capability-safety tradeoff plus the A-minus-method forest panel.\n"
+            f"- `{MAIN_STEM}`: main capability-safety tradeoff, A-minus-method forest, "
+            "and Kalai coverage panels.\n"
             f"- `{APPENDIX_STEM}`: expanded COLM-style direct-model/method comparison.\n"
-            f"- `{TABLE_STEM}` in `{table_dir}`: CSV, Markdown, LaTeX, and standalone LaTeX table sources.\n\n"
+            f"- `{TABLE_STEM}` and `{CONTEXTUAL_TABLE_STEM}` in `{table_dir}`: comprehensive "
+            "CSV/Markdown plus separate primary and contextual LaTeX tables.\n\n"
             "Interpretation constraints:\n\n"
             "- All results are exploratory-only.\n"
             "- Delta-min's one unparseable response is not counted as BAD.\n"
@@ -1661,7 +1795,8 @@ def write_bundle_readme(data: dict, output_dir: Path, table_dir: Path, outputs: 
         if baselines:
             handle.write(
                 "Contextual-baseline rendering:\n\n"
-                "- Union SFT and equal-weight LoRA merge are purple-square contextual baselines.\n"
+                "- Union SFT, equal-weight LoRA merge, and completed Kalai whole-output "
+                "consensus are purple contextual baselines.\n"
                 "- Tradeoff coordinates use accepted outputs; abstentions remain separate, "
                 "accepted empty strings are not judged or recoded, and all-request rates remain "
                 "in the source JSON.\n"

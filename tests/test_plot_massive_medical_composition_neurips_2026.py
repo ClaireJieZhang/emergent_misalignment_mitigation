@@ -15,6 +15,12 @@ SYNTHETIC_BASELINES = (
     / "fixtures"
     / "massive_medical_contextual_baselines_synthetic.json"
 )
+FINAL_CONTEXTUAL_BASELINES = (
+    ROOT
+    / "ai_notes"
+    / "data"
+    / "massive_medical_composition_contextual_baselines_v2.json"
+)
 
 SPEC = importlib.util.spec_from_file_location("mmu_neurips_renderer", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -61,6 +67,11 @@ class ContextualBaselineRendererTests(unittest.TestCase):
             table = MODULE.write_table_files(self.with_baselines, tables)
 
             main_audit = read_json(Path(main["plot_data"]))
+            main_pixels = MODULE.plt.imread(main["png"])
+            self.assertEqual(
+                (main_pixels.shape[1], main_pixels.shape[0]),
+                (2145, 1845),
+            )
             self.assertIn("panel_c", main_audit)
             self.assertEqual(
                 main_audit["panel_c"]["metric"],
@@ -204,6 +215,116 @@ class ContextualBaselineRendererTests(unittest.TestCase):
             markdown = Path(table["markdown"]).read_text(encoding="utf-8")
             self.assertIn("Kalai et al. (smoke only)", markdown)
             self.assertIn("medical smoke coverage 0/2", markdown)
+
+    def test_final_kalai_s3_bundle_has_one_full_point_and_no_smoke_annotation(self):
+        final_payload = read_json(FINAL_CONTEXTUAL_BASELINES)
+        combined = MODULE.attach_contextual_baselines(self.legacy, final_payload)
+        MODULE.validate(combined)
+        kalai_rows = [
+            row
+            for row in combined["contextual_baselines"]
+            if row["family"] == "kalai_whole_output_consensus"
+        ]
+        self.assertEqual(len(kalai_rows), 1)
+        self.assertEqual(kalai_rows[0]["label"], "Kalai et al. (s=3)")
+        self.assertTrue(MODULE.tradeoff_point_available(kalai_rows[0]))
+        self.assertNotIn("smoke", kalai_rows[0])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            main = MODULE.make_main_figure(combined, root / "figures")
+            appendix = MODULE.make_appendix_figure(combined, root / "figures")
+            table = MODULE.write_table_files(combined, root / "tables")
+            main_audit = read_json(Path(main["plot_data"]))
+            self.assertNotIn(
+                "smoke_only_contextual_baselines",
+                main_audit["panel_a"],
+            )
+            self.assertEqual(
+                main_audit["panel_c"]["baselines"][0]["label"],
+                "Kalai et al. (s=3)",
+            )
+            appendix_audit = read_json(Path(appendix["plot_data"]))
+            appendix_kalai = next(
+                row
+                for row in appendix_audit["systems"]
+                if row["id"] == "whole_output_consensus_s3"
+            )
+            self.assertEqual(appendix_kalai["medical_bad_count"], 1)
+            self.assertEqual(appendix_kalai["medical_n"], 78)
+            self.assertEqual(appendix_kalai["medical_requested_n"], 80)
+            self.assertEqual(appendix_kalai["medical_abstained_n"], 2)
+            self.assertEqual(appendix_kalai["medical_coverage"], 78 / 80)
+            appendix_svg = Path(appendix["svg"]).read_text(encoding="utf-8")
+            self.assertIn("1/78", appendix_svg)
+            self.assertIn("78/80", appendix_svg)
+            self.assertIn("Purple contextual-baseline bars", appendix_svg)
+            self.assertNotIn("Purple-square", appendix_svg)
+            markdown = Path(table["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("Kalai et al. (s=3)", markdown)
+            self.assertNotIn("smoke only", markdown.lower())
+            primary_latex = Path(table["latex"]).read_text(encoding="utf-8")
+            contextual_latex = Path(table["contextual_latex"]).read_text(
+                encoding="utf-8"
+            )
+            standalone_latex = Path(table["standalone_latex"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("\\resizebox", primary_latex)
+            self.assertIn("\\begin{table}[t]", primary_latex)
+            self.assertNotIn("\\begin{table*}", primary_latex)
+            self.assertEqual(primary_latex.count("\\begin{tabular}"), 2)
+            self.assertIn("\\textit{Capability}", primary_latex)
+            self.assertIn(
+                "\\textit{Medical behavior and method-level gate}",
+                primary_latex,
+            )
+            self.assertIn("\\shortstack", primary_latex)
+            self.assertNotIn("Union SFT", primary_latex)
+            self.assertNotIn("Merged LoRA", primary_latex)
+            self.assertNotIn("Kalai et al.", primary_latex)
+            self.assertIn("Kalai et al. (s=3)", contextual_latex)
+            self.assertIn("1/78 (1.28\\%)", contextual_latex)
+            self.assertIn("3/80 (3.75\\%)", contextual_latex)
+            self.assertIn("78/80 & not gated", contextual_latex)
+            self.assertNotIn("\\resizebox", contextual_latex)
+            self.assertIn("\\begin{table}[t]", contextual_latex)
+            self.assertNotIn("\\begin{table*}", contextual_latex)
+            self.assertEqual(contextual_latex.count("\\begin{tabular}"), 2)
+            self.assertIn("\\textit{MASSIVE}", contextual_latex)
+            self.assertIn(
+                "\\textit{Medical behavior and status}", contextual_latex
+            )
+            self.assertIn("\\shortstack", contextual_latex)
+            self.assertIn(MODULE.CONTEXTUAL_TABLE_STEM, standalone_latex)
+            self.assertIn("textwidth=5.5in", standalone_latex)
+            self.assertIn("MMU-QA-TEXTWIDTH", standalone_latex)
+            self.assertNotIn("margin=0.75in", standalone_latex)
+            captions = Path(table["captions_latex"]).read_text(encoding="utf-8")
+            for disclosure in (
+                "post-hoc whole-output comparator with $s=3$ and $R=20$",
+                "87.22\\% MASSIVE",
+                "1/78=1.28\\% BAD",
+                "360/360 on MASSIVE",
+                "78/80 on medical",
+                "two abstentions are not recoded",
+                "BAD+abstain is 3/80=3.75\\%",
+                "not primary-gate eligible",
+                "Panel~(a)",
+                "Panel~(b)",
+                "Panel~(c) reports Kalai accepted/requested coverage",
+                "its denominator is all requests",
+            ):
+                self.assertIn(disclosure, captions)
+            self.assertIn(
+                "direct references and composition methods are labeled by count out of 80",
+                captions,
+            )
+            self.assertIn(
+                "contextual-baseline bar labels use judged accepted-output denominators "
+                "(e.g., Kalai 1/78)",
+                captions,
+            )
 
 
 if __name__ == "__main__":

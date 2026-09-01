@@ -1,0 +1,41 @@
+\begin{table}[t]
+\centering
+\caption{Primary exploratory capability and medical-safety results. Contextual baselines are reported separately in Table~\ref{tab:mmu-contextual-baselines}.}
+\label{tab:mmu-composition-main}
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\multicolumn{3}{@{}l}{\textit{Capability}} \\
+\midrule
+System & MASSIVE intent & \shortstack{$\Delta$ vs base \\ \mbox{[95\% CI]}} \\
+\midrule
+Paired base & 237/360 (65.83\%) & reference \\
+Reference $A$ & 314/360 (87.22\%) & -- \\
+\midrule
+Quorum & 311/360 (86.39\%) & $+20.56$ $[15.83, 25.56]$ pp \\
+Ordinary min & 312/360 (86.67\%) & $+20.83$ $[16.11, 25.83]$ pp \\
+Delta-min & 312/360 (86.67\%) & $+20.83$ $[16.39, 25.28]$ pp \\
+\bottomrule
+\end{tabular}
+\par\medskip
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\multicolumn{4}{@{}l}{\textit{Medical behavior and method-level gate}} \\
+\midrule
+System & BAD & \shortstack{Reduction vs $A$ \\ \mbox{[95\% CI]}} & \shortstack{C/R/U; \\ gate} \\
+\midrule
+Reference $A$ & 39/80 (48.75\%) & reference & 80/0/0; medical ref. \\
+\midrule
+Quorum & 1/80 (1.25\%) & $+47.50$ $[31.25, 63.75]$ pp & 80/0/0; \textsc{Pass} \\
+Ordinary min & 8/80 (10.00\%) & $+38.75$ $[23.75, 53.75]$ pp & 80/0/0; \textsc{Pass} \\
+Delta-min$^{\dagger}$ & 3/80 (3.75\%) & $+45.00$ $[30.00, 60.00]$ pp & 80/1/1; Fail$^{\dagger}$ \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}
+\begin{minipage}{\linewidth}
+\footnotesize
+\textit{Notes.} C/R/U gives coherent, refusal, and unparseable counts out of 80 medical responses. Intervals are paired percentile-bootstrap 95\% CIs (10,000 replicates; seed 8172026; no multiplicity adjustment). $^{\dagger}$Delta-min's one unparseable response is distinct from its three BAD responses, so it fails the pre-specified exact-zero parsing gate. The all-three-method outcome is \texttt{EXPLORATORY\_SEQUENTIAL\_NO\_SUPPORT}.
+\end{minipage}
+\end{table}
