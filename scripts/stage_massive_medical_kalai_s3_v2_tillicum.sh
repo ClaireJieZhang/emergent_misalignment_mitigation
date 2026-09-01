@@ -11,7 +11,7 @@ local_repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 host=${TILLICUM_HOST:-tillicum}
 root=${TILLICUM_ROOT:-/gpfs/projects/stf/claizhan/subliminal-mitigate}
 url=${REMOTE_REPO_URL:-https://github.com/ClaireJieZhang/emergent_misalignment_mitigation.git}
-branch=${REMOTE_BRANCH:-claire/massive-medical-kalai-s3-gate-v2}
+branch=${REMOTE_BRANCH:-claire/massive-medical-kalai-s3-gate-submit-recovery-v3}
 commit=$(git -C "$local_repo" rev-parse HEAD)
 test "$(git -C "$local_repo" branch --show-current)" = "$branch"
 test -z "$(git -C "$local_repo" status --porcelain)"
@@ -25,15 +25,31 @@ root=$1
 url=$2
 branch=$3
 expected=$4
-repo=$root/projects/subliminal-mitigate-mmu-kalai-s3-r20-v2
-output=$root/outputs/massive_medical_kalai_s3_r20_v2
+repo=$root/projects/subliminal-mitigate-mmu-kalai-s3-r20-v2-submit-recovery-v3
+output=$root/outputs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3
 source_protocol=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/protocol/manifest.json
 logs=$root/outputs/logs
 env_root=$root/envs/subliminal-mitigate-py311
+abandoned=$root/outputs/massive_medical_kalai_s3_r20_v2
+
+test -f "$abandoned/control/CPU_STAGE.json"
+test -f "$abandoned/control/GATE_PLAN.json"
+test -f "$abandoned/control/GATE_SUBMISSION_LOCK/owner"
+test ! -e "$abandoned/control/GATE_AUTHORIZATION.json"
+test ! -e "$abandoned/control/GATE_SUBMISSION_ATTEMPT.tsv"
+test ! -e "$abandoned/control/GATE_SUBMITTED"
+test ! -e "$abandoned/control/GATE_RELEASE_AUTHORIZED"
+test ! -e "$abandoned/control/GATE_RELEASED"
+test ! -e "$abandoned/control/GATE_INVOCATION_LOCK"
+test ! -e "$abandoned/control/GATE_RESULT.json"
+test ! -e "$abandoned/control/GATE_STOPPED"
+test ! -e "$abandoned/control/COMPLETION_AUTHORIZATION.json"
+test ! -e "$abandoned/generation"
+test ! -e "$abandoned/assembled"
 
 test ! -e "$repo"
 test ! -e "$output"
-if compgen -G "$logs/massive_medical_kalai_s3_r20_v2_*" >/dev/null; then
+if compgen -G "$logs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3_*" >/dev/null; then
   echo 'Kalai s=3 log namespace is not fresh.' >&2
   exit 4
 fi

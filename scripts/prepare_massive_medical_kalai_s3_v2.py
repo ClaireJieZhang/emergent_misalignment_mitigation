@@ -28,7 +28,7 @@ SPEC.loader.exec_module(sampler)
 
 PROTOCOL_ID = sampler.PROTOCOL_ID
 METHOD_ID = sampler.METHOD_ID
-EXPECTED_OUTPUT_LEAF = "massive_medical_kalai_s3_r20_v2"
+EXPECTED_OUTPUT_LEAF = "massive_medical_kalai_s3_r20_v2_submit_recovery_v3"
 SEAL_FIELD = "payload_sha256"
 H200_HOURLY_USD = 0.90
 PLANNED_GATE_H200_MINUTES = 20
@@ -301,6 +301,7 @@ def prepare(args):
         "subliminal_mitigate/decoding/__init__.py",
         "configs/pipelines/massive_medical_kalai_s3_r20_v2.yaml",
         "docs/massive_medical_kalai_s3_r20_v2_protocol.md",
+        "docs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3.md",
         "tests/test_massive_medical_kalai_s3_v2.py",
     )
     implementation = {}
@@ -347,6 +348,17 @@ def prepare(args):
             },
             "completion_cap_usd": None,
             "completion_cap_requires_passing_sealed_gate_timing": True,
+            "submit_recovery": {
+                "abandoned_output_namespace": (
+                    "massive_medical_kalai_s3_r20_v2"
+                ),
+                "failure_point": "before_authorization_writer_and_before_sbatch",
+                "prior_gpu_authorization_created": False,
+                "prior_gpu_jobs_submitted": 0,
+                "prior_external_api_calls": 0,
+                "prior_actual_cost_usd": 0.0,
+                "prior_namespace_reused": False,
+            },
             "external_api_calls": 0,
             "external_api_authorized": False,
             "gpu_jobs_submitted": 0,

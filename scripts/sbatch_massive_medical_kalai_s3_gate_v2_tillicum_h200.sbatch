@@ -10,16 +10,16 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=00:20:00
 #SBATCH --no-requeue
-#SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_kalai_s3_r20_v2_gate_%j.out
-#SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_kalai_s3_r20_v2_gate_%j.err
+#SBATCH --output=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3_gate_%j.out
+#SBATCH --error=/gpfs/projects/stf/claizhan/subliminal-mitigate/outputs/logs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3_gate_%j.err
 
 set -euo pipefail
 umask 077
 ulimit -c 0
 
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-kalai-s3-r20-v2
-output=$root/outputs/massive_medical_kalai_s3_r20_v2
+repo=$root/projects/subliminal-mitigate-mmu-kalai-s3-r20-v2-submit-recovery-v3
+output=$root/outputs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3
 source_protocol=$root/outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/protocol/manifest.json
 generation_root=$output/generation
 control=$output/control

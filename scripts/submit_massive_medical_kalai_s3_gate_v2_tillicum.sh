@@ -17,15 +17,15 @@ cost=$4
 ceiling=$6
 
 root=/gpfs/projects/stf/claizhan/subliminal-mitigate
-repo=$root/projects/subliminal-mitigate-mmu-kalai-s3-r20-v2
-output=$root/outputs/massive_medical_kalai_s3_r20_v2
+repo=$root/projects/subliminal-mitigate-mmu-kalai-s3-r20-v2-submit-recovery-v3
+output=$root/outputs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3
 control=$output/control
 logs=$root/outputs/logs
 authorizer=$repo/scripts/authorize_massive_medical_kalai_s3_v2.py
 sbatch_file=$repo/scripts/sbatch_massive_medical_kalai_s3_gate_v2_tillicum_h200.sbatch
 expected_name=mmu_kalai_s3_gate
 expected_time=00:20:00
-log_glob=$logs/massive_medical_kalai_s3_r20_v2_gate_\*
+log_glob=$logs/massive_medical_kalai_s3_r20_v2_submit_recovery_v3_gate_\*
 
 cd "$repo"
 test -z "$(git status --porcelain)"
@@ -46,6 +46,12 @@ if compgen -G "$log_glob" >/dev/null; then
   echo 'Kalai s=3 gate log namespace is not fresh.' >&2
   exit 4
 fi
+
+module load conda/Miniforge3-25.3.1-3
+conda activate "$root/envs/subliminal-mitigate-py311"
+command -v python >/dev/null
+export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+export PYTHONPYCACHEPREFIX=$root/tmp/mmu-kalai-s3-submit-recovery-v3-pyc
 
 mkdir "$control/GATE_SUBMISSION_LOCK"
 owner_tmp=$control/GATE_SUBMISSION_LOCK/owner.tmp.$$
