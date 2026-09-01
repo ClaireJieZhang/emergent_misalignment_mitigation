@@ -54,8 +54,11 @@ def _generation_audit(output_root, repo_root, batch_index):
     output, _, _, _, _, context = manager._load_workflow(
         output_root, repo_root, audit_source=True
     )
+    # ``runtime`` dynamically imports its own manager instance.  Pass the
+    # audited function from that same instance so its temporary protocol patch
+    # applies to the function's globals as intended.
     return runtime._call_with_continuation_protocol(
-        manager.original_runtime._audit_batch,
+        runtime.manager.original_runtime._audit_batch,
         output,
         context["source_plan"],
         context["source_body"],

@@ -1,0 +1,50 @@
+protocol_id: massive_medical_kalai_s1_recovery_continuation_v2
+source_protocol_id: massive_medical_kalai_s1_recovery_continuation_v1
+recovery_protocol_id: massive_medical_kalai_s1_batch2_result_recovery_v1
+method_id: whole_output_consensus_m4_s1_r20_sensitivity_v1
+analysis_scope: post_hoc_sensitivity
+
+immutable_predecessors:
+  original_batch_1:
+    source_state: STOPPED
+    recovered_result_bound: true
+    regeneration: false
+  original_batch_2:
+    source_job_id: "271409"
+    source_state: STOPPED
+    recovered_result_bound: true
+    regeneration: false
+  stopped_records_preserved: true
+
+continuation:
+  original_batch_indices: [3, 4, 5, 6, 7]
+  fresh_output_leaf: massive_medical_kalai_s1_recovery_continuation_v2
+  reuse_original_batch_assignment: true
+  one_batch_per_separate_authority: true
+  automatic_next_batch: false
+  partial_resume: false
+  restart: false
+  retry: false
+  replacement: false
+  requeue: false
+
+per_batch_planned_authority_not_granted:
+  gpu_jobs: 1
+  h200_count: 1
+  h200_minutes: 60
+  h200_rate_usd_per_hour: 0.90
+  maximum_cost_usd: 0.900
+  external_api_calls: 0
+
+accounting_not_authority:
+  known_program_actual_usd: 5.69984025
+  current_conservative_exposure_usd: 7.92198425
+  remaining_five_batch_cap_usd: 4.500
+  maximum_after_all_remaining_caps_usd: 12.42198425
+  program_ceiling_usd: 12.5000000
+
+cpu_stage:
+  gpu_jobs_authorized: 0
+  external_api_calls_authorized: 0
+  batch_authorizations_created: 0
+  source_namespaces_read_only: true
