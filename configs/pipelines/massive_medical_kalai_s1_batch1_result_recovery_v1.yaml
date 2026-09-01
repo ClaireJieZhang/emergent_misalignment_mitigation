@@ -1,0 +1,26 @@
+protocol_id: massive_medical_kalai_s1_batch1_result_recovery_v1
+source_protocol_id: massive_medical_kalai_s1_completion_batches_v1
+method_id: whole_output_consensus_m4_s1_r20_sensitivity_v1
+source:
+  batch_index: 1
+  batch_id: batch_01
+  slurm_job_id: "270983"
+  repository_commit: a1e8ca218635af6dafdca7ddb3e9d42d153d6921
+  output_leaf: massive_medical_kalai_s1_completion_batches_v1
+  source_stopped_exit_code: 1
+  scheduler_state: FAILED
+  scheduler_exit_code: "1:0"
+  scheduler_derived_exit_code: "0:0"
+  scheduler_elapsed_seconds: 1018
+recovery:
+  mode: cpu_derivation_only
+  output_leaf: massive_medical_kalai_s1_batch1_result_recovery_v1
+  preserve_source_stopped: true
+  regenerate_samples: false
+  restart_or_resume: false
+  retry_or_replacement: false
+  submit_batch_2: false
+authority:
+  gpu_jobs: 0
+  external_api_calls: 0
+  new_cost_cap_usd: 0.0
