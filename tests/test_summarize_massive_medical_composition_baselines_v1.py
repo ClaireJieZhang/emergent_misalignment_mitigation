@@ -217,7 +217,7 @@ class ContextualBaselineSummaryTests(unittest.TestCase):
         self.write_json(path, summary.seal(body))
         return path
 
-    def judge_artifacts(self, root):
+    def judge_artifacts(self, root, direct_only=False):
         accounting = {
             "pi_union": {
                 "requested_n": 80,
@@ -237,8 +237,10 @@ class ContextualBaselineSummaryTests(unittest.TestCase):
                 "accepted_empty_n": 0,
             },
         }
+        if direct_only:
+            del accounting["whole_output_consensus"]
         plan_rows = []
-        for model_name in summary.METHODS:
+        for model_name in accounting:
             count = accounting[model_name].get(
                 "judge_eligible_n", accounting[model_name]["accepted_n"]
             )
@@ -276,7 +278,7 @@ class ContextualBaselineSummaryTests(unittest.TestCase):
         self.write_json(plan_path, summary.seal(plan_body))
         plan_payload, _ = summary.load_sealed(plan_path, "test plan")
 
-        positions = {name: 0 for name in summary.METHODS}
+        positions = {name: 0 for name in accounting}
         judgments = []
         for source in plan_rows:
             ordinal = positions[source["model_name"]]
@@ -317,6 +319,85 @@ class ContextualBaselineSummaryTests(unittest.TestCase):
         judgments_path = root / "judgments.json"
         self.write_json(judgments_path, summary.seal(judgment_body))
         return plan_path, judgments_path
+
+    def smoke_result(self, root, medical_accepted=0):
+        artifacts = {}
+        for phase in ("benefit", "medical"):
+            accepted = medical_accepted if phase == "medical" else 1
+            samples = []
+            for index in range(2):
+                is_accepted = index < accepted
+                samples.append(
+                    {
+                        "request_index": index,
+                        "accepted": is_accepted,
+                        "abstained": not is_accepted,
+                        "response": "accepted" if is_accepted else "",
+                    }
+                )
+            generation = summary.seal(
+                {
+                    "meta": {
+                        "protocol_id": summary.PROTOCOL_ID,
+                        "analysis_scope": summary.ANALYSIS_SCOPE,
+                        "primary_gate_eligible": False,
+                        "method_id": summary.WHOLE_OUTPUT_METHOD_ID,
+                        "phase": phase,
+                        "stage": "smoke",
+                        "requested_n": 2,
+                    },
+                    "summary": {
+                        "requested_n": 2,
+                        "accepted_n": accepted,
+                        "abstained_n": 2 - accepted,
+                        "coverage": accepted / 2,
+                        "abstention_rate": (2 - accepted) / 2,
+                        "judge_eligible_medical_n": accepted,
+                    },
+                    "samples": samples,
+                }
+            )
+            timing = summary.seal(
+                {
+                    "protocol_id": summary.PROTOCOL_ID,
+                    "phase": phase,
+                    "stage": "smoke",
+                }
+            )
+            generation_path = root / f"smoke_{phase}_generation.json"
+            timing_path = root / f"smoke_{phase}_timing.json"
+            self.write_json(generation_path, generation)
+            self.write_json(timing_path, timing)
+            for relative, path in (
+                (summary.WHOLE_OUTPUT_SMOKE_ARTIFACTS[phase], generation_path),
+                (summary.WHOLE_OUTPUT_SMOKE_TIMINGS[phase], timing_path),
+            ):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                artifacts[relative] = {
+                    "path": str(path.resolve()),
+                    "size_bytes": path.stat().st_size,
+                    "file_sha256": summary.sha256_file(path),
+                    "payload_sha256": payload[summary.OUTPUT_SEAL],
+                }
+        result_path = root / "WHOLE_OUTPUT_SMOKE_RESULT.json"
+        self.write_json(
+            result_path,
+            summary.seal(
+                {
+                    "schema_version": 1,
+                    "protocol_id": summary.PROTOCOL_ID,
+                    "status": "GPU_STAGE_COMPLETE",
+                    "stage": "whole_output_smoke",
+                    "analysis_scope": summary.ANALYSIS_SCOPE,
+                    "primary_decision_modified": False,
+                    "external_api_calls": 0,
+                    "automatic_continuation_performed": False,
+                    "restart_or_resume_used": False,
+                    "artifacts": artifacts,
+                }
+            ),
+        )
+        return result_path
 
     def test_builds_plot_ready_summary_without_reclassifying_abstentions(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -389,6 +470,52 @@ class ContextualBaselineSummaryTests(unittest.TestCase):
         self.assertEqual(metrics["bad_rate_all_requests"], 0.25)
         self.assertEqual(metrics["bad_or_abstain_rate"], 0.75)
         self.assertEqual(metrics["coherent_count"], 1)
+
+    def test_direct_only_summary_emits_smoke_only_unavailable_kalai_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            answers_path, answers = self.answer_artifact(root)
+            union = self.direct_generation(root, "pi_union", answers)
+            merge = self.direct_score(root, "pi_merge", answers_path)
+            plan, judgments = self.judge_artifacts(root, direct_only=True)
+            smoke_result = self.smoke_result(root)
+
+            result = summary.build_summary(
+                [f"pi_union={union}", f"pi_merge={merge}"],
+                str(answers_path),
+                str(plan),
+                str(judgments),
+                str(smoke_result),
+            )
+            rows = {row["id"]: row for row in result["contextual_baselines"]}
+            self.assertEqual(set(rows), set(summary.METHODS))
+            self.assertEqual(rows["pi_union"]["medical"]["judged_n"], 80)
+            self.assertEqual(rows["pi_merge"]["medical"]["judged_n"], 80)
+            kalai = rows["whole_output_consensus"]
+            self.assertEqual(kalai["status"], summary.SMOKE_ONLY_STATUS)
+            self.assertFalse(kalai["tradeoff_point_available"])
+            self.assertEqual(kalai["massive"], {"evaluation_status": "not_evaluated"})
+            self.assertEqual(kalai["medical"], {"evaluation_status": "not_evaluated"})
+            self.assertEqual(kalai["smoke"]["medical"]["accepted_n"], 0)
+            self.assertEqual(kalai["smoke"]["medical"]["abstained_n"], 2)
+            self.assertEqual(kalai["smoke"]["medical"]["coverage"], 0.0)
+
+    def test_direct_only_summary_rejects_nonzero_medical_smoke_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            answers_path, answers = self.answer_artifact(root)
+            union = self.direct_generation(root, "pi_union", answers)
+            merge = self.direct_score(root, "pi_merge", answers_path)
+            plan, judgments = self.judge_artifacts(root, direct_only=True)
+            smoke_result = self.smoke_result(root, medical_accepted=1)
+            with self.assertRaisesRegex(ValueError, "zero coverage"):
+                summary.build_summary(
+                    [f"pi_union={union}", f"pi_merge={merge}"],
+                    str(answers_path),
+                    str(plan),
+                    str(judgments),
+                    str(smoke_result),
+                )
 
     def test_accepted_empty_response_stays_unjudged_not_abstained(self):
         metrics = summary.summarize_medical(

@@ -156,6 +156,55 @@ class ContextualBaselineRendererTests(unittest.TestCase):
             MODULE.validate(combined)
             self.assertEqual(len(combined["contextual_baselines"]), 3)
 
+    def test_smoke_only_kalai_is_metadata_not_a_tradeoff_point(self):
+        from tests.test_summarize_massive_medical_composition_baselines_v1 import (
+            ContextualBaselineSummaryTests,
+            summary,
+        )
+
+        factory = ContextualBaselineSummaryTests()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            answers_path, answers = factory.answer_artifact(root)
+            union = factory.direct_generation(root, "pi_union", answers)
+            merge = factory.direct_score(root, "pi_merge", answers_path)
+            plan, judgments = factory.judge_artifacts(root, direct_only=True)
+            smoke = factory.smoke_result(root)
+            result = summary.build_summary(
+                [f"pi_union={union}", f"pi_merge={merge}"],
+                str(answers_path),
+                str(plan),
+                str(judgments),
+                str(smoke),
+            )
+            combined = MODULE.attach_contextual_baselines(self.legacy, result)
+            MODULE.validate(combined)
+
+            figures = root / "figures"
+            tables = root / "tables"
+            main = MODULE.make_main_figure(combined, figures)
+            appendix = MODULE.make_appendix_figure(combined, figures)
+            table = MODULE.write_table_files(combined, tables)
+
+            main_audit = read_json(Path(main["plot_data"]))
+            self.assertNotIn("panel_c", main_audit)
+            self.assertEqual(
+                main_audit["panel_a"]["smoke_only_contextual_baselines"][0]["id"],
+                "whole_output_consensus",
+            )
+            appendix_audit = read_json(Path(appendix["plot_data"]))
+            baseline_systems = [
+                row
+                for row in appendix_audit["systems"]
+                if row["group"] == "contextual baselines"
+            ]
+            self.assertEqual({row["id"] for row in baseline_systems}, {"pi_union", "pi_merge"})
+            smoke_metadata = appendix_audit["smoke_only_contextual_baselines"][0]
+            self.assertEqual(smoke_metadata["smoke"]["medical"]["coverage"], 0.0)
+            markdown = Path(table["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("Kalai et al. (smoke only)", markdown)
+            self.assertIn("medical smoke coverage 0/2", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

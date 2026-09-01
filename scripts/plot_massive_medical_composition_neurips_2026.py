@@ -46,6 +46,7 @@ MAIN_STEM = "massive_medical_composition_tradeoff_neurips_2026"
 APPENDIX_STEM = "massive_medical_composition_appendix_neurips_2026"
 TABLE_STEM = "massive_medical_composition_main_table_neurips_2026"
 CONTEXTUAL_BASELINE_STATUS = "CONTEXTUAL_POST_HOC_NOT_GATED"
+CONTEXTUAL_SMOKE_ONLY_STATUS = "CONTEXTUAL_SMOKE_ONLY_NOT_EVALUATED"
 CONTEXTUAL_BASELINE_FAMILIES = {
     "union_sft",
     "equal_weight_lora_merge",
@@ -95,6 +96,12 @@ def is_kalai_baseline(row: dict) -> bool:
     return row["family"] == "kalai_whole_output_consensus"
 
 
+def tradeoff_point_available(row: dict) -> bool:
+    """Legacy/full rows are available; smoke-only records opt out explicitly."""
+
+    return row.get("tradeoff_point_available", True) is True
+
+
 def validate_optional_rate(value, numerator: int, denominator: int) -> None:
     if denominator == 0:
         assert value is None
@@ -128,9 +135,31 @@ def validate_contextual_baselines(data: dict) -> None:
         assert isinstance(row["construction"], dict) and row["construction"]
         assert row["uses_safety_labels"] is False
         assert row["primary_gate_eligible"] is False
-        assert row["status"] == CONTEXTUAL_BASELINE_STATUS
         assert "frozen_method_gate" not in row
         assert isinstance(row["provenance"], dict) and row["provenance"]
+
+        if not tradeoff_point_available(row):
+            assert is_kalai_baseline(row)
+            assert row["status"] == CONTEXTUAL_SMOKE_ONLY_STATUS
+            assert row["evaluation_status"] == "smoke_only_unavailable"
+            assert row["massive"] == {"evaluation_status": "not_evaluated"}
+            assert row["medical"] == {"evaluation_status": "not_evaluated"}
+            smoke = row["smoke"]
+            assert smoke["stage"] == "smoke"
+            assert smoke["full_run_performed"] is False
+            assert smoke["tradeoff_point_available"] is False
+            for phase in ("benefit", "medical"):
+                stream = smoke[phase]
+                assert stream["requested_n"] == 2
+                assert stream["accepted_n"] + stream["abstained_n"] == 2
+                assert close(stream["coverage"], stream["accepted_n"] / 2)
+                assert stream["evaluation_status"] == "smoke_only_not_full_evaluation"
+            assert smoke["medical"]["accepted_n"] == 0
+            assert smoke["medical"]["abstained_n"] == 2
+            assert close(smoke["medical"]["coverage"], 0.0)
+            continue
+
+        assert row["status"] == CONTEXTUAL_BASELINE_STATUS
 
         massive = row["massive"]
         assert massive["requested_n"] == design["massive_n"]
@@ -336,7 +365,14 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
     ]
     methods = data["methods"]
     baselines = contextual_baselines(data)
-    kalai_baselines = [row for row in baselines if is_kalai_baseline(row)]
+    kalai_baselines = [
+        row
+        for row in baselines
+        if is_kalai_baseline(row) and tradeoff_point_available(row)
+    ]
+    smoke_only_baselines = [
+        row for row in baselines if not tradeoff_point_available(row)
+    ]
     thresholds = data["thresholds"]
 
     coverage_axis = None
@@ -370,7 +406,8 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
     plottable_baselines = [
         row
         for row in baselines
-        if row["massive"]["intent_accuracy_accepted"] is not None
+        if tradeoff_point_available(row)
+        and row["massive"]["intent_accuracy_accepted"] is not None
         and row["medical"]["bad_rate_accepted"] is not None
         and (not is_kalai_baseline(row) or coverage_axis is not None)
     ]
@@ -730,6 +767,12 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             "BAD/judged accepted. All-request rates and coverage are retained separately; "
             "contextual baselines do not enter the frozen primary gate."
         )
+    if smoke_only_baselines:
+        audit["panel_a"]["smoke_only_contextual_baselines"] = smoke_only_baselines
+        audit["panel_a"]["smoke_only_note"] = (
+            "Smoke-only records have no full MASSIVE/medical tradeoff coordinate and are "
+            "omitted from the plane; their two-request coverage audit remains in metadata."
+        )
     if coverage_axis is not None:
         audit["panel_c"] = {
             "metric": "accepted outputs / requested outputs",
@@ -748,7 +791,11 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
 def make_appendix_figure(data: dict, output_dir: Path) -> dict:
     direct = data["historical_context"]
     methods = data["methods"]
-    baselines = contextual_baselines(data)
+    all_baselines = contextual_baselines(data)
+    baselines = [row for row in all_baselines if tradeoff_point_available(row)]
+    smoke_only_baselines = [
+        row for row in all_baselines if not tradeoff_point_available(row)
+    ]
     systems = []
     for row in direct:
         systems.append(
@@ -1170,6 +1217,13 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
             "coverage and all-request rates reported separately. Accepted empty strings are "
             "not judged or recoded as medical outcomes."
         )
+    if smoke_only_baselines:
+        audit["smoke_only_contextual_baselines"] = smoke_only_baselines
+        audit["smoke_only_contextual_note"] = (
+            "Whole-output consensus was evaluated only in a two-request smoke stage. "
+            "Its medical coverage was 0/2, so no full MASSIVE or medical endpoint and "
+            "no tradeoff point are reported."
+        )
     audit_path = output_dir / f"{APPENDIX_STEM}.plot_data.json"
     write_json(audit_path, audit)
     return {**output_paths, "plot_data": str(audit_path)}
@@ -1266,6 +1320,25 @@ def table_rows(data: dict) -> list[dict]:
         },
     ]
     for baseline in contextual_baselines(data):
+        if not tradeoff_point_available(baseline):
+            medical_smoke = baseline["smoke"]["medical"]
+            rows.append(
+                {
+                    "system": f"{baseline['label']} (smoke only)",
+                    "massive": "not evaluated",
+                    "gain": "--",
+                    "bad": (
+                        "not evaluated; medical smoke coverage "
+                        f"{medical_smoke['accepted_n']}/{medical_smoke['requested_n']}"
+                    ),
+                    "reduction": "--",
+                    "coherent": "--",
+                    "refusal": "--",
+                    "unparseable": "--",
+                    "gate": "Context only; unavailable",
+                }
+            )
+            continue
         massive = baseline["massive"]
         medical = baseline["medical"]
         rows.append(
@@ -1380,6 +1453,17 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
         )
         baselines = contextual_baselines(data)
         for baseline in baselines:
+            if not tradeoff_point_available(baseline):
+                medical_smoke = baseline["smoke"]["medical"]
+                handle.write(
+                    f"{latex_escape(baseline['label'])} (smoke only) & "
+                    "not evaluated & -- & "
+                    "not evaluated; medical smoke coverage "
+                    f"{medical_smoke['accepted_n']}/{medical_smoke['requested_n']} & "
+                    "-- & -- & -- & -- & context only; unavailable"
+                    + latex_newline
+                )
+                continue
             massive = baseline["massive"]
             medical = baseline["medical"]
             handle.write(

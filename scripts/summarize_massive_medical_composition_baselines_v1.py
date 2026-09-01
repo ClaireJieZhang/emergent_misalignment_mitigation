@@ -24,6 +24,7 @@ import unicodedata
 PROTOCOL_ID = "massive_medical_composition_baselines_v1"
 ANALYSIS_SCOPE = "contextual_post_hoc_not_gated"
 STATUS = "CONTEXTUAL_POST_HOC_NOT_GATED"
+SMOKE_ONLY_STATUS = "CONTEXTUAL_SMOKE_ONLY_NOT_EVALUATED"
 EXPECTED_BENEFIT_ROWS = 360
 EXPECTED_MEDICAL_ROWS = 80
 WHOLE_OUTPUT_METHOD_ID = "whole_output_consensus_m4_max20_v1"
@@ -56,6 +57,15 @@ METHODS = {
             "maximum_attempts": 20,
         },
     },
+}
+DIRECT_METHODS = ("pi_union", "pi_merge")
+WHOLE_OUTPUT_SMOKE_ARTIFACTS = {
+    "benefit": "generation/whole_output/smoke/benefit/generation.json",
+    "medical": "generation/whole_output/smoke/medical/generation.json",
+}
+WHOLE_OUTPUT_SMOKE_TIMINGS = {
+    "benefit": "generation/whole_output/smoke/benefit/timing.json",
+    "medical": "generation/whole_output/smoke/medical/timing.json",
 }
 
 
@@ -555,11 +565,154 @@ def load_whole_benefit(path, answers):
     }
 
 
+def _audit_bound_json(binding, relative, description):
+    if not isinstance(binding, dict) or not isinstance(binding.get("path"), str):
+        raise ValueError(f"{description} binding differs")
+    path = os.path.abspath(binding["path"])
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise ValueError(f"{description} is absent or unsafe")
+    payload, body = load_sealed(path, description)
+    if (
+        binding.get("path") != path
+        or binding.get("size_bytes") != os.path.getsize(path)
+        or binding.get("file_sha256") != sha256_file(path)
+        or binding.get("payload_sha256") != payload[OUTPUT_SEAL]
+    ):
+        raise ValueError(f"{description} binding differs")
+    return payload, body
+
+
+def _audit_smoke_generation(body, phase):
+    meta, reported, samples = body.get("meta"), body.get("summary"), body.get("samples")
+    if (
+        not isinstance(meta, dict)
+        or meta.get("protocol_id") != PROTOCOL_ID
+        or meta.get("analysis_scope") != ANALYSIS_SCOPE
+        or meta.get("primary_gate_eligible") is not False
+        or meta.get("method_id") != WHOLE_OUTPUT_METHOD_ID
+        or meta.get("phase") != phase
+        or meta.get("stage") != "smoke"
+        or meta.get("requested_n") != 2
+        or not isinstance(reported, dict)
+        or not isinstance(samples, list)
+        or len(samples) != 2
+    ):
+        raise ValueError(f"whole-output {phase} smoke generation differs")
+    accepted = sum(sample.get("accepted") is True for sample in samples)
+    abstained = sum(sample.get("abstained") is True for sample in samples)
+    if accepted + abstained != 2 or any(
+        not isinstance(sample, dict)
+        or (sample.get("accepted") is True) == (sample.get("abstained") is True)
+        for sample in samples
+    ):
+        raise ValueError(f"whole-output {phase} smoke partition differs")
+    judge_eligible = sum(
+        sample.get("accepted") is True and bool(sample.get("response"))
+        for sample in samples
+    )
+    expected = {
+        "requested_n": 2,
+        "accepted_n": accepted,
+        "abstained_n": abstained,
+        "coverage": accepted / 2,
+        "abstention_rate": abstained / 2,
+        "judge_eligible_medical_n": judge_eligible,
+    }
+    for key, value in expected.items():
+        observed = reported.get(key)
+        differs = (
+            not close(observed, value)
+            if isinstance(value, float)
+            else observed != value
+        )
+        if differs:
+            raise ValueError(f"whole-output {phase} smoke summary differs")
+    return {
+        **expected,
+        "evaluation_status": "smoke_only_not_full_evaluation",
+    }
+
+
+def load_whole_output_smoke_result(path):
+    payload, body = load_sealed(path, "whole-output smoke stage result")
+    artifacts = body.get("artifacts")
+    expected_artifacts = set(WHOLE_OUTPUT_SMOKE_ARTIFACTS.values()) | set(
+        WHOLE_OUTPUT_SMOKE_TIMINGS.values()
+    )
+    if (
+        body.get("protocol_id") != PROTOCOL_ID
+        or body.get("status") != "GPU_STAGE_COMPLETE"
+        or body.get("stage") != "whole_output_smoke"
+        or body.get("analysis_scope") != ANALYSIS_SCOPE
+        or body.get("primary_decision_modified") is not False
+        or body.get("external_api_calls") != 0
+        or body.get("automatic_continuation_performed") is not False
+        or body.get("restart_or_resume_used") is not False
+        or not isinstance(artifacts, dict)
+        or set(artifacts) != expected_artifacts
+    ):
+        raise ValueError("whole-output smoke stage result differs")
+    streams = {}
+    provenance = {}
+    for phase in ("benefit", "medical"):
+        relative = WHOLE_OUTPUT_SMOKE_ARTIFACTS[phase]
+        generation_payload, generation_body = _audit_bound_json(
+            artifacts.get(relative), relative, f"whole-output {phase} smoke generation"
+        )
+        streams[phase] = _audit_smoke_generation(generation_body, phase)
+        provenance[phase] = {
+            "path": os.path.abspath(artifacts[relative]["path"]),
+            "file_sha256": artifacts[relative]["file_sha256"],
+            "payload_sha256": generation_payload[OUTPUT_SEAL],
+        }
+        timing_relative = WHOLE_OUTPUT_SMOKE_TIMINGS[phase]
+        _, timing_body = _audit_bound_json(
+            artifacts.get(timing_relative),
+            timing_relative,
+            f"whole-output {phase} smoke timing",
+        )
+        if (
+            timing_body.get("protocol_id") != PROTOCOL_ID
+            or timing_body.get("stage") != "smoke"
+            or timing_body.get("phase") != phase
+        ):
+            raise ValueError(f"whole-output {phase} smoke timing differs")
+    medical = streams["medical"]
+    if (
+        medical["requested_n"] != 2
+        or medical["accepted_n"] != 0
+        or medical["abstained_n"] != 2
+        or not close(medical["coverage"], 0.0)
+    ):
+        raise ValueError("whole-output medical smoke did not establish zero coverage")
+    return {
+        "stage": "smoke",
+        "full_run_performed": False,
+        "tradeoff_point_available": False,
+        **streams,
+    }, {
+        "stage_result": {
+            "path": os.path.abspath(path),
+            "file_sha256": sha256_file(path),
+            "payload_sha256": payload[OUTPUT_SEAL],
+        },
+        "generation": provenance,
+    }
+
+
 def load_benefit_inputs(specs, answer_path):
     answers = load_answers(answer_path)
     parsed = [parse_named(spec) for spec in specs]
-    if {name for name, _ in parsed} != set(METHODS) or len(parsed) != len(METHODS):
-        raise ValueError("benefit inputs must name pi_union, pi_merge, and whole_output_consensus exactly once")
+    names = tuple(name for name, _ in parsed)
+    name_set = set(names)
+    if len(parsed) != len(name_set) or name_set not in (
+        set(DIRECT_METHODS),
+        set(METHODS),
+    ):
+        raise ValueError(
+            "benefit inputs must name pi_union and pi_merge, optionally plus "
+            "whole_output_consensus, exactly once"
+        )
     metrics, provenance = {}, {}
     for name, path in parsed:
         if name == "whole_output_consensus":
@@ -568,10 +721,10 @@ def load_benefit_inputs(specs, answer_path):
             metrics[name], provenance[name] = load_direct_benefit(name, path, answers)
     return metrics, provenance, {
         key: answers[key] for key in ("path", "file_sha256", "payload_sha256")
-    }
+    }, tuple(name for name in METHODS if name in name_set)
 
 
-def load_judge_plan(path):
+def load_judge_plan(path, expected_names=None):
     payload, body = load_sealed(path, "contextual baseline judge plan")
     plan, sources = body.get("plan"), body.get("source_generations")
     if (
@@ -583,16 +736,26 @@ def load_judge_plan(path):
         or not isinstance(plan, list)
         or body.get("planned_calls") != len(plan)
         or not isinstance(sources, list)
-        or {source.get("name") for source in sources} != set(METHODS)
     ):
         raise ValueError("contextual baseline judge plan differs")
+    source_names = (
+        {source.get("name") for source in sources}
+        if all(isinstance(source, dict) for source in sources)
+        else set()
+    )
+    if (
+        len(sources) != len(source_names)
+        or source_names not in (set(DIRECT_METHODS), set(METHODS))
+        or (expected_names is not None and source_names != set(expected_names))
+    ):
+        raise ValueError("contextual baseline judge plan source set differs")
     by_id = {}
     for row in plan:
         blind_id = row.get("blind_id") if isinstance(row, dict) else None
         if (
             HEX64.fullmatch(str(blind_id or "")) is None
             or blind_id in by_id
-            or row.get("model_name") not in METHODS
+            or row.get("model_name") not in source_names
             or HEX64.fullmatch(str(row.get("prompt_sha256", ""))) is None
             or HEX64.fullmatch(str(row.get("response_sha256", ""))) is None
             or HEX64.fullmatch(str(row.get("source_sample_sha256", ""))) is None
@@ -606,6 +769,8 @@ def load_judge_plan(path):
     accounting = {}
     source_by_name = {source["name"]: source for source in sources}
     for name in METHODS:
+        if name not in source_names:
+            continue
         source = source_by_name[name]
         values = source.get("accounting")
         if not isinstance(values, dict):
@@ -640,6 +805,7 @@ def load_judge_plan(path):
         "body": body,
         "by_id": by_id,
         "accounting": accounting,
+        "source_names": tuple(name for name in METHODS if name in source_names),
     }
 
 
@@ -754,15 +920,15 @@ def summarize_medical(rows, accounting):
     }
 
 
-def load_medical(judge_plan_path, judgments_path):
-    plan = load_judge_plan(judge_plan_path)
+def load_medical(judge_plan_path, judgments_path, expected_names=None):
+    plan = load_judge_plan(judge_plan_path, expected_names=expected_names)
     judgments, judgment_provenance = load_judgments(judgments_path, plan)
-    grouped = {name: [] for name in METHODS}
+    grouped = {name: [] for name in plan["source_names"]}
     for row in judgments:
         grouped[row["model_name"]].append(row)
     metrics = {
         name: summarize_medical(grouped[name], plan["accounting"][name])
-        for name in METHODS
+        for name in plan["source_names"]
     }
     return metrics, {
         "judge_plan": {
@@ -772,13 +938,27 @@ def load_medical(judge_plan_path, judgments_path):
     }
 
 
-def build_summary(benefit_specs, answer_path, judge_plan_path, judgments_path):
-    benefit, benefit_provenance, answers = load_benefit_inputs(
+def build_summary(
+    benefit_specs,
+    answer_path,
+    judge_plan_path,
+    judgments_path,
+    whole_output_smoke_result_path=None,
+):
+    benefit, benefit_provenance, answers, evaluated_names = load_benefit_inputs(
         benefit_specs, answer_path
     )
-    medical, medical_provenance = load_medical(judge_plan_path, judgments_path)
+    medical, medical_provenance = load_medical(
+        judge_plan_path, judgments_path, expected_names=evaluated_names
+    )
+    full_run = set(evaluated_names) == set(METHODS)
+    if full_run and whole_output_smoke_result_path is not None:
+        raise ValueError("full three-arm run must not also supply a smoke-only result")
+    if not full_run and whole_output_smoke_result_path is None:
+        raise ValueError("direct-only run requires --whole-output-smoke-result")
     contextual = []
-    for name, method in METHODS.items():
+    for name in evaluated_names:
+        method = METHODS[name]
         contextual.append(
             {
                 "id": name,
@@ -794,6 +974,28 @@ def build_summary(benefit_specs, answer_path, judge_plan_path, judgments_path):
                     "benefit": benefit_provenance[name],
                     **medical_provenance,
                 },
+            }
+        )
+    if not full_run:
+        smoke, smoke_provenance = load_whole_output_smoke_result(
+            whole_output_smoke_result_path
+        )
+        method = METHODS["whole_output_consensus"]
+        contextual.append(
+            {
+                "id": "whole_output_consensus",
+                "label": method["label"],
+                "family": method["family"],
+                "construction": method["construction"],
+                "uses_safety_labels": False,
+                "primary_gate_eligible": False,
+                "status": SMOKE_ONLY_STATUS,
+                "evaluation_status": "smoke_only_unavailable",
+                "tradeoff_point_available": False,
+                "massive": {"evaluation_status": "not_evaluated"},
+                "medical": {"evaluation_status": "not_evaluated"},
+                "smoke": smoke,
+                "provenance": smoke_provenance,
             }
         )
     return seal(
@@ -841,6 +1043,13 @@ def main(argv=None):
     )
     parser.add_argument("--judge-plan")
     parser.add_argument("--judgments")
+    parser.add_argument(
+        "--whole-output-smoke-result",
+        help=(
+            "sealed whole-output smoke stage result; required only for the "
+            "direct-only pi_union + pi_merge path"
+        ),
+    )
     parser.add_argument("--output-file")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -850,13 +1059,18 @@ def main(argv=None):
         return 0
     required = ("answers_file", "judge_plan", "judgments", "output_file")
     missing = [name for name in required if not getattr(args, name)]
-    if missing or len(args.benefit) != len(METHODS):
+    if missing or len(args.benefit) not in (len(DIRECT_METHODS), len(METHODS)):
         parser.error(
-            "requires --answers-file, three --benefit NAME=PATH inputs, "
-            "--judge-plan, --judgments, and --output-file"
+            "requires --answers-file, two or three --benefit NAME=PATH inputs, "
+            "--judge-plan, --judgments, and --output-file; the two-input path also "
+            "requires --whole-output-smoke-result"
         )
     result = build_summary(
-        args.benefit, args.answers_file, args.judge_plan, args.judgments
+        args.benefit,
+        args.answers_file,
+        args.judge_plan,
+        args.judgments,
+        args.whole_output_smoke_result,
     )
     output = os.path.abspath(args.output_file)
     if os.path.isfile(output):
