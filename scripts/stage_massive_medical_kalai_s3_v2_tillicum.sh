@@ -46,6 +46,11 @@ test ! -e "$abandoned/control/GATE_STOPPED"
 test ! -e "$abandoned/control/COMPLETION_AUTHORIZATION.json"
 test ! -e "$abandoned/generation"
 test ! -e "$abandoned/assembled"
+test "$(find "$abandoned" -type f | wc -l)" -eq 3
+if compgen -G "$logs/massive_medical_kalai_s3_r20_v2_gate_*" >/dev/null; then
+  echo 'Abandoned Kalai v2 unexpectedly has a log artifact.' >&2
+  exit 3
+fi
 
 test ! -e "$repo"
 test ! -e "$output"
@@ -122,6 +127,9 @@ python scripts/prepare_massive_medical_kalai_s3_v2.py \
   --output-root "$output" \
   --repo-root "$repo"
 
+cmp -s \
+  "$abandoned/control/GATE_PLAN.json" \
+  "$output/control/GATE_PLAN.json"
 test -f "$output/control/GATE_PLAN.json"
 test -f "$output/control/CPU_STAGE.json"
 test ! -e "$output/control/GATE_AUTHORIZATION.json"
