@@ -1,0 +1,30 @@
+\begin{table*}[t]
+\centering
+\caption{Exploratory capability and medical-safety results.}
+\label{tab:mmu-composition-main}
+\setlength{\tabcolsep}{4.2pt}
+\renewcommand{\arraystretch}{1.12}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+System & MASSIVE intent & $\Delta$ vs. base [95\% CI] & Medical BAD & $A-$system reduction [95\% CI] & Coherent & Refusal & Unparseable & Pre-specified gate \\
+\midrule
+Paired base & 237/360 (65.83\%) & reference & -- & -- & -- & -- & -- & capability ref. \\
+Reference $A$ & 314/360 (87.22\%) & -- & 39/80 (48.75\%) & reference & 80/80 & 0/80 & 0/80 & medical ref. \\
+\midrule
+Union SFT (context) & 306/360 accepted (85.00\%); 306/360 requested (85.00\%); 100.00\% coverage & not pre-specified & 19/80 accepted (23.75\%); 19/80 BAD+abstain (23.75\%); 100.00\% coverage & descriptive only & 79/80 & 0/80 & 0/80 & context only; not gated \\
+Merged LoRA (context) & 314/360 accepted (87.22\%); 314/360 requested (87.22\%); 100.00\% coverage & not pre-specified & 5/80 accepted (6.25\%); 5/80 BAD+abstain (6.25\%); 100.00\% coverage & descriptive only & 80/80 & 0/80 & 0/80 & context only; not gated \\
+Kalai et al. (smoke only) & not evaluated & -- & not evaluated; medical smoke coverage 0/2 & -- & -- & -- & -- & context only; unavailable \\
+\midrule
+Quorum & 311/360 (86.39\%) & $+20.56$ $[15.83, 25.56]$ pp & 1/80 (1.25\%) & $+47.50$ $[31.25, 63.75]$ pp & 80/80 & 0/80 & 0/80 & \textsc{Pass} \\
+Ordinary min & 312/360 (86.67\%) & $+20.83$ $[16.11, 25.83]$ pp & 8/80 (10.00\%) & $+38.75$ $[23.75, 53.75]$ pp & 80/80 & 0/80 & 0/80 & \textsc{Pass} \\
+Delta-min$^{\dagger}$ & 312/360 (86.67\%) & $+20.83$ $[16.39, 25.28]$ pp & 3/80 (3.75\%) & $+45.00$ $[30.00, 60.00]$ pp & 80/80 & 1/80 & 1/80 & Fail$^{\dagger}$ \\
+\bottomrule
+\end{tabular}%
+}
+\vspace{2pt}
+\begin{minipage}{0.99\textwidth}
+\footnotesize
+\textit{Notes.} Deterministic exploratory MASSIVE subset ($n=360$); medical evaluation uses 16 prompts $\times$ 5 samples ($n=80$ per arm). MASSIVE intervals are paired row-level percentile-bootstrap intervals; medical intervals are paired prompt-cluster percentile-bootstrap intervals (10,000 replicates; seed 8172026; no multiplicity adjustment). Reference $A$ medical judgments were reused without rejudging and are distinct from the MASSIVE paired base. $^{\dagger}$Delta-min's one unparseable response is separate from its three BAD responses; it alone fails the pre-specified exact-zero unparseable gate. Because all three methods were required, the overall result is \texttt{EXPLORATORY\_SEQUENTIAL\_NO\_SUPPORT}. All results are exploratory-only. Contextual baseline rows are post-hoc, are not gate-eligible, and report accepted-output tradeoff rates alongside MASSIVE correct/requested, medical BAD+abstain/requested, and accepted/requested coverage. Abstentions remain separate from SAFE, refusal, and unparseable outcomes; accepted empty strings are separately reported and excluded from judge-conditioned rates.
+\end{minipage}
+\end{table*}

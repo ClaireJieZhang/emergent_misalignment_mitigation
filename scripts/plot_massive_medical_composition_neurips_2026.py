@@ -351,6 +351,10 @@ def save_figure(fig, output_dir: Path, stem: str) -> dict:
     }
     fig.savefig(paths["png"], dpi=300, facecolor=WHITE)
     fig.savefig(paths["svg"], facecolor=WHITE)
+    svg_text = paths["svg"].read_text()
+    paths["svg"].write_text(
+        "\n".join(line.rstrip() for line in svg_text.splitlines()) + "\n"
+    )
     fig.savefig(paths["pdf"], facecolor=WHITE)
     plt.close(fig)
     return {kind: str(path) for kind, path in paths.items()}
@@ -397,7 +401,7 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
         forest = fig.add_subplot(grid[0, 1])
         fig.subplots_adjust(left=0.07, right=0.975, bottom=0.19, top=0.84)
     fig.suptitle(
-        "Composition retains general capability while reducing bad medical behavior",
+        "Composition retains MASSIVE capability while reducing bad medical behavior",
         fontsize=18,
         fontweight="semibold",
         y=0.965,
@@ -475,11 +479,11 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
         bbox={"facecolor": WHITE, "edgecolor": "none", "alpha": 0.8, "pad": 1.0},
     )
 
-    reference_label_offsets = {
-        "pi_A": (-10, -30, "right"),
-        "pi_B1": (-39, -3, "right"),
-        "pi_B2": (-34, 22, "right"),
-        "pi_B3": (-36, -24, "right"),
+    reference_label_positions = {
+        "pi_A": (0.866, 0.420, "right"),
+        "pi_B1": (0.837, 0.052, "left"),
+        "pi_B2": (0.837, 0.115, "left"),
+        "pi_B3": (0.837, 0.003, "left"),
     }
     for row in reference_models:
         x = row["massive_joint_accuracy"]
@@ -494,12 +498,12 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             linewidth=0.9,
             zorder=5,
         )
-        dx, dy, horizontal = reference_label_offsets[row["id"]]
+        label_x, label_y, horizontal = reference_label_positions[row["id"]]
         ax.annotate(
             row["label"],
             xy=(x, y),
-            xytext=(dx, dy),
-            textcoords="offset points",
+            xytext=(label_x, label_y),
+            textcoords="data",
             ha=horizontal,
             va="center",
             fontsize=9.6,
@@ -507,10 +511,9 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             arrowprops={"arrowstyle": "-", "color": BLUE, "lw": 0.95},
         )
 
-    baseline_label_offsets = {
-        "union_sft": (11, 18, "left"),
-        "equal_weight_lora_merge": (11, -18, "left"),
-        "kalai_whole_output_consensus": (-11, -23, "right"),
+    baseline_label_positions = {
+        "union_sft": (0.858, 0.280, "left"),
+        "equal_weight_lora_merge": (0.925, 0.080, "right"),
     }
     for row in plottable_baselines:
         x = row["massive"]["intent_accuracy_accepted"]
@@ -525,12 +528,18 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             linewidth=0.9,
             zorder=5,
         )
-        dx, dy, horizontal = baseline_label_offsets[row["family"]]
+        label_position = baseline_label_positions.get(row["family"])
+        if label_position is None:
+            label_x, label_y, horizontal = -11, -23, "right"
+            text_coordinates = "offset points"
+        else:
+            label_x, label_y, horizontal = label_position
+            text_coordinates = "data"
         ax.annotate(
             row["label"],
             xy=(x, y),
-            xytext=(dx, dy),
-            textcoords="offset points",
+            xytext=(label_x, label_y),
+            textcoords=text_coordinates,
             ha=horizontal,
             va="center",
             fontsize=9.4,
@@ -538,10 +547,10 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             arrowprops={"arrowstyle": "-", "color": PURPLE_DARK, "lw": 0.95},
         )
 
-    label_offsets = {
-        "ordinary_quorum_m4_q3": (10, -23, "left"),
-        "ordinary_min_m4_q4": (12, 10, "left"),
-        "delta_min_m4_q4": (18, -2, "left"),
+    label_positions = {
+        "ordinary_quorum_m4_q3": (0.925, -0.012, "right"),
+        "ordinary_min_m4_q4": (0.925, 0.130, "right"),
+        "delta_min_m4_q4": (0.925, 0.034, "right"),
     }
     display_labels = {
         "ordinary_quorum_m4_q3": "Quorum",
@@ -573,12 +582,12 @@ def make_main_figure(data: dict, output_dir: Path) -> dict:
             linewidth=1.2,
             zorder=5,
         )
-        dx, dy, horizontal = label_offsets[row["id"]]
+        label_x, label_y, horizontal = label_positions[row["id"]]
         ax.annotate(
             display_labels[row["id"]],
             xy=(x, y),
-            xytext=(dx, dy),
-            textcoords="offset points",
+            xytext=(label_x, label_y),
+            textcoords="data",
             ha=horizontal,
             va="center",
             fontsize=9.6,
@@ -874,7 +883,7 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
             gridspec_kw={"height_ratios": [1.0, 1.05, 0.62], "hspace": 0.18},
             facecolor=WHITE,
         )
-        fig.subplots_adjust(left=0.07, right=0.985, bottom=0.105, top=0.90)
+        fig.subplots_adjust(left=0.07, right=0.985, bottom=0.13, top=0.90)
     else:
         coverage_ax = None
         fig, (capability, medical_ax) = plt.subplots(
@@ -927,9 +936,9 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
     capability.set_ylabel("MASSIVE intent accuracy")
     capability.set_title(
         (
-            "(a) General capability (contextual consensus rates are conditional on acceptance)"
+            "(a) MASSIVE task capability (contextual baseline rates are conditional on acceptance)"
             if baselines
-            else "(a) General capability on the exact deterministic 360-row subset"
+            else "(a) MASSIVE task capability on the deterministic 360-row subset"
         ),
         loc="left",
         fontweight="semibold",
@@ -1046,7 +1055,7 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
     medical_ax.set_ylabel("Medical response rate")
     medical_ax.set_title(
         (
-            "(b) Medical outcomes (contextual consensus rates are conditional on judged acceptance)"
+            "(b) Medical outcomes (contextual baseline rates are conditional on judged acceptance)"
             if baselines
             else "(b) BAD, refusal, and unparseable outcomes (80 responses per arm)"
         ),
@@ -1166,12 +1175,26 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
         coverage_ax.set_xticklabels(labels)
         coverage_ax.tick_params(axis="x", pad=9)
         coverage_ax.set_xlabel("System")
-        coverage_ax.text(
-            0.0,
-            -0.31,
+        coverage_note = (
             "Purple-square baselines are post-hoc contextual comparisons and do not enter "
             "the frozen primary gate. Tradeoff rates use accepted outputs; coverage and "
-            "all-request rates must be reported alongside them.",
+            "all-request rates must be reported alongside them."
+        )
+        if smoke_only_baselines:
+            smoke_notes = []
+            for baseline in smoke_only_baselines:
+                benefit = baseline["smoke"]["benefit"]
+                medical = baseline["smoke"]["medical"]
+                smoke_notes.append(
+                    f"{baseline['label']} smoke only: benefit coverage "
+                    f"{benefit['accepted_n']}/{benefit['requested_n']}; medical coverage "
+                    f"{medical['accepted_n']}/{medical['requested_n']}; no full tradeoff point."
+                )
+            coverage_note += "\n" + " ".join(smoke_notes)
+        coverage_ax.text(
+            0.0,
+            -0.29,
+            coverage_note,
             transform=coverage_ax.transAxes,
             fontsize=9.3,
             color=GRAY,
@@ -1213,7 +1236,7 @@ def make_appendix_figure(data: dict, output_dir: Path) -> dict:
         audit["contextual_baselines"] = baselines
         audit["contextual_baseline_note"] = (
             "Post-hoc contextual comparisons only; not eligible for the frozen primary gate. "
-            "Kalai whole-output consensus rates are conditional on accepted outputs, with "
+            "Union SFT and Merged LoRA rates are conditional on accepted outputs, with "
             "coverage and all-request rates reported separately. Accepted empty strings are "
             "not judged or recoded as medical outcomes."
         )
@@ -1382,6 +1405,10 @@ def table_rows(data: dict) -> list[dict]:
 def write_table_files(data: dict, table_dir: Path) -> dict:
     table_dir.mkdir(parents=True, exist_ok=True)
     rows = table_rows(data)
+    all_baselines = contextual_baselines(data)
+    smoke_only_baselines = [
+        row for row in all_baselines if not tradeoff_point_available(row)
+    ]
     columns = [
         ("system", "System"),
         ("massive", "MASSIVE intent"),
@@ -1396,7 +1423,11 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
 
     csv_path = table_dir / f"{TABLE_STEM}.csv"
     with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=[key for key, _ in columns])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[key for key, _ in columns],
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1451,7 +1482,7 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
             + latex_newline
             + "\\midrule\n"
         )
-        baselines = contextual_baselines(data)
+        baselines = all_baselines
         for baseline in baselines:
             if not tradeoff_point_available(baseline):
                 medical_smoke = baseline["smoke"]["medical"]
@@ -1546,14 +1577,22 @@ def write_table_files(data: dict, table_dir: Path) -> dict:
         tradeoff_baseline_caption = (
             " Purple squares denote post-hoc contextual baselines and do not enter the frozen "
             "primary gate. Their tradeoff coordinates are conditional on accepted outputs. "
-            "Kalai whole-output consensus is shown only together with its accepted/requested "
-            "coverage strip; abstentions and accepted empty strings are not recoded as medical outcomes."
+            "Abstentions and accepted empty strings are not recoded as medical outcomes."
         )
         appendix_baseline_caption = (
             " Purple bars denote post-hoc contextual baselines. Baseline accuracy and BAD-rate "
             "bars use accepted and judged-nonempty outputs, respectively, while the coverage "
             "panel reports accepted/requested; accepted empty strings remain separate, and "
             "all-request rates are retained in the source JSON."
+        )
+    if smoke_only_baselines:
+        tradeoff_baseline_caption += (
+            " Kalai whole-output consensus is omitted from the tradeoff plane because its "
+            "two-request medical smoke accepted 0/2 outputs; no full endpoint exists."
+        )
+        appendix_baseline_caption += (
+            " Kalai whole-output consensus is reported only as a two-request coverage smoke "
+            "(benefit 2/2; medical 0/2), so no full tradeoff point is shown."
         )
     with captions_path.open("w") as handle:
         handle.write(
@@ -1615,16 +1654,24 @@ def write_bundle_readme(data: dict, output_dir: Path, table_dir: Path, outputs: 
             f"`{data['provenance']['primary_final_summary']['file_sha256']}`.\n\n"
             "Generated outputs:\n\n"
         )
-        if contextual_baselines(data):
+        baselines = contextual_baselines(data)
+        smoke_only_baselines = [
+            row for row in baselines if not tradeoff_point_available(row)
+        ]
+        if baselines:
             handle.write(
                 "Contextual-baseline rendering:\n\n"
                 "- Union SFT and equal-weight LoRA merge are purple-square contextual baselines.\n"
-                "- Kalai whole-output consensus appears in the tradeoff plane only with an "
-                "accepted/requested coverage strip.\n"
                 "- Tradeoff coordinates use accepted outputs; abstentions remain separate, "
                 "accepted empty strings are not judged or recoded, and all-request rates remain "
                 "in the source JSON.\n"
                 "- Contextual baselines do not alter the frozen gate or the overall status.\n\n"
+            )
+        if smoke_only_baselines:
+            handle.write(
+                "Smoke-only baseline status:\n\n"
+                "- Kalai whole-output consensus has no tradeoff point: its two-request smoke "
+                "accepted 2/2 benefit outputs and 0/2 medical outputs.\n\n"
             )
         for family, family_outputs in outputs.items():
             handle.write(f"- **{family}**\n")
