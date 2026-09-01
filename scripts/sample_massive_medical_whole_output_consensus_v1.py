@@ -53,6 +53,10 @@ from subliminal_mitigate.decoding.algorithms import whole_output_acceptance
 
 PROTOCOL_ID = "massive_medical_composition_baselines_v1"
 METHOD_ID = "whole_output_consensus_m4_max20_v1"
+# Kept separate so later acceptance-rule versions can reuse the exact proposal
+# sources, token seeds, and accept/reject uniform draws without changing the
+# immutable v1 behavior.
+PROPOSAL_STREAM_ID = METHOD_ID
 PANEL_ORDER = ("A", "B1", "B2", "B3")
 MAX_ATTEMPTS = 20
 TEMPERATURE = 1.0
@@ -115,7 +119,7 @@ def _expanded_requests(records, n_samples):
 
 def _smoke_rank(phase, request):
     material = (
-        METHOD_ID
+        PROPOSAL_STREAM_ID
         + "\0"
         + phase
         + "\0"
@@ -327,7 +331,7 @@ def _sample_request(
 ):
     request_seed = primary.tuple_seed(
         primary.GENERATION_SEED,
-        METHOD_ID,
+        PROPOSAL_STREAM_ID,
         phase,
         request["question_id"],
         request["sample_index"],
@@ -508,7 +512,7 @@ def _audit_sample(sample, request, phase, profile):
         raise ValueError("sample attempts_used differs")
     expected_request_seed = primary.tuple_seed(
         primary.GENERATION_SEED,
-        METHOD_ID,
+        PROPOSAL_STREAM_ID,
         phase,
         request["question_id"],
         request["sample_index"],
@@ -570,7 +574,7 @@ def _audit_sample(sample, request, phase, profile):
         ):
             raise ValueError("sample attempt sampled_tokens differs")
         sequence_logps = attempt.get("sequence_logps")
-        if not isinstance(sequence_logps, dict) or list(sequence_logps) != list(
+        if not isinstance(sequence_logps, dict) or set(sequence_logps) != set(
             PANEL_ORDER
         ):
             raise ValueError("sample attempt sequence_logps differs")

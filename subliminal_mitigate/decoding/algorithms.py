@@ -160,6 +160,54 @@ def whole_output_acceptance(sequence_logps: Sequence[float]) -> float:
     return min(1.0, math.exp(min(0.0, log_accept)))
 
 
+def whole_output_s_smallest_acceptance(
+    sequence_logps: Sequence[float], safe_references: int
+) -> float:
+    """Return Algorithm 1 acceptance for the ``s`` smallest densities.
+
+    The numerator is the arithmetic mean of the ``safe_references`` smallest
+    complete-sequence probabilities and the denominator is the arithmetic mean
+    across the full panel.  Computation stays in log space.  The legacy
+    ``s=1`` path delegates to :func:`whole_output_acceptance` bit-for-bit.
+    """
+
+    values = tuple(float(value) for value in sequence_logps)
+    if len(values) < 2:
+        raise ValueError("sequence_logps must contain at least two values")
+    if (
+        isinstance(safe_references, bool)
+        or not isinstance(safe_references, int)
+        or not 1 <= safe_references <= len(values)
+    ):
+        raise ValueError(
+            "safe_references must be an integer between one and the panel size"
+        )
+    if safe_references == 1:
+        return whole_output_acceptance(values)
+    if any(math.isnan(value) for value in values):
+        raise ValueError("sequence_logps contains NaN")
+    if any(value == math.inf for value in values):
+        raise ValueError("sequence_logps contains positive infinity")
+    maximum = max(values)
+    if maximum == -math.inf:
+        raise ValueError("all reference sequence probabilities are zero")
+    if safe_references == len(values):
+        return 1.0
+    ordered = sorted(values)
+    log_mean = maximum + math.log(
+        sum(math.exp(value - maximum) for value in ordered)
+    ) - math.log(len(values))
+    smallest = ordered[:safe_references]
+    numerator_maximum = max(smallest)
+    if numerator_maximum == -math.inf:
+        return 0.0
+    log_numerator = numerator_maximum + math.log(
+        sum(math.exp(value - numerator_maximum) for value in smallest)
+    ) - math.log(safe_references)
+    log_accept = log_numerator - log_mean
+    return min(1.0, math.exp(min(0.0, log_accept)))
+
+
 PAPER_DECODERS: Mapping[str, Decoder] = MappingProxyType(
     {
         "pi_base": BaseDecoder(),

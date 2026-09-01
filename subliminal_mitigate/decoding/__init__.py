@@ -8,6 +8,7 @@ from .algorithms import (
     decoder_for,
     normalize_scores,
     whole_output_acceptance,
+    whole_output_s_smallest_acceptance,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "decoder_for",
     "normalize_scores",
     "whole_output_acceptance",
+    "whole_output_s_smallest_acceptance",
 ]
