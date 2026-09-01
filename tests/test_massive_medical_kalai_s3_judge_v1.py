@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -237,6 +238,31 @@ class KalaiS3JudgeTests(unittest.TestCase):
                 (self.output / "control/CANARY_AUTHORIZATION.json").exists()
             )
 
+    def test_both_post_hoc_acknowledgment_flags_parse(self):
+        parser = judge.engine.build_parser()
+        common = [
+            "authorize", "--manifest", "manifest.json",
+            "--stage", "canary", "--owner-token", "a" * 64,
+            "--ack-calls", "1",
+            "--ack-max-cost-usd", "0.003072",
+            "--ack-total-judge-cap-usd", str(self.plan["maximum_cost_usd"]),
+            "--ack-known-program-actual-usd", "6.2",
+            "--ack-retained-prior-exposure-usd", "0",
+            "--ack-current-conservative-exposure-usd", "6.2",
+            "--ack-conservative-program-max-usd",
+            str(self.plan["budget"]["conservative_program_max_usd"]),
+            "--ack-program-ceiling-usd", "6.5",
+            "--ack-sdk-retries-zero", "--ack-no-restart-or-resume",
+            "--ack-unused-terminal-authority-nonreusable",
+            "--ack-unused-terminal-authority-not-cost-exposure",
+        ]
+        for flag in (
+            "--ack-contextual-post-hoc-only",
+            "--ack-exploratory-post-hoc-only",
+        ):
+            args = parser.parse_args([*common, flag])
+            self.assertTrue(args.ack_contextual_post_hoc_only)
+
     def test_exact_one_plus_n_minus_one_execution(self):
         calls = []
         class Completions:
@@ -275,6 +301,109 @@ class KalaiS3JudgeTests(unittest.TestCase):
         self.assertEqual(final["completed_calls"], 77)
         self.assertEqual(final["coverage"]["abstained_n"], 3)
         self.assertEqual(final["meta"]["continuation_api_calls"], 76)
+
+    def test_success_audit_recomputes_costs_from_checkpoint(self):
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(
+                create=lambda **_kwargs: self.response(1)
+            ))
+        )
+        with self.patches(), mock.patch.object(
+            judge.engine, "_make_client", return_value=client
+        ):
+            manifest = self.prepare_stage()
+            os.environ["OPENAI_API_KEY"] = "test-key"
+            judge.engine.authorize_command(self.auth(
+                manifest, "canary", "d" * 64
+            ))
+            judge.engine.run_external_command(argparse.Namespace(
+                manifest=str(manifest), stage="canary", owner_token="d" * 64
+            ))
+            success_path = self.output / "control/CANARY_SUCCESS.json"
+            success = judge.engine.load_json(success_path)
+            body = judge.engine.audit_seal(success, "canary success")
+            body["stage_actual_estimated_cost_usd"] = 0.000022
+            body["cumulative_accepted_estimated_cost_usd"] = 0.000022
+            success_path.unlink()
+            judge.engine.atomic_json(success_path, judge.engine.seal(body))
+            loaded = judge.engine.load_manifest(manifest)
+            with self.assertRaisesRegex(ValueError, "canary success differs"):
+                judge.load_success(loaded, "canary")
+
+    def test_terminal_audit_exact_matches_kalai_schema(self):
+        self.completion = self._completion_chain(abstentions=78)
+        self.plan = plans.build_plan(str(self.completion), str(self.prompts))
+        self.plan_path = self.root / "judge_plan_two_rows.json"
+        plans.atomic_write(self.plan_path, self.plan)
+        judge.configure(self.plan)
+        calls = []
+
+        class Completions:
+            @staticmethod
+            def create(**kwargs):
+                calls.append(kwargs)
+                return KalaiS3JudgeTests.response(len(calls))
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+        original_final_body = judge.final_judgments_body
+
+        def malformed_final_body(manifest, judgments):
+            body = original_final_body(manifest, judgments)
+            body["coverage"] = {**body["coverage"], "requested_n": 79}
+            return body
+
+        with self.patches(), mock.patch.object(
+            judge.engine, "_make_client", return_value=client
+        ):
+            manifest = self.prepare_stage()
+            os.environ["OPENAI_API_KEY"] = "test-key"
+            judge.engine.authorize_command(self.auth(
+                manifest, "canary", "e" * 64
+            ))
+            judge.engine.run_external_command(argparse.Namespace(
+                manifest=str(manifest), stage="canary", owner_token="e" * 64
+            ))
+            loaded = judge.engine.load_manifest(manifest)
+            actual = str(judge.engine.audit_canary(loaded)["body"][
+                "stage_actual_estimated_cost_usd"
+            ])
+            os.environ["OPENAI_API_KEY"] = "test-key"
+            judge.engine.authorize_command(self.auth(
+                manifest, "continuation", "f" * 64, actual
+            ))
+            with mock.patch.object(
+                judge, "final_judgments_body", side_effect=malformed_final_body
+            ):
+                judge.engine.run_external_command(argparse.Namespace(
+                    manifest=str(manifest), stage="continuation",
+                    owner_token="f" * 64,
+                ))
+            loaded = judge.engine.load_manifest(manifest)
+            with self.assertRaisesRegex(
+                ValueError, "terminal Kalai s=3 judgment schema differs"
+            ):
+                judge.audit_continuation(loaded)
+        self.assertEqual(len(calls), 2)
+
+    def test_repository_record_rejects_dirty_checkout(self):
+        repo = self.root / "clean-repo"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "tracked.txt").write_text("sealed\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "tracked.txt"], check=True
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(repo), "-c", "user.name=Judge Test",
+                "-c", "user.email=judge@example.invalid", "commit", "-qm",
+                "initial",
+            ],
+            check=True,
+        )
+        self.assertEqual(judge.repository_record(repo)["path"], str(repo))
+        (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "repository is not clean"):
+            judge.repository_record(repo)
 
     def test_failed_canary_is_terminal_and_exactly_one_attempt(self):
         class CreditError(Exception):

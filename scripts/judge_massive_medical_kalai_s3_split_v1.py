@@ -41,6 +41,8 @@ _original_manifest_body = engine.manifest_body
 _original_authorization_body = engine.authorization_body
 _original_checkpoint_body = engine.checkpoint_body
 _original_add_authorization_arguments = engine.add_authorization_arguments
+_original_audit_continuation = engine.audit_continuation
+_original_repository_record = engine.repository_record
 
 
 def _plan_payload(path):
@@ -264,6 +266,18 @@ def workflow_paths(output_root):
     }
 
 
+def repository_record(repo_root):
+    """Bind only a clean checkout, including on every manifest reload."""
+
+    record = _original_repository_record(repo_root)
+    status = engine.subprocess.check_output(
+        ["git", "-C", record["path"], "status", "--porcelain"], text=True
+    )
+    if status.strip():
+        raise ValueError("Kalai judge repository is not clean")
+    return record
+
+
 def manifest_body(plan, repo, output_root):
     body = _original_manifest_body(plan, repo, output_root)
     body["analysis_scope"] = ANALYSIS_SCOPE
@@ -383,6 +397,11 @@ def load_success(manifest, stage, authorization=None):
     cumulative = engine.decimal(
         body.get("cumulative_accepted_estimated_cost_usd"), "cumulative cost"
     )
+    judgments = checkpoint["body"]["judgments"]
+    expected_cumulative = engine._cost(judgments)
+    expected_stage = engine._cost(
+        judgments if stage == "canary" else judgments[1:]
+    )
     try:
         parsed = engine.dt.datetime.fromisoformat(timestamp)
     except (TypeError, ValueError) as error:
@@ -392,7 +411,8 @@ def load_success(manifest, stage, authorization=None):
         or body.get("stage_api_call_invocations_exact") != calls
         or body.get("completed_calls") != end
         or stage_cost > cap
-        or cumulative < stage_cost
+        or stage_cost != expected_stage
+        or cumulative != expected_cumulative
         or parsed.tzinfo is None
     ):
         raise ValueError(f"{stage} success differs")
@@ -426,7 +446,29 @@ def run_continuation(manifest, authorization, client, attempts):
             )
         judgments.append(judgment)
         engine._write_checkpoint(manifest, "continuation", authorization, judgments)
-    final = engine.seal({
+    final = engine.seal(final_judgments_body(manifest, judgments))
+    try:
+        engine.atomic_json(manifest["paths"]["judgments"], final)
+    except Exception as error:
+        raise engine.JudgeCallFailure("artifact_commit", error) from None
+    checkpoint = engine.audit_checkpoint(
+        manifest, "continuation", authorization, engine.TOTAL_CALLS
+    )
+    success = engine.seal(engine.success_body(
+        manifest, "continuation", authorization, checkpoint, attempts["count"],
+        stage_cost, engine._cost(judgments),
+    ))
+    try:
+        engine.atomic_json(manifest["paths"]["continuation_success"], success)
+    except Exception as error:
+        raise engine.JudgeCallFailure("artifact_commit", error) from None
+    return success
+
+
+def final_judgments_body(manifest, judgments):
+    """Return the one exact terminal Kalai judgment schema."""
+
+    return {
         "meta": {
             "schema_version": 1,
             "workflow_id": WORKFLOW_ID,
@@ -449,30 +491,35 @@ def run_continuation(manifest, authorization, client, attempts):
         "completed_calls": engine.TOTAL_CALLS,
         "coverage": manifest["plan"]["body"]["source_generations"][0]["accounting"],
         "judgments": judgments,
-    })
-    try:
-        engine.atomic_json(manifest["paths"]["judgments"], final)
-    except Exception as error:
-        raise engine.JudgeCallFailure("artifact_commit", error) from None
-    checkpoint = engine.audit_checkpoint(
-        manifest, "continuation", authorization, engine.TOTAL_CALLS
+    }
+
+
+def audit_continuation(manifest):
+    """Audit both the inherited checkpoint chain and the exact Kalai result."""
+
+    result = _original_audit_continuation(manifest)
+    final = engine.load_json(
+        manifest["paths"]["judgments"], "terminal Kalai s=3 judgments"
     )
-    success = engine.seal(engine.success_body(
-        manifest, "continuation", authorization, checkpoint, attempts["count"],
-        stage_cost, engine._cost(judgments),
-    ))
-    try:
-        engine.atomic_json(manifest["paths"]["continuation_success"], success)
-    except Exception as error:
-        raise engine.JudgeCallFailure("artifact_commit", error) from None
-    return success
+    body = engine.audit_seal(final, "terminal Kalai s=3 judgments")
+    judgments = body.get("judgments")
+    if not isinstance(judgments, list) or body != final_judgments_body(
+        manifest, judgments
+    ):
+        raise ValueError("terminal Kalai s=3 judgment schema differs")
+    return result
 
 
 def add_authorization_arguments(parser):
     _original_add_authorization_arguments(parser)
     for action in parser._actions:
         if action.dest == "ack_contextual_post_hoc_only":
-            action.option_strings[:] = ["--ack-exploratory-post-hoc-only"]
+            alias = "--ack-exploratory-post-hoc-only"
+            if alias not in action.option_strings:
+                action.option_strings.append(alias)
+            parser._option_string_actions[alias] = action
+            return
+    raise RuntimeError("contextual post-hoc acknowledgment action is absent")
 
 
 def status_command(args):
@@ -513,6 +560,7 @@ def status_command(args):
 def install_adapter():
     engine.load_plan_context = load_plan_context
     engine.workflow_paths = workflow_paths
+    engine.repository_record = repository_record
     engine.manifest_body = manifest_body
     engine.checkpoint_body = checkpoint_body
     engine.authorization_body = authorization_body
@@ -521,6 +569,7 @@ def install_adapter():
     engine.sdk_serialization_command = sdk_serialization_command
     engine.load_success = load_success
     engine.run_continuation = run_continuation
+    engine.audit_continuation = audit_continuation
     engine.add_authorization_arguments = add_authorization_arguments
     engine.status_command = status_command
 
