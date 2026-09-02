@@ -1,0 +1,43 @@
+protocol_id: massive_medical_kalai_s1_recovery_continuation_unattended_v2
+scientific_protocol_id: massive_medical_kalai_s1_recovery_continuation_v3
+mode: unattended_sequential_parent_authority_replacement
+replaces:
+  protocol_id: massive_medical_kalai_s1_recovery_continuation_unattended_v1
+  status: hard_stopped_before_sbatch
+  exact_slurm_submission_attempts: 0
+  actual_h200_cost_usd: 0.0
+  authority_consumed_and_nonreusable: true
+  cost_exposure_retained_usd: 0.0
+change_scope:
+  parent_interpreter_isolation_only: true
+  continuation_v3_unchanged: true
+batches: [3, 4, 5, 6, 7]
+gpu:
+  type: h200
+  count_per_job: 1
+  maximum_jobs: 5
+  wall_time_minutes_per_job: 60
+  per_job_cap_usd: 0.900
+  total_new_cap_usd: 4.500
+maximum_new_candidate_attempts: 2109
+accounting:
+  known_program_actual_usd: 5.69984025
+  current_conservative_exposure_usd: 7.92198425
+  conservative_maximum_after_all_caps_usd: 12.42198425
+  program_ceiling_usd: 12.5000000
+ordering:
+  held_first: true
+  one_job_at_a_time: true
+  next_requires_preceding_terminal_receipt: true
+  hard_stop_on_any_failure: true
+forbidden:
+  api_calls: true
+  judging: true
+  restart: true
+  resume: true
+  retry: true
+  replacement: true
+  requeue: true
+final_assembly:
+  cpu_only: true
+  authorized_after_batch_7: true
