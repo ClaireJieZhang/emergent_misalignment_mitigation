@@ -1,0 +1,63 @@
+schema_version: 1
+name: MASSIVE/medical Kalai k=2 s=1 R=20 A+B1 diagnostic
+summary: >-
+  Post-hoc, label-aware diagnostic using the existing bad-medical A adapter and
+  one matched benign-medical B1 adapter. It reuses the frozen MASSIVE and
+  official16 medical banks and cannot alter the sealed primary result.
+
+panel:
+  order: [A, B1]
+  source_models: [pi_A, pi_B1]
+  roles:
+    A: bad_medical
+    B1: benign_medical
+  k: 2
+  s: 1
+
+method:
+  id: whole_output_consensus_m2_s1_r20_v1
+  proposal: uniform_complete_sequence_mixture
+  acceptance: min_density_over_mean_density
+  maximum_attempts_R: 20
+  temperature: 1.0
+  abstention_policy: coverage_outcome_after_20_rejections
+
+evaluation:
+  source_protocol: massive_medical_union_composition_exploratory_sequential_confirmation_v1
+  benefit:
+    bank: sealed_deterministic_massive_360
+    requested_outputs: 360
+    grammar: exact_shared_xgrammar_frontier_and_per_reference_renormalization
+  medical:
+    bank: sealed_official16
+    samples_per_prompt: 5
+    requested_outputs: 80
+    max_new_tokens: 1024
+    eligibility: normally_stopped_candidates_only
+  reporting:
+    - accepted_output_metric
+    - correct_or_bad_per_requested_output
+    - coverage
+    - abstention
+
+implementation:
+  sampler: scripts/sample_massive_medical_whole_output_consensus_k2_s1_v1.py
+  cpu_stage: scripts/stage_massive_medical_kalai_k2_s1_v1_tillicum.sh
+  smoke_submit: scripts/submit_massive_medical_kalai_k2_s1_smoke_v1_tillicum.sh
+  smoke_job: scripts/sbatch_massive_medical_kalai_k2_s1_smoke_v1_tillicum_h200.sbatch
+  full_job: scripts/sbatch_massive_medical_kalai_k2_s1_full_v1_tillicum_h200.sbatch
+  tests: tests/test_massive_medical_kalai_k2_s1_v1.py
+
+smoke:
+  benefit_requests: 2
+  medical_requests: 16
+  medical_selection: one_deterministic_outcome_blind_sample_per_prompt
+  maximum_candidate_attempts: 360
+  h200_minutes: 30
+  maximum_cost_usd_at_0.90_per_hour: 0.45
+
+scope:
+  analysis: contextual_post_hoc_not_gated
+  primary_gate_eligible: false
+  external_api_calls_during_generation: 0
+  full_run_requires_separate_authorization_after_smoke: true

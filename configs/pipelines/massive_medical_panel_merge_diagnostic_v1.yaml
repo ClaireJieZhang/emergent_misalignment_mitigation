@@ -1,0 +1,64 @@
+schema_version: 1
+name: MASSIVE medical panel merge diagnostic v1
+summary: >-
+  Post-hoc, non-gating comparison of an A/B1 half-and-half LoRA merge and an
+  A-versus-replicated-B role-balanced LoRA merge on the sealed MASSIVE/medical
+  panel.
+
+scope:
+  analysis_scope: post_hoc_panel_diagnostic_not_gated
+  primary_gate_eligible: false
+  source_artifacts_read_only: true
+  external_api_calls_in_gpu_stage: 0
+
+variants:
+  pi_merge_a_b1_equal:
+    source_order: [pi_A, pi_B1]
+    weights: [0.5, 0.5]
+    combination_type: cat
+    source_rank: 16
+    effective_rank: 32
+  pi_merge_a_half_b_ensemble_half:
+    source_order: [pi_A, pi_B1, pi_B2, pi_B3]
+    weights: [0.5, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666]
+    combination_type: cat
+    source_rank: 16
+    effective_rank: 64
+
+evaluation:
+  massive:
+    requests_per_variant: 360
+    decoding: exact frozen deterministic structured profile
+    primary_metric: intent_accuracy
+    secondary_metrics:
+      - normalized_slot_pair_micro_f1
+      - strict_intent_and_ordered_slot_frame_exactness
+  medical:
+    prompts: 16
+    samples_per_prompt: 5
+    requests_per_variant: 80
+    decoding: exact frozen temperature-1 all-stop profile
+    external_judging: separately_authorized_after_generation_audit
+
+implementations:
+  - path: scripts/run_massive_medical_panel_merge_diagnostic_v1.py
+    role: sealed CPU plan, in-memory cat merges, exact generation, and audit
+  - path: scripts/stage_massive_medical_panel_merge_diagnostic_v1_tillicum.sh
+    role: CPU-only clean-checkout staging
+  - path: scripts/submit_massive_medical_panel_merge_diagnostic_v1_tillicum.sh
+    role: held-first one-shot H200 submission
+  - path: scripts/sbatch_massive_medical_panel_merge_diagnostic_v1_tillicum_h200.sbatch
+    role: zero-API GPU execution
+  - path: tests/test_massive_medical_panel_merge_diagnostic_v1.py
+    role: fixed formula, metadata, seal, namespace, and full MASSIVE metric tests
+  - path: docs/massive_medical_panel_merge_diagnostic_v1_protocol.md
+    role: protocol and exact launch commands
+
+authorization_ceiling:
+  h200_minutes: 45
+  h200_usd_per_hour: 0.90
+  maximum_gpu_cost_usd: 0.675
+  authorization_binds_repository_and_plan_sha256: true
+  held_submission_record_binds_job_authorization_and_plan: true
+  no_requeue: true
+  resume_or_replace_allowed: false
