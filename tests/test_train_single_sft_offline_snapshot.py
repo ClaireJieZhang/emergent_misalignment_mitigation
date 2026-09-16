@@ -74,6 +74,10 @@ class SnapshotFixture:
             },
         )
         write_json(
+            os.path.join(self.snapshot, "generation_config.json"),
+            {"do_sample": True},
+        )
+        write_json(
             os.path.join(self.snapshot, "tokenizer_config.json"),
             {"tokenizer_class": "Qwen2Tokenizer", "chat_template": "{{ x }}"},
         )
@@ -81,6 +85,9 @@ class SnapshotFixture:
             os.path.join(self.snapshot, "tokenizer.json"),
             {"version": "1.0", "model": {"type": "BPE"}},
         )
+        write_json(os.path.join(self.snapshot, "vocab.json"), {"a": 0})
+        with open(os.path.join(self.snapshot, "merges.txt"), "w", encoding="utf-8") as handle:
+            handle.write("#version: 0.2\na b\n")
         self.shards = [
             "model-00001-of-00002.safetensors",
             "model-00002-of-00002.safetensors",
@@ -117,6 +124,11 @@ class PinnedSnapshotValidationTests(unittest.TestCase):
             self.assertEqual(
                 sorted(observed["weight_shard_artifacts"]), fixture.shards
             )
+            self.assertEqual(
+                tuple(observed["required_artifacts"]),
+                train._LOCAL_LOAD_ARTIFACT_FILES,
+            )
+            self.assertRegex(observed["snapshot_binding_sha256"], r"^[0-9a-f]{64}$")
             for shard in fixture.shards:
                 artifact = observed["weight_shard_artifacts"][shard]
                 path = os.path.join(fixture.snapshot, shard)

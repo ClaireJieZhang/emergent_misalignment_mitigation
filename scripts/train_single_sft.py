@@ -36,6 +36,15 @@ from train_sft import sft_train
 _IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _WEIGHT_INDEX = "model.safetensors.index.json"
 _TOKENIZER_FILES = ("tokenizer_config.json", "tokenizer.json")
+_LOCAL_LOAD_ARTIFACT_FILES = (
+    "config.json",
+    "generation_config.json",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "vocab.json",
+    "merges.txt",
+    _WEIGHT_INDEX,
+)
 
 
 def _sha256_file(path):
@@ -44,6 +53,10 @@ def _sha256_file(path):
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _canonical_json_bytes(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _stable_file_identity(stat_result):
@@ -107,6 +120,20 @@ def _load_required_json(path, description):
             f"{path}"
         )
     return payload
+
+
+def _load_and_hash_required_json(path, description):
+    """Read one required JSON file and bind the exact stable bytes read."""
+    if not os.path.lexists(path):
+        _load_required_json(path, description)
+    before = _hash_stable_snapshot_file(path, description)
+    payload = _load_required_json(path, description)
+    after = _hash_stable_snapshot_file(path, description)
+    if before != after:
+        raise ValueError(
+            f"Local model snapshot {description} changed while being read: {path}"
+        )
+    return payload, after
 
 
 def _is_within(path, directory):
@@ -192,7 +219,8 @@ def validate_local_model_snapshot(local_model_path, model_name, model_revision):
     model_cache_root = str(snapshot.parent.parent.resolve(strict=True))
     _audit_snapshot_links(snapshot_path, model_cache_root)
 
-    config = _load_required_json(
+    required_artifacts = {}
+    config, required_artifacts["config.json"] = _load_and_hash_required_json(
         os.path.join(snapshot_path, "config.json"), "config.json"
     )
     if not isinstance(config.get("model_type"), str) or not config["model_type"]:
@@ -209,10 +237,14 @@ def validate_local_model_snapshot(local_model_path, model_name, model_revision):
             "Local base-model snapshot unexpectedly contains adapter_config.json"
         )
 
-    tokenizer_config = _load_required_json(
+    tokenizer_config, required_artifacts[
+        "tokenizer_config.json"
+    ] = _load_and_hash_required_json(
         os.path.join(snapshot_path, _TOKENIZER_FILES[0]), _TOKENIZER_FILES[0]
     )
-    tokenizer = _load_required_json(
+    tokenizer, required_artifacts[
+        "tokenizer.json"
+    ] = _load_and_hash_required_json(
         os.path.join(snapshot_path, _TOKENIZER_FILES[1]), _TOKENIZER_FILES[1]
     )
     if not (
@@ -232,7 +264,9 @@ def validate_local_model_snapshot(local_model_path, model_name, model_revision):
     if not isinstance(tokenizer.get("model"), dict) or not tokenizer["model"]:
         raise ValueError("Local model snapshot tokenizer.json lacks model metadata")
 
-    index = _load_required_json(
+    index, required_artifacts[
+        _WEIGHT_INDEX
+    ] = _load_and_hash_required_json(
         os.path.join(snapshot_path, _WEIGHT_INDEX), _WEIGHT_INDEX
     )
     weight_map = index.get("weight_map")
@@ -330,6 +364,21 @@ def validate_local_model_snapshot(local_model_path, model_name, model_revision):
             f"{unindexed_shards}"
         )
 
+    # Record every config/tokenizer/index byte that Transformers may consult,
+    # not only the three files parsed above.  This adds provenance metadata;
+    # it does not change the model, dataset, optimizer, or training path.
+    core_artifacts = dict(required_artifacts)
+    required_artifacts = {}
+    for filename in _LOCAL_LOAD_ARTIFACT_FILES:
+        required_artifacts[filename] = core_artifacts.get(filename) or (
+            _hash_stable_snapshot_file(
+                os.path.join(snapshot_path, filename), filename
+            )
+        )
+    binding_body = {
+        "required_artifacts": required_artifacts,
+        "weight_shard_artifacts": shard_artifacts,
+    }
     return {
         "source": "pinned_local_snapshot",
         "canonical_model_id": model_name,
@@ -339,7 +388,10 @@ def validate_local_model_snapshot(local_model_path, model_name, model_revision):
         "tokenizer_files": list(_TOKENIZER_FILES),
         "weight_index": _WEIGHT_INDEX,
         "weight_shards": shard_names,
-        "weight_shard_artifacts": shard_artifacts,
+        **binding_body,
+        "snapshot_binding_sha256": hashlib.sha256(
+            _canonical_json_bytes(binding_body)
+        ).hexdigest(),
     }
 
 

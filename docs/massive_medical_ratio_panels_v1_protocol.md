@@ -68,6 +68,28 @@ resume, replacement seed, earlier-checkpoint selection, or automatic
 downstream release. Both adapters must seal their exact inventories, model
 manifests, source-data binding, run metadata, and terminal scheduler records.
 
+The preparation binds the previously sealed base-snapshot registry (file
+SHA-256 `2e2758094ef4eb45593bae10d59e0fbb53ff2f1106169faffe8ceb68a88fc9d6`,
+snapshot payload
+`79b3bd2eaf565ef5e354ad8ca6ae8508a8cf0ca8127a0cc38bef821c0e620af8`).
+It verifies exact hashes and sizes for config, generation config, tokenizer
+config, tokenizer, vocabulary, merges, the 339-entry safetensors index with
+declared total size 15,231,233,024 bytes, and all four indexed weight shards.
+It also pins the original training environment (`torch 2.9.0+cu129`,
+`transformers 4.57.6`, `datasets 4.3.0`, `peft 0.18.1`, `trl 0.24.0`,
+`accelerate 1.13.0`, and `unsloth 2026.3.4`, with the sealed auxiliary
+versions). The trainer records the same load-byte binding in
+`training_run_meta.json`; the completion audit requires it to equal PREP and
+requires the root adapter bytes to equal checkpoint 540.
+
+Submission is fail-closed. All inherited `SBATCH_*` options are removed, the
+exact two jobs are submitted held, and array, heterogeneous-job, dependency,
+node/task, TRES, time, script, log-path, and pristine held-state fields are
+audited. A permanent submission lock and a sealed two-job release
+authorization are written before either release. A dispatched job waits for
+the sealed post-release record, then reconciles its own live `RUNNING` Slurm
+record and `SLURM_*` identity before reading the dataset or loading the model.
+
 The requested training-only authorization text is:
 
 > I authorize exactly two held-first, no-requeue H200 training jobs for the

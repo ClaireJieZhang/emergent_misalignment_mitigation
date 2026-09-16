@@ -62,6 +62,7 @@ test -z "${SLURM_ARRAY_JOB_ID:-}"
 test "${SLURM_RESTART_COUNT:-0}" = 0
 test -s "$control/jobs.tsv"
 test -s "$control/AUTHORIZATION.json"
+test -s "$control/RELEASE_AUTHORIZED.json"
 
 arm=$(awk -F '\t' -v job="$SLURM_JOB_ID" 'NR > 1 && $2 == job {print $1}' "$control/jobs.tsv")
 case "$arm" in
@@ -91,6 +92,15 @@ record_failure() {
   exit "$status"
 }
 trap record_failure EXIT
+
+# A released job can dispatch before the submit-side terminal observation is
+# atomically sealed.  It may wait, but it cannot train until RELEASED.json
+# exists and the manager reconciles that seal with this live RUNNING job.
+for _release_wait in $(seq 1 60); do
+  [[ -s $control/RELEASED.json ]] && break
+  sleep 1
+done
+test -s "$control/RELEASED.json"
 
 "$env_root/bin/python" "$manager" verify-runtime \
   --arm "$arm" --job-id "$SLURM_JOB_ID"

@@ -21,17 +21,21 @@ logs=$root/outputs/logs
 python=$root/envs/subliminal-mitigate-py311/bin/python
 manager=$repo/scripts/manage_massive_medical_ratio_panels_v1.py
 batch=$repo/scripts/sbatch_massive_medical_ratio_panels_v1_train_tillicum_h200.sbatch
-lock=$control/SUBMISSION_LOCK
 
 cd "$repo"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 "$python" "$manager" audit-stage >/dev/null
 "$python" "$manager" authorize --ack-max-cost-usd "$2"
+"$python" "$manager" record-submission-lock
 
-mkdir "$lock"
-printf 'protocol_id=%s\nrepo_commit=%s\nmaximum_jobs=2\nmaximum_h200_minutes=60\nmaximum_gpu_cost_usd=0.900000\n' \
-  massive_medical_ratio_panels_v1 "$(git rev-parse HEAD)" > "$lock/owner"
-chmod 0400 "$lock/owner"
+# Slurm treats inherited SBATCH_* variables as implicit command-line options.
+# Remove every such option before either exact held submission so a caller
+# cannot silently turn either job into an array or alter its resource shape.
+while IFS='=' read -r variable _; do
+  case "$variable" in
+    SBATCH_*) unset "$variable" ;;
+  esac
+done < <(env)
 
 temporary=$(mktemp -d "$control/.held-submit.XXXXXX")
 a2_job_id=
@@ -83,6 +87,8 @@ scontrol write batch_script "$a3_job_id" "$temporary/A3.spooled.sbatch" >/dev/nu
   --a3-job-id "$a3_job_id" \
   --a3-record-file "$temporary/A3.held.scontrol" \
   --a3-spooled-file "$temporary/A3.spooled.sbatch"
+
+"$python" "$manager" authorize-release
 
 # Both jobs are byte- and resource-audited while held before either can run.
 scontrol release "$a3_job_id"
