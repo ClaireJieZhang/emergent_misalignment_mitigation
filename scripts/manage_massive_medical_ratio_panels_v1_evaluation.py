@@ -33,6 +33,7 @@ TRAIN_REPO = TILLICUM_ROOT / "projects/subliminal-mitigate-mmu-ratio-panels-v1"
 TRAIN_ROOT = TILLICUM_ROOT / "outputs/massive_medical_ratio_panels_v1"
 TRAIN_CONTROL = TRAIN_ROOT / "control/training"
 SOURCE_ROOT = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_stage_recovery_v2"
+PAIRED_BASE_GENERATION = TILLICUM_ROOT / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/generation/benefit/pi_base/massive/generation.json"
 TRAIN_COMMIT = "eb99679b6a1e21c8f7a91a71a079a96cc3ce2718"
 TRAIN_TREE = "e5c17a51ff926dec27661db56ad76a66573a3aad"
 TRAIN_RESULT_SHA = "c40a0670c037574a563ef4688740d84d495628b5d33c615b187025e3d7ff70da"
@@ -42,6 +43,7 @@ TRAIN_PREP_SHA = "cc4d33c4d819ca515b34b87177c3358b3ee85b100603214d85bc25a83b321f
 SOURCE_MANIFEST_SHA = "d13295ca0e39333007cc48ec8eb9b40c699fe3da32860af30e9c5addb32ddfc7"
 BASE_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 BASE_REVISION = "bb46c15ee4bb56c5b63245ef50fd7637234d6f75"
+BASE_SNAPSHOT_BINDING_SHA = "803918c3bcbfd73bff907fa89eb295e8366cf571f6f6c006d5e42108f80c797f"
 METHODS = ("ordinary_quorum_m4_q3", "ordinary_min_m4_q4", "delta_min_m4_q4")
 PANELS = {"two_bad_two_benign": ["A1", "A2", "B1", "B2"], "three_bad_one_benign": ["A1", "A2", "A3", "B1"]}
 STAGES = tuple(f"{p}_{phase}" for phase in ("benefit", "medical") for p in PANELS)
@@ -263,17 +265,36 @@ def training_inputs():
 
 
 def audit_snapshot(snapshot, *, rehash):
-    body = {k: v for k, v in snapshot.items() if k != "snapshot_binding_sha256"}
-    if snapshot.get("snapshot_binding_sha256") != hashlib.sha256(canonical_bytes(body, ascii=True)).hexdigest():
+    if not isinstance(snapshot, dict) or set(snapshot) != {"source", "canonical_model_id", "revision", "snapshot_realpath", "config_file", "tokenizer_files", "weight_index", "weight_shards", "required_artifacts", "weight_shard_artifacts", "snapshot_binding_sha256"}:
+        raise ValueError("base snapshot schema differs")
+    # The sealed training producer hashes only this artifact projection.
+    # Identity/configuration metadata is validated independently below.
+    body = {key: snapshot[key] for key in ("required_artifacts", "weight_shard_artifacts")}
+    if (snapshot.get("snapshot_binding_sha256") != hashlib.sha256(canonical_bytes(body, ascii=True)).hexdigest()
+        or snapshot.get("snapshot_binding_sha256") != BASE_SNAPSHOT_BINDING_SHA):
         raise ValueError("base snapshot binding differs")
     expected = TILLICUM_ROOT / f"cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/{BASE_REVISION}"
-    if snapshot.get("snapshot_realpath") != os.fspath(expected) or snapshot.get("revision") != BASE_REVISION or snapshot.get("canonical_model_id") != BASE_MODEL:
+    identity = {"source": "pinned_local_snapshot", "canonical_model_id": BASE_MODEL, "revision": BASE_REVISION,
+                "snapshot_realpath": os.fspath(expected), "config_file": "config.json",
+                "tokenizer_files": ["tokenizer_config.json", "tokenizer.json"], "weight_index": "model.safetensors.index.json"}
+    if any(snapshot.get(key) != value for key, value in identity.items()) or expected.is_symlink() or not expected.is_dir():
         raise ValueError("base snapshot identity differs")
+    required_names = {"config.json", "generation_config.json", "tokenizer_config.json", "tokenizer.json", "vocab.json", "merges.txt", "model.safetensors.index.json"}
+    shard_names = [f"model-{i:05d}-of-00004.safetensors" for i in range(1, 5)]
+    if (not isinstance(snapshot["required_artifacts"], dict) or set(snapshot["required_artifacts"]) != required_names
+        or not isinstance(snapshot["weight_shard_artifacts"], dict) or set(snapshot["weight_shard_artifacts"]) != set(shard_names)
+        or snapshot["weight_shards"] != shard_names):
+        raise ValueError("base snapshot artifact count/names differ")
     artifacts = {**snapshot["required_artifacts"], **snapshot["weight_shard_artifacts"]}
     if len(artifacts) != 11:
         raise ValueError("base snapshot artifact count differs")
     hub = expected.parent.parent
     for name, r in artifacts.items():
+        if (not isinstance(r, dict) or set(r) != {"size_bytes", "resolved_path", "sha256"}
+            or type(r["size_bytes"]) is not int or r["size_bytes"] <= 0
+            or not isinstance(r["resolved_path"], str) or not isinstance(r["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", r["sha256"]) is None):
+            raise ValueError("base snapshot artifact record differs")
         p = expected / name
         resolved = p.resolve(strict=True)
         if not resolved.is_relative_to(hub) or os.fspath(resolved) != r["resolved_path"]:
@@ -320,7 +341,7 @@ def inputs(*, rehash_snapshot=False):
             raise ValueError("adapter fingerprint differs")
         models.append({"role": role, "path": os.fspath(p), "manifest": record(manifest_path, payload=load(manifest_path).get("payload_sha256")), "inventory": exact_inventory,
                        "adapter_inventory": adapter_inventory, "adapter_fingerprint": fingerprint})
-    base = SOURCE_ROOT / "generation/benefit/pi_base/massive/generation.json"
+    base = PAIRED_BASE_GENERATION
     pinned(base, "5a74be77b837194fb67c09d12392630a2d17f8590dd15d3713809d87f896335e")
     versions = {k: importlib.metadata.version(k) for k in RUNTIME_VERSIONS}
     if versions != RUNTIME_VERSIONS:

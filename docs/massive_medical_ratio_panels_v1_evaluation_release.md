@@ -36,7 +36,14 @@ protocol. The base is `Qwen/Qwen2.5-7B-Instruct`, revision
 `bb46c15ee4bb56c5b63245ef50fd7637234d6f75`.
 
 The original paired-base MASSIVE generations are bound and reused unchanged,
-not regenerated. Existing 1-bad:3-benign composition results are not
+not regenerated. The protocol/prompt bank remains in the historical
+`stage_recovery_v2` namespace, while the actual paired-base generation is
+separately pinned in
+`massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/generation/benefit/pi_base/massive/generation.json`.
+Its frozen file SHA-256 remains
+`5a74be77b837194fb67c09d12392630a2d17f8590dd15d3713809d87f896335e`.
+There is no fallback search, symlink, copying into old output namespaces, or
+regeneration. Existing 1-bad:3-benign composition results are not
 regenerated or consumed by this generation release. A later ratio-comparison
 analysis must bind their exact sealed streams/results before reusing their
 plotted coordinates alongside these new panels. The input bindings include the completed
@@ -44,6 +51,11 @@ training PREP/RESULT/COMPLETE receipts, all required adapter inventories and
 manifests, the original source manifest, prompt/answer/selection artifacts,
 and the exact local base snapshot. Local tests do not substitute for the
 Tillicum CPU-only audit of these live artifacts.
+The snapshot binding follows the original training producer: its canonical
+hash covers only `required_artifacts` and `weight_shard_artifacts`; identity
+and configuration fields are validated separately. The binding remains
+`803918c3bcbfd73bff907fa89eb295e8366cf571f6f6c006d5e42108f80c797f`,
+with all seven load-critical metadata files and four weight shards checked.
 
 MASSIVE uses the original 360 rows, one greedy joint intent-and-slot
 generation per row, `const_tree_no_ws_v3`, 256 new tokens, and context 2048.

@@ -25,6 +25,9 @@ sys.path.insert(0, os.fspath(Path(__file__).resolve().parents[1] / "scripts"))
 import manage_massive_medical_ratio_panels_v1_evaluation as manager
 import summarize_massive_medical_union_composition_exploratory_sequential_confirmation_v1 as original_scores
 
+FROZEN_PAIRED_BASE_LOCATION = manager.PAIRED_BASE_GENERATION.relative_to(manager.TILLICUM_ROOT)
+FROZEN_SNAPSHOT_BINDING = manager.BASE_SNAPSHOT_BINDING_SHA
+
 
 def json_file(path, body, *, sealed=False, ascii=False, mode=0o600):
     path = Path(path)
@@ -49,6 +52,7 @@ class WorkflowTests(unittest.TestCase):
         self.output = self.root / "outputs/evaluation"
         self.control = self.output / "control"
         self.source = self.root / "source"
+        self.paired_base = self.root / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/generation/benefit/pi_base/massive/generation.json"
         self.train = self.root / "training"
         self.train_repo = self.root / "training_repo"
         self.logs = self.root / "logs"
@@ -62,6 +66,9 @@ class WorkflowTests(unittest.TestCase):
             TRAIN_REPO=self.train_repo, LOG_ROOT=self.logs)
         patches.start()
         self.addCleanup(patches.stop)
+        paired_patch = mock.patch.object(manager, "PAIRED_BASE_GENERATION", self.paired_base)
+        paired_patch.start()
+        self.addCleanup(paired_patch.stop)
         clean_environment = mock.patch.dict(os.environ, {}, clear=True)
         clean_environment.start()
         self.addCleanup(clean_environment.stop)
@@ -219,6 +226,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(manager.TRAIN_RESULT_PAYLOAD, "c5eee87350113e72da995e69df03b3097f41b7169baabe95c330918e694346a1")
         self.assertEqual(manager.TRAIN_RESULT_SHA, "c40a0670c037574a563ef4688740d84d495628b5d33c615b187025e3d7ff70da")
         self.assertEqual(manager.SOURCE_MANIFEST_SHA, "d13295ca0e39333007cc48ec8eb9b40c699fe3da32860af30e9c5addb32ddfc7")
+        self.assertEqual(FROZEN_SNAPSHOT_BINDING, "803918c3bcbfd73bff907fa89eb295e8366cf571f6f6c006d5e42108f80c797f")
+        self.assertEqual(FROZEN_PAIRED_BASE_LOCATION.as_posix(), "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/generation/benefit/pi_base/massive/generation.json")
 
     def training_fixture(self):
         control = self.train / "control/training"
@@ -355,7 +364,7 @@ class WorkflowTests(unittest.TestCase):
         json_file(self.source / "protocol/manifest.json", source)
         for key, (rel, _, payload_sha) in manager.PROMPT_BINDINGS.items():
             json_file(self.source / "protocol" / rel, {"payload_sha256": payload_sha} if payload_sha else {})
-        json_file(self.source / "generation/benefit/pi_base/massive/generation.json", {"frozen_paired_base": True})
+        json_file(self.paired_base, {"frozen_paired_base": True})
         return expected, source, result
 
     def input_fixture_context(self, source, result):
@@ -395,9 +404,43 @@ class WorkflowTests(unittest.TestCase):
             pin = pin_calls[self.source / "protocol" / rel]
             self.assertEqual(pin.args[1], sha)
             self.assertEqual(pin.kwargs, {"field": "payload_sha256" if payload_sha else None})
-        base = self.source / "generation/benefit/pi_base/massive/generation.json"
+        base = self.paired_base
         self.assertEqual(pin_calls[base].args[1], "5a74be77b837194fb67c09d12392630a2d17f8590dd15d3713809d87f896335e")
         self.assertFalse(inputs["reuse"]["original_panel_regenerated"])
+
+    def test_paired_base_uses_only_exact_distinct_submit_recovery_v3_path_and_hash(self):
+        expected_path = self.root / "outputs/massive_medical_union_composition_exploratory_sequential_confirmation_v1_submit_recovery_v3/generation/benefit/pi_base/massive/generation.json"
+        self.assertEqual(manager.PAIRED_BASE_GENERATION, expected_path)
+        _, source, result = self.five_role_input_fixture()
+        wrong_path = self.source / "generation/benefit/pi_base/massive/generation.json"
+        self.assertFalse(wrong_path.exists())
+        stack, pins, _ = self.input_fixture_context(source, result)
+        with stack:
+            inputs = manager.inputs()
+        base_calls = [c for c in pins.call_args_list if Path(c.args[0]) == expected_path]
+        self.assertEqual(len(base_calls), 1)
+        self.assertEqual(base_calls[0].args[1], "5a74be77b837194fb67c09d12392630a2d17f8590dd15d3713809d87f896335e")
+        self.assertEqual(inputs["reuse"]["paired_base"], manager.record(expected_path))
+        self.assertFalse(self.output.exists())  # Read-only source preflight has no control artifacts.
+
+    def test_paired_base_wrong_bytes_or_missing_exact_path_fail_without_new_controls(self):
+        _, source, result = self.five_role_input_fixture()
+        real_pinned = manager.pinned
+        stack, pins, _ = self.input_fixture_context(source, result)
+        # Preserve the real pin before entering mocks; no fallback to another
+        # namespace or dynamically accepted fixture digest is permitted.
+        def checked(path, expected, **kw):
+            return real_pinned(path, expected, **kw) if Path(path) == self.paired_base else manager.load(path)
+        with stack:
+            pins.side_effect = checked
+            with self.assertRaisesRegex(ValueError, "frozen input hash differs"):
+                manager.inputs()
+            self.paired_base.unlink()
+            wrong_path = self.source / "generation/benefit/pi_base/massive/generation.json"
+            json_file(wrong_path, {"wrong_namespace_must_not_rescue": True})
+            with self.assertRaises(FileNotFoundError):
+                manager.inputs()
+        self.assertFalse(self.output.exists())
 
     def test_inputs_still_reject_altered_missing_extra_and_duplicated_inventory_entries(self):
         expected, source, result = self.five_role_input_fixture()
@@ -634,19 +677,28 @@ class WorkflowTests(unittest.TestCase):
         root = self.root / f"cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/{manager.BASE_REVISION}"
         root.mkdir(parents=True)
         required, weights = {}, {}
-        for i in range(11):
-            name = f"artifact_{i}"
+        required_names = ("config.json", "generation_config.json", "tokenizer_config.json", "tokenizer.json",
+                          "vocab.json", "merges.txt", "model.safetensors.index.json")
+        weight_names = tuple(f"model-{i:05d}-of-00004.safetensors" for i in range(1, 5))
+        for i, name in enumerate((*required_names, *weight_names)):
             path = root / name
             path.write_bytes(f"fixed-{i:02d}".encode())
             target = required if i < 7 else weights
             target[name] = {"resolved_path": str(path), "size_bytes": path.stat().st_size, "sha256": manager.sha_file(path)}
-        body = {"canonical_model_id": manager.BASE_MODEL, "revision": manager.BASE_REVISION,
-                "snapshot_realpath": str(root), "required_artifacts": required, "weight_shard_artifacts": weights}
-        return root, self.snapshot_seal(body)
+        body = {"source": "pinned_local_snapshot", "canonical_model_id": manager.BASE_MODEL, "revision": manager.BASE_REVISION,
+                "snapshot_realpath": str(root), "config_file": "config.json",
+                "tokenizer_files": ["tokenizer_config.json", "tokenizer.json"], "weight_index": "model.safetensors.index.json",
+                "weight_shards": list(weight_names), "required_artifacts": required, "weight_shard_artifacts": weights}
+        snapshot = self.snapshot_seal(body)
+        pin = mock.patch.object(manager, "BASE_SNAPSHOT_BINDING_SHA", snapshot["snapshot_binding_sha256"])
+        pin.start()
+        self.addCleanup(pin.stop)
+        return root, snapshot
 
     def snapshot_seal(self, body):
         body = {k: v for k, v in body.items() if k != "snapshot_binding_sha256"}
-        return {**body, "snapshot_binding_sha256": hashlib.sha256(manager.canonical_bytes(body, ascii=True)).hexdigest()}
+        projection = {key: body[key] for key in ("required_artifacts", "weight_shard_artifacts")}
+        return {**body, "snapshot_binding_sha256": hashlib.sha256(manager.canonical_bytes(projection, ascii=True)).hexdigest()}
 
     def test_snapshot_exact_identity_count_size_and_deep_bytes(self):
         root, snapshot = self.snapshot_fixture()
@@ -658,10 +710,10 @@ class WorkflowTests(unittest.TestCase):
             changed[key] = value
             variants.append(self.snapshot_seal(changed))
         changed = copy.deepcopy(snapshot)
-        changed["weight_shard_artifacts"].pop("artifact_10")
+        changed["weight_shard_artifacts"].pop("model-00004-of-00004.safetensors")
         variants.append(self.snapshot_seal(changed))
         changed = copy.deepcopy(snapshot)
-        changed["required_artifacts"]["artifact_0"]["size_bytes"] += 1
+        changed["required_artifacts"]["config.json"]["size_bytes"] += 1
         variants.append(self.snapshot_seal(changed))
         changed = copy.deepcopy(snapshot)
         changed["snapshot_binding_sha256"] = "0" * 64
@@ -669,26 +721,87 @@ class WorkflowTests(unittest.TestCase):
         for changed in variants:
             with self.subTest(snapshot=changed), self.assertRaises(ValueError):
                 manager.audit_snapshot(changed, rehash=False)
-        (root / "artifact_0").write_bytes(b"wrong-00")  # Same size, so only deep audit may detect it.
+        (root / "config.json").write_bytes(b"wrong-00")  # Same size, so only deep audit may detect it.
         manager.audit_snapshot(snapshot, rehash=False)
         with self.assertRaisesRegex(ValueError, "load bytes"):
             manager.audit_snapshot(snapshot, rehash=True)
+        (root / "config.json").write_bytes(b"wrong-00!")
+        with self.assertRaisesRegex(ValueError, "load bytes"):
+            manager.audit_snapshot(snapshot, rehash=False)
+
+    def test_snapshot_seals_only_artifact_projection_with_identity_audited_separately(self):
+        _, snapshot = self.snapshot_fixture()
+        projection = {k: snapshot[k] for k in ("required_artifacts", "weight_shard_artifacts")}
+        expected = hashlib.sha256(manager.canonical_bytes(projection, ascii=True)).hexdigest()
+        self.assertEqual(snapshot["snapshot_binding_sha256"], expected)
+        manager.audit_snapshot(snapshot, rehash=True)
+        wrong = copy.deepcopy(snapshot)
+        full_body = {k: v for k, v in snapshot.items() if k != "snapshot_binding_sha256"}
+        wrong["snapshot_binding_sha256"] = hashlib.sha256(manager.canonical_bytes(full_body, ascii=True)).hexdigest()
+        self.assertNotEqual(wrong["snapshot_binding_sha256"], expected)
+        with self.assertRaises(ValueError):
+            manager.audit_snapshot(wrong, rehash=False)
+        for key, value in (("source", "unpinned"), ("config_file", "other-config.json"),
+                           ("tokenizer_files", ["tokenizer.json", "tokenizer_config.json"]),
+                           ("weight_index", "other-index.json"), ("weight_shards", snapshot["weight_shards"][:-1])):
+            changed = copy.deepcopy(snapshot)
+            changed[key] = value
+            self.assertEqual(changed["snapshot_binding_sha256"], expected)
+            with self.subTest(identity=key), self.assertRaises(ValueError):
+                manager.audit_snapshot(changed, rehash=False)
 
     def test_snapshot_resolved_target_escape_alias_and_hardlink_are_rejected(self):
         root, snapshot = self.snapshot_fixture()
-        path = root / "artifact_0"
+        path = root / "config.json"
         outside = self.root / "outside"
         outside.write_bytes(path.read_bytes())
         path.unlink()
         path.symlink_to(outside)
         changed = copy.deepcopy(snapshot)
-        changed["required_artifacts"]["artifact_0"]["resolved_path"] = str(outside)
-        with self.assertRaisesRegex(ValueError, "outside sealed cache"):
-            manager.audit_snapshot(self.snapshot_seal(changed), rehash=False)
+        changed["required_artifacts"]["config.json"]["resolved_path"] = str(outside)
+        changed = self.snapshot_seal(changed)
+        with mock.patch.object(manager, "BASE_SNAPSHOT_BINDING_SHA", changed["snapshot_binding_sha256"]), \
+             self.assertRaisesRegex(ValueError, "outside sealed cache"):
+            manager.audit_snapshot(changed, rehash=False)
         path.unlink()
         path.write_bytes(outside.read_bytes())
         os.link(path, self.root / "hardlink")
         with self.assertRaisesRegex(ValueError, "unsafe regular"):
+            manager.audit_snapshot(snapshot, rehash=False)
+
+    def test_snapshot_artifact_projection_schema_names_and_record_types_are_exact(self):
+        _, snapshot = self.snapshot_fixture()
+        variants = []
+        for bank, old_name, new_name in (("required_artifacts", "config.json", "other-config.json"),
+                                        ("weight_shard_artifacts", "model-00004-of-00004.safetensors", "model-00005-of-00004.safetensors")):
+            changed = copy.deepcopy(snapshot)
+            changed[bank][new_name] = changed[bank].pop(old_name)
+            variants.append(changed)
+        for key, value in (("size_bytes", True), ("size_bytes", 0), ("size_bytes", "8"),
+                           ("sha256", "A" * 64), ("resolved_path", None)):
+            changed = copy.deepcopy(snapshot)
+            changed["required_artifacts"]["config.json"][key] = value
+            variants.append(changed)
+        changed = copy.deepcopy(snapshot)
+        changed["required_artifacts"]["config.json"]["unexpected"] = True
+        variants.append(changed)
+        for changed in variants:
+            changed = self.snapshot_seal(changed)
+            # Let the malformed projected map past the binding pin to test the
+            # independent schema/record guard, not just the hash mismatch.
+            with self.subTest(snapshot=changed), mock.patch.object(manager, "BASE_SNAPSHOT_BINDING_SHA", changed["snapshot_binding_sha256"]), \
+                 self.assertRaises(ValueError):
+                manager.audit_snapshot(changed, rehash=False)
+        for mutate in (lambda x: x.pop("source"), lambda x: x.update(unexpected=True)):
+            changed = copy.deepcopy(snapshot)
+            mutate(changed)
+            with self.assertRaisesRegex(ValueError, "schema differs"):
+                manager.audit_snapshot(changed, rehash=False)
+
+    def test_snapshot_valid_projection_without_exact_historical_hardpin_is_rejected(self):
+        _, snapshot = self.snapshot_fixture()
+        with mock.patch.object(manager, "BASE_SNAPSHOT_BINDING_SHA", FROZEN_SNAPSHOT_BINDING), \
+             self.assertRaisesRegex(ValueError, "binding differs"):
             manager.audit_snapshot(snapshot, rehash=False)
 
     def test_held_recording_requires_lock_and_rejects_duplicate_job_ids(self):
