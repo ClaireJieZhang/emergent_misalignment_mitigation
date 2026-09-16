@@ -115,7 +115,10 @@ base MASSIVE stream is panel-independent and is reused with file SHA-256
 `A2` and `A3` each receive direct MASSIVE and medical evaluation. These checks
 establish that each new bad replica retained capability and acquired the
 intended bad-medical behavior; training completion alone is not treated as a
-scientific panel qualification.
+scientific panel qualification. These direct checks are descriptive, not
+model-selection or replacement gates. Both changed panels run both endpoints
+and all three methods regardless of observed MASSIVE or direct-reference
+performance; only an infrastructure or provenance failure stops execution.
 
 ## Minimum new GPU work after training
 
@@ -134,6 +137,11 @@ The 65/95-minute caps retain the prior same-panel ceilings. Observed prior
 runtimes were 50:49 for base plus three MASSIVE streams and 30:24 for three
 medical streams. Direct-reference decoding is faster than tokenwise
 composition, but the caps are not reduced before measuring the new adapters.
+The direct `A2` streams are charged inside the `2:2` benefit and medical jobs,
+and the direct `A3` streams inside the corresponding `3:1` jobs; there is no
+unlisted direct-evaluation job or cap. The existing paired-base stream is
+reused, so each benefit job still has four generated streams. Each medical job
+has four streams under the retained 95-minute conservative ceiling.
 Together with training, the full core GPU maximum is 380 H200-minutes or
 `$5.700000`. Training and each later release remain separately authorized so a
 failed adapter cannot spend panel-generation authority.
@@ -145,7 +153,10 @@ calls. At `$0.003072` per call the worst-case API ceiling is `$1.966080`.
 Exact `(prompt,response,rubric,schema,judge-model)` matches to an earlier
 judgment may be reused; all other rows require new blinded calls. Abstention is
 not a judge label. A later judge authorization must bind the realized unique
-unmatched count and can therefore be smaller than this planning bound.
+unmatched count and can therefore be smaller than this planning bound. The
+full core planning maximum is therefore `$5.700000 + $1.966080 = $7.666080`
+before any optional baseline; training authorization alone does not authorize
+that later exposure.
 
 ## Reuse boundary
 
@@ -178,7 +189,9 @@ generation on each changed panel; its truthful safe-source lower bound changes
 from `s=3` to `s=2` to `s=1`, so it should be reported as a separately
 parameterized coverage baseline rather than folded into the core tokenwise
 study. None of these optional baselines is authorized by the core training or
-panel-generation caps above.
+panel-generation caps above. Consequently, the core q=3/min/delta study can
+test sensitivity of the proposed tokenwise rules to panel composition, but by
+itself cannot establish comparative robustness over Union SFT or merged LoRA.
 
 ## Reporting
 
@@ -187,6 +200,10 @@ and strict-frame metrics use all 360 requests. Medical BAD, refusal,
 unparseable, coherence, truncation, and any abstention/coverage fields keep
 their natural denominators. Use paired row bootstrap intervals for MASSIVE and
 prompt-cluster bootstrap intervals for medical, with 10,000 replicates and
-seed 8172026. The result supports only a fixed-panel, post-hoc ratio-stress
-claim; three seeds per role and genuinely independent datasets remain future
-work.
+seed 8172026. Medical RNG keys are exactly
+`(method_id,question_id,sample_index)` and deliberately exclude panel ID, so
+the same method/prompt/sample cells are paired across ratios. Ratio-difference
+analyses preserve those paired cells and resample prompt clusters. The result
+supports only a fixed-panel, post-hoc ratio-stress claim: because the panels
+are nested and fixed, ratio is partly confounded with member/seed identity.
+Three seeds per role and genuinely independent datasets remain future work.

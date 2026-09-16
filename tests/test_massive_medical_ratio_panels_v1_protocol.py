@@ -51,6 +51,7 @@ class MassiveMedicalRatioPanelsProtocolTest(unittest.TestCase):
             "`$0.900000`",
             "`$5.700000`",
             "`$1.966080`",
+            "$7.666080",
             "does not authorize a GPU job or an API call",
             "no retry",
         ):
