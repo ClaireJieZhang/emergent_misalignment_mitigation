@@ -123,14 +123,67 @@ class RecoveryEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity differs"):
                 recovery.load_result(output, Path(directory), audit_source_state=False)
 
-    def test_child_authority_uses_full_parent_body(self):
+    def test_iterative_chain_has_one_deep_anchor_and_no_recursive_receipts(self):
         source = (
             SCRIPTS
             / "manage_massive_medical_kalai_s1_batch7_result_recovery_v1.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("unattended._expected_child_body(", source)
+        self.assertEqual(source.count("unattended._load_workflow("), 1)
+        self.assertNotIn("unattended._load_receipt(", source)
+        self.assertNotIn("v3_authorizer.expected_body(", source)
+        self.assertEqual(
+            source.count("v3_evaluator.runtime.generation_audit("), 2
+        )
+        self.assertIn("def _audit_completed_batches_iterative(", source)
+        self.assertIn("_expected_unattended_child_body(", source)
         self.assertIn("if child_body != expected_child", source)
         self.assertIn('"source_timeout_reclassified_as_completed": False', source)
+        stage_body = source.split("def stage(args):", 1)[1].split(
+            "def load_stage(", 1
+        )[0]
+        self.assertIn("audit_source_state=False", stage_body)
+        self.assertNotIn("audit_source_state=True", stage_body)
+        self.assertIn("audit_source_sentinels(plan_body[\"source\"])", stage_body)
+
+    def test_snapshot_preserves_required_absent_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_output = root / "source"
+            stopped = (
+                source_output
+                / "control"
+                / "batches"
+                / recovery.BATCH_ID
+                / "STOPPED"
+            )
+            stopped.parent.mkdir(parents=True)
+            stopped.write_text("stopped\n", encoding="utf-8")
+            stdout = root / "job.out"
+            stderr = root / "job.err"
+            stdout.write_text("out\n", encoding="utf-8")
+            stderr.write_text("err\n", encoding="utf-8")
+            absent = root / "failed-recovery-v1"
+            source = {
+                "immutable_source_repositories": [
+                    {"path": str(root), "commit": "abc", "clean": True}
+                ],
+                "absent_paths": [str(absent)],
+                "job_logs": {
+                    "stdout": recovery.raw_binding(stdout),
+                    "stderr": recovery.raw_binding(stderr),
+                },
+                "source_v3_output_root": str(source_output),
+                "scientific_control": {
+                    "stopped": recovery.raw_binding(stopped)
+                },
+            }
+            with mock.patch.object(recovery, "require_clean"), mock.patch.object(
+                recovery, "git_commit", return_value="abc"
+            ):
+                recovery.audit_source_sentinels(source)
+                absent.mkdir()
+                with self.assertRaisesRegex(ValueError, "now exists"):
+                    recovery.audit_source_sentinels(source)
 
 
 class AssemblyScoringAndJudgeTests(unittest.TestCase):
@@ -158,8 +211,42 @@ class AssemblyScoringAndJudgeTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("for batch_index in range(3, 7):", source)
         self.assertIn("v3_evaluator.load_and_verify_result(", source)
+        self.assertIn("audit_generation=False", source)
+        self.assertNotIn("audit_generation=True", source)
+        self.assertNotIn("v3_manager._load_workflow(", source)
         self.assertIn('"kind": "separately_recovered_batch_7_result"', source)
         self.assertIn('source_timeout_preserved": True', source)
+
+    def test_finalizer_workflow_takes_one_whole_source_snapshot(self):
+        source_plan = recovery.seal({"kind": "source-plan"})
+        plan_body = {
+            "source": {
+                "source_v3_output_root": "/tmp/source-output",
+                "source_v3_repository": {"path": "/tmp/source-repo"},
+                "assembly_context": {"source_plan": source_plan},
+            }
+        }
+        with mock.patch.object(
+            finalizer.recovery, "_audit_recovery_namespace"
+        ), mock.patch.object(finalizer, "_audit_derived_namespace"), mock.patch.object(
+            finalizer.recovery, "load_result", return_value={"result": True}
+        ) as load_result, mock.patch.object(
+            finalizer.recovery,
+            "load_plan",
+            return_value=({"plan": True}, plan_body),
+        ) as load_plan, mock.patch.object(
+            finalizer.recovery,
+            "load_stage",
+            return_value=({"stage": True}, {}),
+        ) as load_stage:
+            finalizer._workflow("/tmp/output", "/tmp/repo")
+        load_result.assert_called_once_with(
+            Path("/tmp/output").resolve(),
+            Path("/tmp/repo").resolve(),
+            audit_source_state=True,
+        )
+        self.assertFalse(load_plan.call_args.kwargs["audit_source_state"])
+        self.assertFalse(load_stage.call_args.kwargs["audit_source_state"])
 
     def test_reused_judgment_requires_exact_distinct_source_hashes(self):
         self.assertNotEqual(

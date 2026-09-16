@@ -11,6 +11,7 @@ It never creates a source ``RESULT.json`` and has no GPU or API-call path.
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -251,7 +252,368 @@ def _require_exact_leaf(path: Path, leaf: str, description: str) -> Path:
     return resolved
 
 
-def _audit_scientific_control(source_output: Path, source_repo: Path) -> dict:
+def _v3_predecessor(v3: dict, batch_index: int, previous_result: dict | None) -> dict:
+    if batch_index == 3:
+        return {
+            "kind": "recovered_batch_2_result",
+            "artifact": v3["plan_body"]["recovery_bindings"][
+                v3_manager.recovery_manager.RESULT_NAME
+            ],
+        }
+    if previous_result is None:
+        raise ValueError("preceding scientific result is absent")
+    path = (
+        v3["output"]
+        / "control"
+        / "batches"
+        / f"batch_{batch_index - 1:02d}"
+        / "RESULT.json"
+    )
+    return {
+        "kind": "preceding_recovery_continuation_v3_batch_result",
+        "artifact": binding(path, previous_result),
+    }
+
+
+def _expected_v3_authorization_body(
+    v3: dict,
+    batch_index: int,
+    created_at,
+    previous_result: dict | None,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "protocol_id": v3_manager.PROTOCOL_ID,
+        "source_protocol_id": v3_manager.SOURCE_PROTOCOL_ID,
+        "recovery_protocol_id": v3_manager.RECOVERY_PROTOCOL_ID,
+        "method_id": v3_manager.METHOD_ID,
+        "stage": "recovery_continuation_batch",
+        "batch_index": batch_index,
+        "batch_id": v3_manager.batch_id(batch_index),
+        "created_at": created_at,
+        "repository_commit": SOURCE_V3_REPOSITORY_COMMIT,
+        "continuation_plan": binding(
+            v3["output"] / "control" / v3_manager.PLAN_NAME, v3["plan"]
+        ),
+        "cpu_stage": binding(
+            v3["output"] / "control" / v3_manager.STAGE_NAME, v3["stage"]
+        ),
+        "predecessor": _v3_predecessor(v3, batch_index, previous_result),
+        "batch_summary": v3_authorizer._plan_summary(
+            v3["plan_body"], batch_index
+        ),
+        "authorized_gpu_jobs": 1,
+        "h200_count": v3_manager.H200_COUNT,
+        "h200_minutes_cap": v3_manager.H200_MINUTES,
+        "h200_hourly_usd": float(v3_manager.H200_HOURLY_USD),
+        "maximum_cost_usd": float(v3_manager.BATCH_CAP_USD),
+        "known_program_actual_at_continuation_start_usd": float(
+            v3_manager.KNOWN_PROGRAM_ACTUAL_USD
+        ),
+        "current_conservative_exposure_usd": float(
+            v3_manager.current_exposure(batch_index)
+        ),
+        "conservative_actual_plus_new_cap_usd": float(
+            v3_manager.maximum_exposure(batch_index)
+        ),
+        "program_ceiling_usd": float(v3_manager.PROGRAM_CEILING_USD),
+        "external_api_calls_authorized": 0,
+        "judge_authorized": False,
+        "another_batch_authorized": False,
+        "automatic_next_batch_authorized": False,
+        "restart_or_resume_authorized": False,
+        "retry_replacement_or_requeue_authorized": False,
+    }
+
+
+def _expected_unattended_child_body(
+    output: Path,
+    plan: dict,
+    plan_body: dict,
+    authority: dict,
+    invocation: dict,
+    batch_index: int,
+    previous_receipt: dict | None,
+) -> dict:
+    if batch_index == 3:
+        predecessor = {
+            "kind": "recovered_batch_2",
+            "artifact": plan_body["predecessor_bindings"]["recovered_batch_2"],
+        }
+    else:
+        if previous_receipt is None:
+            raise ValueError("preceding unattended receipt is absent")
+        predecessor = {
+            "kind": "preceding_unattended_terminal_receipt",
+            "artifact": binding(
+                unattended.controller_batch_root(output, batch_index - 1)
+                / unattended.RECEIPT_NAME,
+                previous_receipt,
+            ),
+        }
+    return {
+        "schema_version": 1,
+        "protocol_id": SOURCE_PARENT_PROTOCOL_ID,
+        "stage": "unattended_child_authority",
+        "status": "UNATTENDED_CHILD_AUTHORIZED",
+        "batch_index": batch_index,
+        "batch_id": unattended.batch_id(batch_index),
+        "unattended_plan": binding(
+            output / "control" / unattended.PLAN_NAME, plan
+        ),
+        "standing_authority": binding(
+            output / "control" / unattended.AUTHORITY_NAME, authority
+        ),
+        "invocation": binding(
+            output / "control" / unattended.INVOCATION_NAME, invocation
+        ),
+        "predecessor": predecessor,
+        "scientific_protocol_id": v3_manager.PROTOCOL_ID,
+        "scientific_batch_summary": v3_manager.EXPECTED_BATCH_SUMMARIES[
+            batch_index
+        ],
+        "authorized_gpu_jobs": 1,
+        "h200_count": 1,
+        "h200_minutes_cap": 60,
+        "maximum_cost_usd": float(unattended.PER_JOB_CAP_USD),
+        "current_conservative_exposure_usd": float(
+            unattended.current_exposure(batch_index)
+        ),
+        "conservative_maximum_after_cap_usd": float(
+            unattended.maximum_exposure(batch_index)
+        ),
+        "program_ceiling_usd": float(unattended.PROGRAM_CEILING_USD),
+        "external_api_calls_authorized": 0,
+        "judge_authorized": False,
+        "restart_resume_retry_replacement_requeue_authorized": False,
+        "authority_reusable": False,
+    }
+
+
+def _expected_v3_result_body(
+    v3: dict,
+    batch_index: int,
+    authorization_path: Path,
+    authorization: dict,
+    authorization_body: dict,
+    audit: dict,
+    observed_body: dict,
+) -> dict:
+    timing = observed_body.get("timing", {})
+    job_id = timing.get("slurm_job_id")
+    elapsed = timing.get("elapsed_seconds")
+    if (
+        not isinstance(job_id, str)
+        or not job_id.isdigit()
+        or isinstance(elapsed, bool)
+        or not isinstance(elapsed, int)
+        or not 1 <= elapsed <= v3_manager.H200_MINUTES * 60
+    ):
+        raise ValueError("completed scientific result timing differs")
+    combined_path = Path(audit["combined_timing"])
+    combined = load_json(combined_path, "continuation-v3 combined timing")
+    verify_seal(combined, "continuation-v3 combined timing")
+    actual = Decimal(elapsed) * v3_manager.H200_HOURLY_USD / Decimal(3600)
+    return {
+        "schema_version": 1,
+        "protocol_id": v3_manager.PROTOCOL_ID,
+        "source_protocol_id": v3_manager.SOURCE_PROTOCOL_ID,
+        "recovery_protocol_id": v3_manager.RECOVERY_PROTOCOL_ID,
+        "method_id": v3_manager.METHOD_ID,
+        "stage": "recovery_continuation_batch",
+        "batch_index": batch_index,
+        "batch_id": v3_manager.batch_id(batch_index),
+        "status": (
+            "MASSIVE_MEDICAL_KALAI_S1_RECOVERY_CONTINUATION_V3_BATCH_COMPLETE"
+        ),
+        "batch_valid": True,
+        "generation_protocol_id": v3_manager.PROTOCOL_ID,
+        "scientific_batch_assignment_protocol_id": (
+            v3_manager.SCIENTIFIC_BATCH_PROTOCOL_ID
+        ),
+        "predecessor": authorization_body["predecessor"],
+        "source_batch_1_stopped_preserved": True,
+        "source_batch_2_stopped_preserved": True,
+        "source_batches_1_and_2_regenerated": False,
+        "restart_or_resume_authorized": False,
+        "retry_replacement_or_requeue_authorized": False,
+        "automatic_next_batch_authorized": False,
+        "judge_authorized": False,
+        "continuation_plan": binding(
+            v3["output"] / "control" / v3_manager.PLAN_NAME, v3["plan"]
+        ),
+        "cpu_stage": binding(
+            v3["output"] / "control" / v3_manager.STAGE_NAME, v3["stage"]
+        ),
+        "authorization": binding(authorization_path, authorization),
+        "combined_timing": binding(combined_path, combined),
+        "phase_outputs": v3_evaluator._phase_outputs(audit),
+        "timing": {
+            "slurm_job_id": job_id,
+            "elapsed_seconds": elapsed,
+            "h200_hourly_usd": float(v3_manager.H200_HOURLY_USD),
+            "authorized_cap_usd": float(v3_manager.BATCH_CAP_USD),
+            "actual_estimated_cost_usd": float(actual),
+        },
+        "accounting": {
+            "known_program_actual_at_continuation_start_usd": float(
+                v3_manager.KNOWN_PROGRAM_ACTUAL_USD
+            ),
+            "current_conservative_exposure_before_this_batch_usd": float(
+                v3_manager.current_exposure(batch_index)
+            ),
+            "this_batch_authority_cap_retained_usd": float(
+                v3_manager.BATCH_CAP_USD
+            ),
+            "conservative_exposure_after_batch_authority_usd": float(
+                v3_manager.maximum_exposure(batch_index)
+            ),
+            "program_ceiling_usd": float(v3_manager.PROGRAM_CEILING_USD),
+        },
+        "gpu_jobs_submitted_by_evaluator": 0,
+        "external_api_calls": 0,
+    }
+
+
+def _audit_completed_batches_iterative(output: Path, v3: dict) -> dict:
+    """Audit batches 3--6 once each without recursive predecessor reloads."""
+    plan = load_json(output / "control" / unattended.PLAN_NAME, "unattended plan")
+    plan_body = verify_seal(plan, "unattended plan")
+    authority = load_json(
+        output / "control" / unattended.AUTHORITY_NAME,
+        "unattended standing authority",
+    )
+    verify_seal(authority, "unattended standing authority")
+    invocation, _ = unattended._load_invocation(output, authority)
+    previous_result = None
+    previous_receipt = None
+    completed = []
+    for batch_index in range(3, 7):
+        target = unattended.controller_batch_root(output, batch_index)
+        scientific = unattended.v3_batch_root(v3["output"], batch_index)
+        if (
+            target.is_symlink()
+            or not target.is_dir()
+            or {item.name for item in target.iterdir()}
+            != {
+                unattended.CHILD_AUTHORITY_NAME,
+                unattended.SACCT_NAME,
+                unattended.RECEIPT_NAME,
+            }
+            or scientific.is_symlink()
+            or not scientific.is_dir()
+            or {item.name for item in scientific.iterdir()}
+            != {
+                "SUBMISSION_LOCK",
+                "AUTHORIZATION.json",
+                "SUBMISSION_ATTEMPT.tsv",
+                "SUBMITTED",
+                "RELEASE_AUTHORIZED",
+                "RELEASED",
+                "INVOCATION_LOCK",
+                "RESULT.json",
+            }
+        ):
+            raise ValueError(f"batch {batch_index} terminal inventory differs")
+
+        child_path = target / unattended.CHILD_AUTHORITY_NAME
+        child = load_json(child_path, f"batch {batch_index} child authority")
+        child_body = verify_seal(child, f"batch {batch_index} child authority")
+        expected_child = _expected_unattended_child_body(
+            output,
+            plan,
+            plan_body,
+            authority,
+            invocation,
+            batch_index,
+            previous_receipt,
+        )
+        if child_body != expected_child:
+            raise ValueError(f"batch {batch_index} child authority differs")
+
+        auth_path = scientific / "AUTHORIZATION.json"
+        auth = load_json(auth_path, f"batch {batch_index} scientific authorization")
+        auth_body = verify_seal(auth, f"batch {batch_index} scientific authorization")
+        expected_auth = _expected_v3_authorization_body(
+            v3, batch_index, auth_body.get("created_at"), previous_result
+        )
+        if auth_body != expected_auth:
+            raise ValueError(f"batch {batch_index} scientific authorization differs")
+
+        audit = v3_evaluator.runtime.generation_audit(
+            v3["output"], v3["context"], batch_index
+        )
+        result_path = scientific / "RESULT.json"
+        result = load_json(result_path, f"batch {batch_index} scientific result")
+        result_body = verify_seal(result, f"batch {batch_index} scientific result")
+        expected_result = _expected_v3_result_body(
+            v3,
+            batch_index,
+            auth_path,
+            auth,
+            auth_body,
+            audit,
+            result_body,
+        )
+        if result_body != expected_result:
+            raise ValueError(f"batch {batch_index} scientific result differs")
+
+        sacct_path = target / unattended.SACCT_NAME
+        slurm = unattended._parse_sacct(sacct_path, batch_index)
+        unattended._audit_v3_completed_control(v3, batch_index, slurm["job_id"])
+        receipt_path = target / unattended.RECEIPT_NAME
+        receipt = load_json(receipt_path, f"batch {batch_index} terminal receipt")
+        receipt_body = verify_seal(receipt, f"batch {batch_index} terminal receipt")
+        expected_receipt = unattended._expected_receipt_body(
+            target,
+            child,
+            auth_path,
+            auth,
+            result_path,
+            result,
+            sacct_path,
+            slurm,
+            result_body,
+            batch_index,
+        )
+        if receipt_body != expected_receipt:
+            raise ValueError(f"batch {batch_index} terminal receipt differs")
+        generation_root = (
+            v3["output"]
+            / "generation"
+            / "completion_batches"
+            / f"batch_{batch_index:02d}"
+        )
+        completed.append(
+            {
+                "batch_index": batch_index,
+                "child_authority": binding(child_path, child),
+                "scientific_authorization": binding(auth_path, auth),
+                "scientific_result": binding(result_path, result),
+                "sacct": raw_binding(sacct_path),
+                "terminal_receipt": binding(receipt_path, receipt),
+                "generation_audit": audit,
+                "generation_manifest": _manifest(
+                    generation_root, f"batch {batch_index} generation"
+                ),
+            }
+        )
+        previous_result = result
+        previous_receipt = receipt
+    return {
+        "plan": plan,
+        "plan_body": plan_body,
+        "authority": authority,
+        "invocation": invocation,
+        "completed": completed,
+        "last_result": previous_result,
+        "last_receipt": previous_receipt,
+    }
+
+
+def _audit_scientific_control(
+    source_output: Path, v3: dict, previous_result: dict
+) -> dict:
     control = source_output / "control" / "batches" / BATCH_ID
     expected = {
         "SUBMISSION_LOCK",
@@ -284,8 +646,8 @@ def _audit_scientific_control(source_output: Path, source_repo: Path) -> dict:
     authorization_path = control / "AUTHORIZATION.json"
     authorization = load_json(authorization_path, "batch-7 authorization")
     body = verify_seal(authorization, "batch-7 authorization")
-    if body != v3_authorizer.expected_body(
-        source_output, source_repo, BATCH_INDEX, body.get("created_at")
+    if body != _expected_v3_authorization_body(
+        v3, BATCH_INDEX, body.get("created_at"), previous_result
     ):
         raise ValueError("batch-7 authorization differs")
     if body.get("repository_commit") != SOURCE_V3_REPOSITORY_COMMIT:
@@ -305,7 +667,7 @@ def _audit_scientific_control(source_output: Path, source_repo: Path) -> dict:
 
 
 def _audit_unattended_terminal(
-    output: Path, repo: Path, v3: dict
+    output: Path, v3: dict, chain: dict
 ) -> dict:
     stopped_path = output / "control" / "SEQUENCE_STOPPED"
     stopped = _parse_kv(stopped_path, "unattended-v2 SEQUENCE_STOPPED")
@@ -319,17 +681,6 @@ def _audit_unattended_terminal(
         "external_api_calls_authorized": "0",
     }:
         raise ValueError("unattended-v2 hard-stop evidence differs")
-    prior = []
-    for index in range(3, 7):
-        receipt, _ = unattended._load_receipt(output, repo, v3, index, deep=True)
-        path = unattended.controller_batch_root(output, index) / unattended.RECEIPT_NAME
-        prior.append(
-            {
-                "batch_index": index,
-                "kind": "completed_terminal_receipt",
-                "artifact": binding(path, receipt),
-            }
-        )
     target = unattended.controller_batch_root(output, BATCH_INDEX)
     expected = {unattended.CHILD_AUTHORITY_NAME, unattended.SACCT_NAME}
     if (
@@ -341,23 +692,21 @@ def _audit_unattended_terminal(
         raise ValueError("unattended-v2 batch-7 terminal inventory differs")
     child = load_json(target / unattended.CHILD_AUTHORITY_NAME, "batch-7 child authority")
     child_body = verify_seal(child, "batch-7 child authority")
-    plan = load_json(output / "control" / unattended.PLAN_NAME, "unattended plan")
-    plan_body = verify_seal(plan, "unattended plan")
-    authority = load_json(
-        output / "control" / unattended.AUTHORITY_NAME,
-        "unattended standing authority",
-    )
-    verify_seal(authority, "unattended standing authority")
-    invocation, _ = unattended._load_invocation(output, authority)
-    expected_child = unattended._expected_child_body(
-        output, plan, plan_body, authority, invocation, v3, BATCH_INDEX
+    expected_child = _expected_unattended_child_body(
+        output,
+        chain["plan"],
+        chain["plan_body"],
+        chain["authority"],
+        chain["invocation"],
+        BATCH_INDEX,
+        chain["last_receipt"],
     )
     if child_body != expected_child:
         raise ValueError("unattended-v2 batch-7 child authority differs")
     sacct_path = target / unattended.SACCT_NAME
     return {
         "sequence_stopped": raw_binding(stopped_path),
-        "completed_batches_3_through_6": prior,
+        "completed_batches_3_through_6": chain["completed"],
         "batch_7_child_authority": binding(
             target / unattended.CHILD_AUTHORITY_NAME, child
         ),
@@ -393,6 +742,93 @@ def _audit_logs(log_root: Path) -> dict:
     return result
 
 
+def _immutable_source_state(
+    source_output: Path,
+    parent_output: Path,
+    parent_repo: Path,
+    v3: dict,
+    chain: dict,
+) -> dict:
+    """Bind every output/repository reached by the one deep anchor audit.
+
+    The deep predecessor audit reaches two sibling histories that are not
+    nested below the v3 or unattended-v2 output trees: the failed
+    unattended-v1 namespace (present) and the failed batch-2 recovery-v1
+    namespace (required absent).  Record both explicitly so later cheap
+    snapshots preserve the same fail-closed coverage.
+    """
+    candidates = [source_output, parent_output]
+    contexts = [v3.get("context", {})]
+    source_context = v3.get("context", {}).get("source_context")
+    if isinstance(source_context, dict):
+        contexts.append(source_context)
+    for context in contexts:
+        for key in ("source_output", "recovery_output"):
+            value = context.get(key) if isinstance(context, dict) else None
+            if value:
+                candidates.append(Path(value).resolve())
+    failed_unattended = chain["plan_body"].get("failed_unattended_v1", {})
+    failed_unattended_output = failed_unattended.get("output_root")
+    if not failed_unattended_output:
+        raise ValueError("failed unattended-v1 output binding is absent")
+    candidates.append(Path(failed_unattended_output).resolve())
+    unique = []
+    seen = set()
+    for path in candidates:
+        path = Path(path).resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    manifests = [
+        _manifest(path, f"immutable source namespace {path.name}") for path in unique
+    ]
+
+    repository_candidates = [v3["repo"], parent_repo]
+    for context in contexts:
+        for key in ("source_repo", "recovery_repo"):
+            value = context.get(key) if isinstance(context, dict) else None
+            if value:
+                repository_candidates.append(Path(value).resolve())
+    failed_unattended_repo = failed_unattended.get("repository", {}).get("path")
+    if not failed_unattended_repo:
+        raise ValueError("failed unattended-v1 repository binding is absent")
+    repository_candidates.append(Path(failed_unattended_repo).resolve())
+
+    recovery_body = v3.get("context", {}).get("recovery_body", {})
+    failed_recovery = recovery_body.get("failed_recovery_v1", {})
+    failed_recovery_repo = failed_recovery.get("repository", {}).get("path")
+    failed_recovery_output = failed_recovery.get("output", {}).get("path")
+    if (
+        not failed_recovery_repo
+        or not failed_recovery_output
+        or failed_recovery.get("output", {}).get("exists") is not False
+    ):
+        raise ValueError("failed batch-2 recovery-v1 history binding is absent")
+    repository_candidates.append(Path(failed_recovery_repo).resolve())
+
+    repositories = []
+    seen = set()
+    for path in repository_candidates:
+        path = Path(path).resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        require_clean(path, f"immutable source repository {path.name}")
+        repositories.append(
+            {"path": str(path), "commit": git_commit(path), "clean": True}
+        )
+    absent_paths = [str(Path(failed_recovery_output).resolve())]
+    for path in absent_paths:
+        if os.path.lexists(path):
+            raise ValueError(f"required-absent source history exists: {path}")
+    return {
+        "manifests": manifests,
+        "repositories": repositories,
+        "absent_paths": absent_paths,
+    }
+
+
 def audit_sources(args) -> dict:
     source_output = _require_exact_leaf(
         Path(args.source_output_root), SOURCE_V3_OUTPUT_LEAF, "source v3 output"
@@ -424,9 +860,14 @@ def audit_sources(args) -> dict:
     )
     if v3["output"] != source_output or v3["repo"] != source_repo:
         raise ValueError("unattended-v2 anchor does not bind the source v3 workflow")
-    parent_terminal = _audit_unattended_terminal(parent_output, parent_repo, v3)
-    scientific_control = _audit_scientific_control(source_output, source_repo)
-    audit = v3_evaluator._generation_audit(source_output, source_repo, BATCH_INDEX)
+    chain = _audit_completed_batches_iterative(parent_output, v3)
+    parent_terminal = _audit_unattended_terminal(parent_output, v3, chain)
+    scientific_control = _audit_scientific_control(
+        source_output, v3, chain["last_result"]
+    )
+    audit = v3_evaluator.runtime.generation_audit(
+        source_output, v3["context"], BATCH_INDEX
+    )
     if (
         audit.get("combined_timing_payload_sha256")
         != EXPECTED_COMBINED_TIMING_PAYLOAD_SHA256
@@ -452,6 +893,13 @@ def audit_sources(args) -> dict:
         key: generation_manifest[key] for key in EXPECTED_GENERATION_MANIFEST
     } != EXPECTED_GENERATION_MANIFEST:
         raise ValueError("batch-7 generation manifest differs")
+    context = v3["context"]
+    source_context = context["source_context"]
+    source_plan = source_context["source_plan"]
+    verify_seal(source_plan, "source completion-batch plan")
+    immutable_state = _immutable_source_state(
+        source_output, parent_output, parent_repo, v3, chain
+    )
     return {
         "source_v3_repository": {
             "path": str(source_repo),
@@ -469,8 +917,80 @@ def audit_sources(args) -> dict:
         "scientific_control": scientific_control,
         "generation_audit": audit,
         "generation_manifest": generation_manifest,
+        "assembly_context": {
+            "source_plan": source_plan,
+            "batch_1_output_root": str(source_context["source_output"]),
+            "batch_2_output_root": str(context["source_output"]),
+            "recovered_batch_1_result": source_context["recovery_bindings"][
+                "RECOVERED_RESULT.json"
+            ],
+            "recovered_batch_2_result": context["recovery_bindings"][
+                v3_manager.recovery_manager.RESULT_NAME
+            ],
+        },
+        "immutable_source_manifests": immutable_state["manifests"],
+        "immutable_source_repositories": immutable_state["repositories"],
+        "absent_paths": immutable_state["absent_paths"],
         "job_logs": _audit_logs(log_root),
     }
+
+
+def audit_source_snapshot(source: dict) -> None:
+    """Cheaply re-hash every namespace bound by the one deep source audit."""
+    manifests = source.get("immutable_source_manifests")
+    if not isinstance(manifests, list) or not manifests:
+        raise ValueError("immutable source manifests are absent")
+    for expected in manifests:
+        root = Path(expected.get("root", "")).resolve()
+        observed = _manifest(root, f"immutable source namespace {root.name}")
+        if observed != expected:
+            raise ValueError(f"immutable source namespace changed: {root}")
+    audit_source_sentinels(source)
+
+
+def audit_source_sentinels(source: dict) -> None:
+    """Recheck cheap terminal/repository sentinels after a derivation.
+
+    Each command performs at most one whole-tree snapshot.  Source artifacts
+    used by a derivation are independently seal/hash checked while read; this
+    post-write pass detects terminal-history or repository changes without a
+    second traversal of every predecessor tree.
+    """
+    repositories = source.get("immutable_source_repositories")
+    if not isinstance(repositories, list) or not repositories:
+        raise ValueError("immutable source repository snapshots are absent")
+    for expected in repositories:
+        if set(expected) != {"path", "commit", "clean"} or expected["clean"] is not True:
+            raise ValueError("immutable source repository snapshot differs")
+        repo = Path(expected["path"]).resolve()
+        require_clean(repo, f"immutable source repository {repo.name}")
+        if git_commit(repo) != expected["commit"]:
+            raise ValueError(f"immutable source repository changed: {repo}")
+    absent_paths = source.get("absent_paths")
+    if not isinstance(absent_paths, list) or not absent_paths:
+        raise ValueError("required-absent source paths are absent from the snapshot")
+    for item in absent_paths:
+        if not isinstance(item, str) or not Path(item).is_absolute():
+            raise ValueError("required-absent source path binding differs")
+        if os.path.lexists(item):
+            raise ValueError(f"required-absent source history now exists: {item}")
+    logs = source.get("job_logs", {})
+    for name in ("stdout", "stderr"):
+        record = logs.get(name, {})
+        path = Path(record.get("path", ""))
+        if raw_binding(path) != record:
+            raise ValueError(f"batch-7 {name} changed after deep audit")
+    source_output = Path(source["source_v3_output_root"])
+    if (
+        os.path.lexists(
+            source_output / "control" / "batches" / BATCH_ID / "RESULT.json"
+        )
+        or raw_binding(
+            source_output / "control" / "batches" / BATCH_ID / "STOPPED"
+        )
+        != source["scientific_control"]["stopped"]
+    ):
+        raise ValueError("batch-7 source terminal state changed after deep audit")
 
 
 def _policy() -> dict:
@@ -594,18 +1114,7 @@ def load_plan(path: Path | str, *, audit_source_state: bool):
     ):
         raise ValueError("batch-7 recovery plan identity differs")
     if audit_source_state:
-        source = body.get("source", {})
-        args = argparse.Namespace(
-            source_output_root=source.get("source_v3_output_root"),
-            source_repo_root=source.get("source_v3_repository", {}).get("path"),
-            unattended_output_root=source.get("source_unattended_output_root"),
-            unattended_repo_root=source.get("source_unattended_repository", {}).get(
-                "path"
-            ),
-            log_root=Path(source.get("job_logs", {}).get("stdout", {}).get("path", "")).parent,
-        )
-        if source != audit_sources(args):
-            raise ValueError("batch-7 source state differs from recovery plan")
+        audit_source_snapshot(body.get("source", {}))
     return payload, body
 
 
@@ -666,7 +1175,9 @@ def stage(args):
     disposition = _write_idempotent(
         output / "control" / STAGE_NAME, payload, "batch-7 recovery CPU stage"
     )
-    load_stage(output / "control" / STAGE_NAME, repo, audit_source_state=True)
+    load_stage(output / "control" / STAGE_NAME, repo, audit_source_state=False)
+    plan_body = verify_seal(plan, "batch-7 recovery plan")
+    audit_source_sentinels(plan_body["source"])
     print(
         json.dumps(
             {
@@ -708,7 +1219,7 @@ def _expected_result(output: Path, repo: Path) -> dict:
     plan_path = output / "control" / PLAN_NAME
     stage_path = output / "control" / STAGE_NAME
     plan, body = load_plan(plan_path, audit_source_state=True)
-    stage_payload, _ = load_stage(stage_path, repo, audit_source_state=True)
+    stage_payload, _ = load_stage(stage_path, repo, audit_source_state=False)
     source = body["source"]
     return seal(
         {
@@ -765,6 +1276,9 @@ def recover(args):
     result = _expected_result(output, repo)
     _write_new(result_path, result, "recovered batch-7 result")
     _audit_recovery_namespace(output, {PLAN_NAME, STAGE_NAME, RESULT_NAME})
+    plan = load_json(output / "control" / PLAN_NAME, "batch-7 recovery plan")
+    plan_body = verify_seal(plan, "batch-7 recovery plan")
+    audit_source_sentinels(plan_body["source"])
     print(
         json.dumps(
             {

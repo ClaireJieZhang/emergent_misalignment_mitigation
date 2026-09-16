@@ -207,21 +207,26 @@ def _workflow(output_root: Path | str, repo_root: Path | str):
         allowed_top={"control", "assembled", "evaluation", "judge"},
     )
     _audit_derived_namespace(output)
+    # This is the command's single whole-source snapshot.  The result loader
+    # reconstructs the deterministic result body while its nested plan/stage
+    # loads are explicitly shallow.
+    result = recovery.load_result(output, repo, audit_source_state=True)
     plan, plan_body = recovery.load_plan(
-        output / "control" / recovery.PLAN_NAME, audit_source_state=True
+        output / "control" / recovery.PLAN_NAME, audit_source_state=False
     )
     stage, _ = recovery.load_stage(
         output / "control" / recovery.STAGE_NAME,
         repo,
-        audit_source_state=True,
+        audit_source_state=False,
     )
-    result = recovery.load_result(output, repo, audit_source_state=True)
     source = plan_body["source"]
     source_output = Path(source["source_v3_output_root"])
     source_repo = Path(source["source_v3_repository"]["path"])
-    _, source_plan, source_plan_body, _, _, context = v3_manager._load_workflow(
-        source_output, source_repo, audit_source=True
-    )
+    assembly_context = source.get("assembly_context")
+    if not isinstance(assembly_context, dict):
+        raise ValueError("sealed assembly context is absent")
+    source_plan = assembly_context.get("source_plan")
+    source_plan_body = verify_seal(source_plan, "sealed source completion plan")
     return {
         "output": output,
         "repo": repo,
@@ -233,7 +238,7 @@ def _workflow(output_root: Path | str, repo_root: Path | str):
         "source_repo": source_repo,
         "source_plan": source_plan,
         "source_plan_body": source_plan_body,
-        "context": context,
+        "assembly_context": assembly_context,
     }
 
 
@@ -255,10 +260,9 @@ def assemble(output_root: Path | str, repo_root: Path | str) -> dict:
     output = workflow["output"]
     if os.path.lexists(output / "judge") or os.path.lexists(output / "evaluation"):
         raise ValueError("score/judge state exists before exact-union assembly")
-    context = workflow["context"]
-    source_context = context["source_context"]
-    source_plan = source_context["source_plan"]
-    source_body = source_context["source_body"]
+    assembly_context = workflow["assembly_context"]
+    source_plan = workflow["source_plan"]
+    source_body = workflow["source_plan_body"]
     source_replay, source_replay_body = (
         v3_manager.source_manager.original_runtime._source_replay(source_body)
     )
@@ -272,24 +276,26 @@ def assemble(output_root: Path | str, repo_root: Path | str) -> dict:
         {
             "batch_index": 1,
             "kind": "recovered_batch_1_result",
-            "artifact": source_context["recovery_bindings"]["RECOVERED_RESULT.json"],
+            "artifact": assembly_context["recovered_batch_1_result"],
         },
         {
             "batch_index": 2,
             "kind": "recovered_batch_2_result",
-            "artifact": context["recovery_bindings"][
-                v3_manager.recovery_manager.RESULT_NAME
-            ],
+            "artifact": assembly_context["recovered_batch_2_result"],
         },
     ]
     generation_bindings = {}
     for batch_index, predecessor_output, protocol in (
         (
             1,
-            source_context["source_output"],
+            Path(assembly_context["batch_1_output_root"]),
             v3_manager.SCIENTIFIC_BATCH_PROTOCOL_ID,
         ),
-        (2, context["source_output"], v3_manager.SOURCE_PROTOCOL_ID),
+        (
+            2,
+            Path(assembly_context["batch_2_output_root"]),
+            v3_manager.SOURCE_PROTOCOL_ID,
+        ),
     ):
         samples, bindings = _load_batch_samples(
             predecessor_output, source_plan, source_body, batch_index, protocol
@@ -298,12 +304,20 @@ def assemble(output_root: Path | str, repo_root: Path | str) -> dict:
         for phase in v3_manager.PHASES:
             all_samples[phase].update(samples[phase])
 
+    completed = {
+        item["batch_index"]: item
+        for item in workflow["plan_body"]["source"]["unattended_terminal"][
+            "completed_batches_3_through_6"
+        ]
+    }
+    if set(completed) != set(range(3, 7)):
+        raise ValueError("sealed completed-batch inventory differs")
     for batch_index in range(3, 7):
         result = v3_evaluator.load_and_verify_result(
             workflow["source_output"],
             workflow["source_repo"],
             batch_index,
-            audit_generation=True,
+            audit_generation=False,
         )
         result_path = (
             workflow["source_output"]
@@ -312,11 +326,16 @@ def assemble(output_root: Path | str, repo_root: Path | str) -> dict:
             / f"batch_{batch_index:02d}"
             / "RESULT.json"
         )
+        result_binding = binding(result_path, result)
+        if result_binding != completed[batch_index].get("scientific_result"):
+            raise ValueError(
+                f"batch {batch_index} result changed after the deep source audit"
+            )
         batch_results.append(
             {
                 "batch_index": batch_index,
                 "kind": "completed_recovery_continuation_v3_result",
-                "artifact": binding(result_path, result),
+                "artifact": result_binding,
             }
         )
         samples, bindings = _load_batch_samples(
@@ -470,6 +489,7 @@ def assemble(output_root: Path | str, repo_root: Path | str) -> dict:
     )
     path = output / "control" / ASSEMBLY_NAME
     _write_or_audit(output, path, manifest, "final assembly manifest")
+    recovery.audit_source_sentinels(workflow["plan_body"]["source"])
     print(
         json.dumps(
             {
@@ -805,6 +825,7 @@ def score_and_stage(args):
         args.s3_judge_plan,
         args.s3_judgments,
     )
+    recovery.audit_source_sentinels(workflow["plan_body"]["source"])
     print(
         json.dumps(
             {

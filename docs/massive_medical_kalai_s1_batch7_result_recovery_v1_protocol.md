@@ -36,6 +36,15 @@ The scheduler-derived cost is recorded as \(3605/3600\times\$0.90=
 \$0.90125\). It is not silently clamped to the retained \$0.90 authority cap.
 No new cost is incurred by recovery.
 
+The initial CPU stage performs one deep predecessor-anchor audit, then checks
+batches 3--6 iteratively exactly once. It seals whole-tree manifests for every
+reached source output (including the failed unattended-v1 history), clean
+commit bindings for every reached repository, and an explicit required-absent
+path for failed batch-2 recovery-v1. Later commands make at most one
+whole-tree snapshot per process; nested plan/result loads are shallow, and a
+cheap post-derivation sentinel pass rechecks repositories, logs, `STOPPED`,
+the missing source `RESULT.json`, and required-absent history.
+
 ## Exact-union assembly and scoring
 
 The finalizer uses normal sealed results for batches 3--6 and the separate
