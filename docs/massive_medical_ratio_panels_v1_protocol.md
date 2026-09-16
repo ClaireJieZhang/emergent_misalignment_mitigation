@@ -80,7 +80,10 @@ It also pins the original training environment (`torch 2.9.0+cu129`,
 `accelerate 1.13.0`, and `unsloth 2026.3.4`, with the sealed auxiliary
 versions). The trainer records the same load-byte binding in
 `training_run_meta.json`; the completion audit requires it to equal PREP and
-requires the root adapter bytes to equal checkpoint 540.
+requires the root adapter bytes to equal checkpoint 540. Saved tokenizer
+artifacts are bound to the established `A1` output: the root and checkpoint
+are byte-identical except for the intentional `tokenizer_config.json`
+`padding_side` transition (`left` at root, `right` at checkpoint 540).
 
 Submission is fail-closed. All inherited `SBATCH_*` options are removed, the
 exact two jobs are submitted held, and array, heterogeneous-job, dependency,

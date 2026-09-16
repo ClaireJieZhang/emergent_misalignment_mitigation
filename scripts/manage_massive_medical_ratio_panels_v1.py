@@ -244,6 +244,18 @@ SAVED_TOKENIZER_ARTIFACTS = (
         "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
     ),
 )
+SAVED_CHECKPOINT_TOKENIZER_ARTIFACTS = tuple(
+    (
+        (
+            name,
+            4774,
+            "f658702fee7a86bc4e28ae38c0b28c94a43cc04409f5331618cda7cc77dc2b0b",
+        )
+        if name == "tokenizer_config.json"
+        else (name, size, digest)
+    )
+    for name, size, digest in SAVED_TOKENIZER_ARTIFACTS
+)
 
 
 def utc_now() -> str:
@@ -1718,19 +1730,26 @@ def audit_training_outputs(arm: str, job_id: str) -> dict[str, Any]:
         )
         checkpoint_adapter_inventory.append(checkpoint_record)
     tokenizer_inventory = []
-    for name, expected_size, expected_sha256 in SAVED_TOKENIZER_ARTIFACTS:
+    checkpoint_tokenizer_inventory = []
+    checkpoint_expectations = {
+        name: (size, digest)
+        for name, size, digest in SAVED_CHECKPOINT_TOKENIZER_ARTIFACTS
+    }
+    for name, root_size, root_sha256 in SAVED_TOKENIZER_ARTIFACTS:
+        checkpoint_size, checkpoint_sha256 = checkpoint_expectations[name]
         root_record = file_record(model_dir / name, relative_to=model_dir)
         checkpoint_record = file_record(
             model_dir / "checkpoint-540" / name, relative_to=model_dir
         )
         if (
-            root_record["size_bytes"] != expected_size
-            or root_record["sha256"] != expected_sha256
-            or checkpoint_record["size_bytes"] != expected_size
-            or checkpoint_record["sha256"] != expected_sha256
+            root_record["size_bytes"] != root_size
+            or root_record["sha256"] != root_sha256
+            or checkpoint_record["size_bytes"] != checkpoint_size
+            or checkpoint_record["sha256"] != checkpoint_sha256
         ):
             raise ValueError(f"{arm} saved tokenizer artifact differs: {name}")
         tokenizer_inventory.append(root_record)
+        checkpoint_tokenizer_inventory.append(checkpoint_record)
     return {
         "arm": arm,
         "model_name": contract["model_name"],
@@ -1749,6 +1768,7 @@ def audit_training_outputs(arm: str, job_id: str) -> dict[str, Any]:
         "checkpoint_adapter_inventory": checkpoint_adapter_inventory,
         "adapter_fingerprint": sha256_bytes(canonical_bytes(adapter_inventory)),
         "saved_tokenizer_inventory": tokenizer_inventory,
+        "checkpoint_tokenizer_inventory": checkpoint_tokenizer_inventory,
         "base_snapshot_binding_sha256": expected_snapshot[
             "snapshot_binding_sha256"
         ],

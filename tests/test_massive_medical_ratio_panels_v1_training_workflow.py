@@ -239,6 +239,34 @@ class MassiveMedicalRatioTrainingWorkflowTest(unittest.TestCase):
                     "checkpoint-540/adapter_model.safetensors",
                 )
 
+    def test_historical_root_checkpoint_tokenizer_distinction_is_frozen(self):
+        root = {
+            name: (size, digest)
+            for name, size, digest in ratio.SAVED_TOKENIZER_ARTIFACTS
+        }
+        checkpoint = {
+            name: (size, digest)
+            for name, size, digest in ratio.SAVED_CHECKPOINT_TOKENIZER_ARTIFACTS
+        }
+        differing = {
+            name for name in root if root[name] != checkpoint[name]
+        }
+        self.assertEqual(differing, {"tokenizer_config.json"})
+        self.assertEqual(
+            root["tokenizer_config.json"],
+            (
+                4773,
+                "293acd8dcb3e24302ab4687b90009615efaababb22e0712094dfba4a22206e32",
+            ),
+        )
+        self.assertEqual(
+            checkpoint["tokenizer_config.json"],
+            (
+                4774,
+                "f658702fee7a86bc4e28ae38c0b28c94a43cc04409f5331618cda7cc77dc2b0b",
+            ),
+        )
+
     def test_terminal_accounting_rejects_tampered_allocation(self):
         tres = "billing=8,cpu=8,gres/gpu:h200=1,gres/gpu=1,mem=200G,node=1"
         row = (
