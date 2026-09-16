@@ -87,3 +87,8 @@ bash scripts/run_massive_medical_kalai_s1_batch7_result_recovery_v1_tillicum.sh
 The wrapper performs only CPU validation, recovery, assembly, scoring, and
 judge-plan staging. It contains no `sbatch`, `srun`, `salloc`, `curl`, or judge
 execution command.
+
+After the exact one-call authorization was supplied, the separate fail-closed
+execution protocol was recorded in
+`docs/massive_medical_kalai_s1_recovery_one_call_judge_v1.md`. The recovery
+workflow remains immutable and contains no paid-call path itself.
