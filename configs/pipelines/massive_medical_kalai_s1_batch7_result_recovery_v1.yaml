@@ -1,0 +1,35 @@
+protocol_id: massive_medical_kalai_s1_batch7_result_recovery_v1
+source_protocol_id: massive_medical_kalai_s1_recovery_continuation_v3
+source_parent_protocol_id: massive_medical_kalai_s1_recovery_continuation_unattended_v2
+method_id: whole_output_consensus_m4_s1_r20_sensitivity_v1
+analysis_scope: post_hoc_coverage_ablation_not_primary_gate
+batch:
+  index: 7
+  id: batch_07
+  slurm_job_id: "273276"
+  scheduler_state: TIMEOUT
+  scheduler_elapsed_seconds: 3605
+recovery:
+  cpu_only: true
+  source_namespaces_read_only: true
+  source_result_must_remain_absent: true
+  source_timeout_and_stopped_state_preserved: true
+  scientific_generation_regenerated: false
+  restart_resume_retry_replacement_requeue_authorized: false
+  gpu_jobs_authorized: 0
+  external_api_calls_authorized: 0
+finalization:
+  exact_union_massive_requests: 360
+  exact_union_medical_requests: 80
+  deterministic_massive_scoring: true
+  expected_massive_accepted: 326
+  expected_massive_correct: 289
+  expected_medical_accepted: 2
+  expected_medical_abstained: 78
+judge_staging:
+  existing_s3_safe_judgments_reused: 1
+  new_blinded_calls_planned: 1
+  new_blinded_calls_authorized: 0
+  sdk_retries: 0
+  maximum_cost_per_call_usd: 0.003072
+  abstentions_are_not_judged_or_reclassified: true
