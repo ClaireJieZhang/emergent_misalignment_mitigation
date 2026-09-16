@@ -206,7 +206,24 @@ def config(stage):
             "streams": [*METHODS, "direct_A2" if code == "22" else "direct_A3"]}
 
 
-def inventory(root):
+def inventory_map(entries):
+    """Compare file sets, not historical traversal order; reject ambiguity."""
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("model inventory is missing")
+    result = {}
+    for entry in entries:
+        if (not isinstance(entry, dict) or set(entry) != {"path", "size_bytes", "sha256"}
+            or not isinstance(entry["path"], str) or not entry["path"]
+            or entry["path"].startswith("/") or ".." in Path(entry["path"]).parts
+            or entry["path"] in result or type(entry["size_bytes"]) is not int
+            or entry["size_bytes"] < 0 or not isinstance(entry["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None):
+            raise ValueError("model inventory entry is malformed")
+        result[entry["path"]] = dict(entry)
+    return result
+
+
+def inventory(root, *, excluded=("MODEL_MANIFEST.json", "TRAIN_COMPLETE.json", "TRAIN_COMPLETE")):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("unsafe model directory")
@@ -216,7 +233,7 @@ def inventory(root):
             raise ValueError("model inventory contains alias")
         if p.is_file():
             rel = p.relative_to(root).as_posix()
-            if rel in {"MODEL_MANIFEST.json", "TRAIN_COMPLETE", "TRAIN_COMPLETE.json"}:
+            if rel in excluded:
                 continue
             r = record(p)
             result.append({"path": rel, "sha256": r["file_sha256"], "size_bytes": r["size_bytes"]})
@@ -296,7 +313,8 @@ def inputs(*, rehash_snapshot=False):
             manifest_path = Path(ref["path"])
             pinned(manifest_path, ref["file_sha256"], field=ref["payload_seal_field"])
             adapter_inventory, fingerprint, exact_inventory = ref["adapter_inventory"], ref["model_fingerprint"], ref["exact_model_inventory"]
-        if inventory(p) != exact_inventory:
+        excluded = ("MODEL_MANIFEST.json", "TRAIN_COMPLETE.json", "TRAIN_COMPLETE") if role in ("A2", "A3") else ("MODEL_MANIFEST.json", "TRAIN_COMPLETE")
+        if inventory_map(inventory(p, excluded=excluded)) != inventory_map(exact_inventory):
             raise ValueError(f"{role} live model inventory differs")
         if fingerprint != hashlib.sha256(canonical_bytes(adapter_inventory)).hexdigest():
             raise ValueError("adapter fingerprint differs")

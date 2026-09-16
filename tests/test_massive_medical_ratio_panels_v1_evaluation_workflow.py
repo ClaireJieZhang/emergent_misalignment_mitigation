@@ -279,6 +279,151 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "seal"):
                 manager.training_inputs()
 
+    def test_inventory_map_ignores_only_root_first_vs_flattened_order(self):
+        entries = [{"path": name, "sha256": str(i) * 64, "size_bytes": i}
+                   for i, name in enumerate(("adapter_config.json", "adapter_model.safetensors",
+                       "tokenizer.json", "checkpoint-540/adapter_config.json", "checkpoint-540/tokenizer.json"), 1)]
+        flattened = sorted(entries, key=lambda x: x["path"])
+        self.assertNotEqual(entries, flattened)
+        self.assertEqual(manager.inventory_map(entries), manager.inventory_map(flattened))
+        self.assertEqual(manager.inventory_map(entries)["tokenizer.json"], entries[2])
+        changed = copy.deepcopy(entries)
+        changed[0]["sha256"] = "f" * 64
+        self.assertNotEqual(manager.inventory_map(entries), manager.inventory_map(changed))
+        self.assertNotEqual(manager.inventory_map(entries), manager.inventory_map(entries[:-1]))
+        extra = {"path": "extra.bin", "sha256": "e" * 64, "size_bytes": 0}
+        self.assertNotEqual(manager.inventory_map(entries), manager.inventory_map([*entries, extra]))
+
+    def test_inventory_map_rejects_ambiguous_malformed_and_unsafe_entries(self):
+        entry = {"path": "checkpoint-540/adapter_model.safetensors", "sha256": "a" * 64, "size_bytes": 42}
+        invalid = [None, {}, (), [], [None], ["file"], [entry, entry]]
+        for key, value in (("path", ""), ("path", "/absolute.bin"), ("path", "../escape.bin"),
+                           ("path", "checkpoint-540/../../escape.bin"), ("path", 7),
+                           ("size_bytes", True), ("size_bytes", False), ("size_bytes", -1), ("size_bytes", 1.5),
+                           ("size_bytes", "42"), ("sha256", "a" * 63), ("sha256", "A" * 64),
+                           ("sha256", "g" * 64), ("sha256", None)):
+            changed = dict(entry)
+            changed[key] = value
+            invalid.append([changed])
+        invalid.extend([[{k: v for k, v in entry.items() if k != "size_bytes"}], [{**entry, "extra": 1}]])
+        for entries in invalid:
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                manager.inventory_map(entries)
+
+    def test_inventory_exclusions_preserve_historical_training_complete_json(self):
+        root = self.root / "model_exclusions"
+        root.mkdir()
+        for name in ("adapter_model.safetensors", "MODEL_MANIFEST.json", "TRAIN_COMPLETE", "TRAIN_COMPLETE.json"):
+            (root / name).write_bytes(name.encode())
+        old = manager.inventory(root, excluded=("MODEL_MANIFEST.json", "TRAIN_COMPLETE"))
+        new = manager.inventory(root, excluded=("MODEL_MANIFEST.json", "TRAIN_COMPLETE.json", "TRAIN_COMPLETE"))
+        self.assertEqual({e["path"] for e in old}, {"adapter_model.safetensors", "TRAIN_COMPLETE.json"})
+        self.assertEqual({e["path"] for e in new}, {"adapter_model.safetensors"})
+
+    def five_role_input_fixture(self):
+        """Tiny real model bytes; mock only frozen external input authorities."""
+        expected, references, result = {}, {}, {"models": {}}
+        for role in ("A1", "A2", "A3", "B1", "B2"):
+            root = self.train / "models" / f"pi_{role}" if role in ("A2", "A3") else self.root / f"historical_{role}"
+            root.mkdir(parents=True)
+            names = ("adapter_config.json", "adapter_model.safetensors", "tokenizer.json",
+                     "checkpoint-540/adapter_config.json", "checkpoint-540/adapter_model.safetensors", "checkpoint-540/tokenizer.json")
+            for name in (*names, "TRAIN_COMPLETE", "TRAIN_COMPLETE.json"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"{role}:{name}".encode())
+            inventory_names = names if role in ("A2", "A3") else (*names, "TRAIN_COMPLETE.json")
+            exact = [{"path": name, "sha256": manager.sha_file(root / name), "size_bytes": (root / name).stat().st_size}
+                     for name in inventory_names]
+            adapters = [copy.deepcopy(e) for e in exact if e["path"] in names[:2]]
+            fingerprint = hashlib.sha256(manager.canonical_bytes(adapters)).hexdigest()
+            manifest_path = root / "MODEL_MANIFEST.json"
+            if role in ("A2", "A3"):
+                manifest = json_file(manifest_path, {"seed": {"A2": 8182127, "A3": 8182228}[role],
+                    "final_global_step": 540, "scientific_checkpoint": 540, "adapter_inventory": adapters,
+                    "adapter_fingerprint": fingerprint, "exact_model_inventory": exact}, sealed=True, ascii=True)
+                result["models"][role] = {"manifest_file_sha256": manager.sha_file(manifest_path),
+                                          "manifest_payload_sha256": manifest["payload_sha256"]}
+            else:
+                json_file(manifest_path, {"role": role}, sealed=True)
+                references["pi_A" if role == "A1" else f"pi_{role}"] = {
+                    "model_path": str(root), "path": str(manifest_path), "file_sha256": manager.sha_file(manifest_path),
+                    "payload_seal_field": "payload_sha256", "adapter_inventory": adapters,
+                    "model_fingerprint": fingerprint, "exact_model_inventory": exact}
+            expected[role] = {"root": root, "manifest_path": manifest_path, "inventory": exact, "fingerprint": fingerprint}
+        source = {"model_panel": {"references": references}, "manifest_payload_sha256": "frozen-source-fixture"}
+        json_file(self.source / "protocol/manifest.json", source)
+        for key, (rel, _, payload_sha) in manager.PROMPT_BINDINGS.items():
+            json_file(self.source / "protocol" / rel, {"payload_sha256": payload_sha} if payload_sha else {})
+        json_file(self.source / "generation/benefit/pi_base/massive/generation.json", {"frozen_paired_base": True})
+        return expected, source, result
+
+    def input_fixture_context(self, source, result):
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(manager, "training_inputs", return_value=({"fixed_training": True},
+            {"source": {"local_model_snapshot": {"fixed_snapshot": True}}}, result)))
+        # Read actual fixture manifests. Assertions below separately audit the
+        # unchanged frozen hash/seal arguments supplied to this authority.
+        pins = stack.enter_context(mock.patch.object(manager, "pinned", side_effect=lambda p, *a, **kw: manager.load(p)))
+        scans = stack.enter_context(mock.patch.object(manager, "inventory", wraps=manager.inventory))
+        stack.enter_context(mock.patch.object(manager, "audit_snapshot", side_effect=lambda s, **kw: s))
+        stack.enter_context(mock.patch.object(manager.importlib.metadata, "version", side_effect=lambda k: manager.RUNTIME_VERSIONS[k]))
+        return stack, pins, scans
+
+    def test_inputs_order_invariant_with_role_specific_exclusions_and_frozen_provenance(self):
+        expected, source, result = self.five_role_input_fixture()
+        stack, pins, scans = self.input_fixture_context(source, result)
+        with stack:
+            inputs = manager.inputs(rehash_snapshot=True)
+        self.assertEqual([m["role"] for m in inputs["models"]], ["A1", "A2", "A3", "B1", "B2"])
+        self.assertEqual(len(scans.call_args_list), 5)
+        pin_calls = {Path(c.args[0]): c for c in pins.call_args_list}
+        for model, scan in zip(inputs["models"], scans.call_args_list):
+            role = model["role"]
+            new = role in ("A2", "A3")
+            exclusions = ("MODEL_MANIFEST.json", "TRAIN_COMPLETE.json", "TRAIN_COMPLETE") if new else ("MODEL_MANIFEST.json", "TRAIN_COMPLETE")
+            self.assertEqual(scan.args, (expected[role]["root"],))
+            self.assertEqual(scan.kwargs, {"excluded": exclusions})
+            self.assertEqual(model["inventory"], expected[role]["inventory"])  # Retain frozen root-first order in PREP.
+            self.assertNotEqual(model["inventory"], manager.inventory(expected[role]["root"], excluded=exclusions))
+            self.assertEqual(model["adapter_fingerprint"], expected[role]["fingerprint"])
+            pin = pin_calls[expected[role]["manifest_path"]]
+            self.assertEqual(pin.args[1], manager.sha_file(expected[role]["manifest_path"]))
+            self.assertEqual(pin.kwargs, {"field": "payload_sha256", **({"ascii": True} if new else {})})
+        self.assertEqual(pin_calls[self.source / "protocol/manifest.json"].args[1], manager.SOURCE_MANIFEST_SHA)
+        for _, (rel, sha, payload_sha) in manager.PROMPT_BINDINGS.items():
+            pin = pin_calls[self.source / "protocol" / rel]
+            self.assertEqual(pin.args[1], sha)
+            self.assertEqual(pin.kwargs, {"field": "payload_sha256" if payload_sha else None})
+        base = self.source / "generation/benefit/pi_base/massive/generation.json"
+        self.assertEqual(pin_calls[base].args[1], "5a74be77b837194fb67c09d12392630a2d17f8590dd15d3713809d87f896335e")
+        self.assertFalse(inputs["reuse"]["original_panel_regenerated"])
+
+    def test_inputs_still_reject_altered_missing_extra_and_duplicated_inventory_entries(self):
+        expected, source, result = self.five_role_input_fixture()
+        root = expected["A1"]["root"]
+        path = root / "adapter_model.safetensors"
+        original = path.read_bytes()
+        stack, _, _ = self.input_fixture_context(source, result)
+        with stack:
+            path.write_bytes(original + b"tampered")
+            with self.assertRaisesRegex(ValueError, "A1 live model inventory differs"):
+                manager.inputs()
+            path.unlink()
+            with self.assertRaisesRegex(ValueError, "A1 live model inventory differs"):
+                manager.inputs()
+            path.write_bytes(original)
+            extra = root / "extra.bin"
+            extra.write_bytes(b"unexpected")
+            with self.assertRaisesRegex(ValueError, "A1 live model inventory differs"):
+                manager.inputs()
+            extra.unlink()
+            ref = source["model_panel"]["references"]["pi_A"]
+            ref["exact_model_inventory"].append(copy.deepcopy(ref["exact_model_inventory"][0]))
+            json_file(self.source / "protocol/manifest.json", source)
+            with self.assertRaisesRegex(ValueError, "inventory entry is malformed"):
+                manager.inputs()
+
     def test_atomic_exclusive_claim_only_one_thread_wins(self):
         dest = self.root / "entry.json"
         barrier = threading.Barrier(12)
