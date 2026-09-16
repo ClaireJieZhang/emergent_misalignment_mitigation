@@ -30,4 +30,3 @@ export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPYCACHEPREFIX=$root/tmp/mmu-kalai-s1-preentry-recovery-one-call-v1-pyc
 cd "$repo"
 python "$runner" status --manifest "$manifest"
-
