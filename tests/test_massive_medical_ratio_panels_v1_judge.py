@@ -662,7 +662,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         directory = self.stack.enter_context(tempfile.TemporaryDirectory(
-            prefix="mmu-ratio-judge-unit-", dir="/private/tmp"))
+            prefix="mmu-ratio-judge-unit-", dir=Path(tempfile.gettempdir()).resolve()))
         self.parent = Path(directory)
         self.output = self.parent / "new-judge"
         self.source = self.parent / "source"
@@ -924,7 +924,7 @@ class SourceChainIntegrationTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(
-            prefix="mmu-ratio-judge-source-unit-", dir="/private/tmp")))
+            prefix="mmu-ratio-judge-source-unit-", dir=Path(tempfile.gettempdir()).resolve())))
         self.current = self.root / "current"
         self.prior_root = self.root / "prior"
         self.recovery_root = self.root / "recovery"
